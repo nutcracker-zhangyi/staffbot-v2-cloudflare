@@ -1608,6 +1608,9 @@ async function handleAdminMembers(request, env, url, storeId, parts, adminId) {
         WHERE m.store_id = ? ORDER BY m.role DESC, display_name, m.telegram_id
       `, [storeId], 'members');
     }
+    const filters = await adminFilters(env, url, storeId, adminId);
+    if (!filters.ok) return json({ ok: false, error: filters.error }, filters.status);
+    const storeWhere = adminStoreWhere('m', filters.storeIds);
     const memberSort = {
       ...adminSortColumns(['store_id','telegram_id','role','status','commission_rate','cycle_start','joined_at','updated_at'], 'm'),
       display_name: 'display_name',
@@ -1629,8 +1632,8 @@ async function handleAdminMembers(request, env, url, storeId, parts, adminId) {
         m.updated_at
       FROM store_members m
       LEFT JOIN users u ON u.telegram_id = m.telegram_id
-      WHERE m.store_id = ?
-    `, `SELECT COUNT(*) AS total FROM store_members m WHERE m.store_id = ?`, [storeId], `ORDER BY m.role DESC, display_name, m.telegram_id`, memberSort);
+      WHERE ${storeWhere.sql}
+    `, `SELECT COUNT(*) AS total FROM store_members m WHERE ${storeWhere.sql}`, storeWhere.params, `ORDER BY m.role DESC, display_name, m.telegram_id`, memberSort);
     return json({ ok: true, members: result.members, pagination: { members: result.pagination } });
   }
   if (request.method === 'DELETE' && parts[5]) {
@@ -2032,8 +2035,9 @@ async function exportCsv(env, url, storeId, type, adminId) {
   const filters = await adminFilters(env, url, storeId, adminId);
   if (!filters.ok) return json({ ok: false, error: filters.error }, filters.status);
   const storeWhere = `store_id IN (${placeholders(filters.storeIds.length)})`;
+  const memberStoreWhere = adminStoreWhere('m', filters.storeIds);
   const map = {
-    'members.csv': [`SELECT m.store_id, m.telegram_id, COALESCE(NULLIF(m.display_name, ''), NULLIF(u.name, ''), NULLIF(u.username, ''), m.telegram_id) AS display_name, u.name AS telegram_name, u.username, m.role, m.status, m.commission_rate, m.cycle_start, m.joined_at, m.updated_at FROM store_members m LEFT JOIN users u ON u.telegram_id = m.telegram_id WHERE m.store_id = ?`, [storeId]],
+    'members.csv': [`SELECT m.store_id, m.telegram_id, COALESCE(NULLIF(m.display_name, ''), NULLIF(u.name, ''), NULLIF(u.username, ''), m.telegram_id) AS display_name, u.name AS telegram_name, u.username, m.role, m.status, m.commission_rate, m.cycle_start, m.joined_at, m.updated_at FROM store_members m LEFT JOIN users u ON u.telegram_id = m.telegram_id WHERE ${memberStoreWhere.sql}`, memberStoreWhere.params],
     'income.csv': [`SELECT * FROM income_records WHERE ${storeWhere}${filters.employeeId ? ' AND telegram_id = ?' : ''}${filters.monthStart ? ' AND approved_at >= ? AND approved_at < ?' : ''} ORDER BY approved_at DESC`, [...filters.storeIds, ...(filters.employeeId ? [filters.employeeId] : []), ...(filters.monthStart ? [filters.monthStart, filters.monthEnd] : [])]],
     'salary.csv': [`SELECT * FROM salary_records WHERE ${storeWhere}${filters.employeeId ? ' AND telegram_id = ?' : ''}${filters.monthStart ? ' AND approved_at >= ? AND approved_at < ?' : ''} ORDER BY approved_at DESC`, [...filters.storeIds, ...(filters.employeeId ? [filters.employeeId] : []), ...(filters.monthStart ? [filters.monthStart, filters.monthEnd] : [])]],
     'attendance.csv': [`SELECT * FROM attendance_records WHERE ${storeWhere}${filters.employeeId ? ' AND telegram_id = ?' : ''}${filters.monthDateStart ? ' AND business_date >= ? AND business_date < ?' : ''} ORDER BY timestamp DESC`, [...filters.storeIds, ...(filters.employeeId ? [filters.employeeId] : []), ...(filters.monthDateStart ? [filters.monthDateStart, filters.monthDateEnd] : [])]],
@@ -2616,6 +2620,16 @@ export function currentAdminStoreId(stores, selectedStoreIds) {
   return (selectedStoreIds && selectedStoreIds[0]) || (stores[0] && stores[0].store_id) || DEFAULT_STORE_ID;
 }
 
+export function adminStoreWhere(tableAlias, storeIds) {
+  const ids = storeIds && storeIds.length ? storeIds : [DEFAULT_STORE_ID];
+  const prefix = tableAlias ? `${tableAlias}.` : '';
+  return { sql: `${prefix}store_id IN (${placeholders(ids.length)})`, params: ids };
+}
+
+export function memberListQuery(filterQueryText, pageQueryText) {
+  return [filterQueryText, pageQueryText].filter(Boolean).join('&');
+}
+
 export function adminOrderSql(url, pageParam, allowedColumns, defaultOrderSql) {
   const prefix = String(pageParam || '').replace(/_page$/, '');
   const sort = url.searchParams.get(`${prefix}_sort`);
@@ -3103,6 +3117,9 @@ function adminHtml() {
       appendSortParams(params, tab);
       return params.toString();
     }
+    function memberListQuery(filterQueryText, pageQueryText) {
+      return [filterQueryText, pageQueryText].filter(Boolean).join('&');
+    }
     function appendSortParams(params, tab) {
       for (const [group, state] of Object.entries(sorts[tab] || {})) {
         if (!state.sort || !state.dir) continue;
@@ -3221,7 +3238,7 @@ function adminHtml() {
     }
 
     async function renderMembers() {
-      const data = await api('/api/admin/stores/' + encodeURIComponent(storeId()) + '/members?' + pageQuery('members'));
+      const data = await api('/api/admin/stores/' + encodeURIComponent(storeId()) + '/members?' + memberListQuery(filterQuery(), pageQuery('members')));
       const members = (data.members || []).map((member) => ({
         ...member,
         action: '<button data-member-edit="' + esc(member.telegram_id) + '">' + L('edit') + '</button> <button class="' + (member.status === 'active' ? 'danger' : '') + '" data-member-toggle="' + esc(member.telegram_id) + '">' + (member.status === 'active' ? L('disable') : L('enable')) + '</button> <button class="danger" data-member-delete="' + esc(member.telegram_id) + '">' + L('delete') + '</button>'
@@ -3229,7 +3246,7 @@ function adminHtml() {
       $('tab-members').innerHTML = memberFilterPanel() + '<h2>' + L('members') + '</h2>' +
         '<div class="grid"><label>' + L('telegram_id') + '<input id="memberId"></label><label>' + L('employee_name') + '<input id="memberName"></label><label>' + L('username') + '<input id="memberUsername"></label><label>' + L('role') + '<select id="memberRole"><option>employee</option><option>admin</option><option>owner</option></select></label><label>' + L('status') + '<select id="memberStatus"><option>active</option><option>pending</option><option>disabled</option></select></label><label>' + L('commission_rate') + '<input id="memberCommission" inputmode="decimal" value="60"></label></div>' +
         '<div class="row" style="margin-top:10px"><button id="saveMember">' + L('save_member') + '</button><button id="clearMember" class="secondary">' + L('clear') + '</button></div>' +
-        table(members.map((member) => ({ ...member, commission_rate: percentForDisplay(member.commission_rate) })), ['telegram_id','display_name','username','role','status','commission_rate','cycle_start','joined_at','action'], true, 'members') +
+        table(members.map((member) => ({ ...member, commission_rate: percentForDisplay(member.commission_rate) })), ['store_id','telegram_id','display_name','username','role','status','commission_rate','cycle_start','joined_at','action'], true, 'members') +
         pager('members', 'members_page', data.pagination && data.pagination.members);
       bindFilterControls();
       $('saveMember').onclick = () => withBusy($('saveMember'), async () => {

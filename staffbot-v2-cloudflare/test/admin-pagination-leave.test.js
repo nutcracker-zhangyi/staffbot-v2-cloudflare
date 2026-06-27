@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 
 import {
   adminPage,
+  adminStoreWhere,
   adminOrderSql,
   attendanceActionReplyMarkup,
   attendanceAdminActions,
@@ -12,6 +13,7 @@ import {
   formatAdminDateTime,
   makeStoreId,
   formatAdminMoney,
+  memberListQuery,
   leaveDateOptions,
   leaveMonthRange,
   validateLeaveDate,
@@ -45,6 +47,14 @@ test('uses filter store before first active store', () => {
   assert.equal(currentAdminStoreId([{ store_id: 'A' }], ['B']), 'B');
   assert.equal(currentAdminStoreId([{ store_id: 'A' }], []), 'A');
   assert.equal(currentAdminStoreId([], []), 'DEFAULT');
+});
+
+test('builds member query and SQL for all selected stores', () => {
+  assert.equal(memberListQuery('stores=A%2CB', 'members_page=2'), 'stores=A%2CB&members_page=2');
+  assert.deepEqual(adminStoreWhere('m', ['A', 'B']), {
+    sql: 'm.store_id IN (?,?)',
+    params: ['A', 'B']
+  });
 });
 
 test('builds admin sort SQL only from allowed fields', () => {
