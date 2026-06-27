@@ -1,0 +1,1 @@
+-- No-op. Admin IDs come from the ADMIN_IDS secret, not migrations.

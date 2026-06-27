@@ -1,0 +1,141 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+
+import {
+  adminPage,
+  adminOrderSql,
+  attendanceActionReplyMarkup,
+  attendanceAdminActions,
+  attendanceFineDecision,
+  currentAdminStoreId,
+  checkoutApprovalKeyboard,
+  formatAdminDateTime,
+  makeStoreId,
+  formatAdminMoney,
+  leaveDateOptions,
+  leaveMonthRange,
+  validateLeaveDate,
+  visibleAdminStores
+} from '../src/index.js';
+
+test('normalizes admin pagination to 100 rows per page', () => {
+  assert.deepEqual(adminPage('1', 250), {
+    page: 1,
+    page_size: 100,
+    total: 250,
+    total_pages: 3,
+    has_prev: false,
+    has_next: true,
+    limit: 100,
+    offset: 0
+  });
+  assert.equal(adminPage('2', 250).offset, 100);
+  assert.equal(adminPage('bad', 250).page, 1);
+});
+
+test('hides disabled stores from admin store choices', () => {
+  assert.deepEqual(visibleAdminStores([
+    { store_id: 'A', status: 'active' },
+    { store_id: 'B', status: 'disabled' },
+    { store_id: 'C' }
+  ]).map((store) => store.store_id), ['A', 'C']);
+});
+
+test('uses filter store before first active store', () => {
+  assert.equal(currentAdminStoreId([{ store_id: 'A' }], ['B']), 'B');
+  assert.equal(currentAdminStoreId([{ store_id: 'A' }], []), 'A');
+  assert.equal(currentAdminStoreId([], []), 'DEFAULT');
+});
+
+test('builds admin sort SQL only from allowed fields', () => {
+  const allowed = { amount: 'amount', approved_at: 'approved_at' };
+  assert.equal(adminOrderSql(new URL('https://x.test/?records_sort=amount&records_dir=asc'), 'records_page', allowed, 'ORDER BY approved_at DESC'), 'ORDER BY amount ASC');
+  assert.equal(adminOrderSql(new URL('https://x.test/?records_sort=amount&records_dir=desc'), 'records_page', allowed, 'ORDER BY approved_at DESC'), 'ORDER BY amount DESC');
+  assert.equal(adminOrderSql(new URL('https://x.test/?records_sort=1;DROP&records_dir=asc'), 'records_page', allowed, 'ORDER BY approved_at DESC'), 'ORDER BY approved_at DESC');
+  assert.equal(adminOrderSql(new URL('https://x.test/?records_sort=amount&records_dir=bad'), 'records_page', allowed, 'ORDER BY approved_at DESC'), 'ORDER BY approved_at DESC');
+});
+
+test('formats admin money with comma separators', () => {
+  assert.equal(formatAdminMoney(1500000), '1,500,000');
+  assert.equal(formatAdminMoney(1234.5), '1,234.5');
+  assert.equal(formatAdminMoney(''), '');
+});
+
+test('formats admin date time in store timezone', () => {
+  assert.equal(formatAdminDateTime('2026-06-24T12:34:56.000Z', 'Asia/Tokyo'), '2026/06/24 21:34:56');
+  assert.equal(formatAdminDateTime('2026-06-24', 'Asia/Tokyo'), '2026/06/24 00:00:00');
+  assert.equal(formatAdminDateTime('', 'Asia/Tokyo'), '');
+});
+
+test('validates leave date in the next one to five local days', () => {
+  const now = new Date('2026-06-22T12:00:00.000Z');
+  const store = { timezone: 'Asia/Tokyo' };
+
+  assert.deepEqual(validateLeaveDate(store, '2026-06-23', now), { ok: true, date: '2026-06-23' });
+  assert.deepEqual(validateLeaveDate(store, '2026-06-27', now), { ok: true, date: '2026-06-27' });
+  assert.equal(validateLeaveDate(store, '2026-06-22', now).ok, false);
+  assert.equal(validateLeaveDate(store, '2026-06-28', now).ok, false);
+  assert.equal(validateLeaveDate(store, '2026/06/23', now).ok, false);
+});
+
+test('validates leave date with store-specific rule settings', () => {
+  const now = new Date('2026-06-22T12:00:00.000Z');
+  const store = { timezone: 'Asia/Tokyo', leave_min_notice_days: 2, leave_max_notice_days: 3 };
+
+  assert.equal(validateLeaveDate(store, '2026-06-23', now).ok, false);
+  assert.deepEqual(validateLeaveDate(store, '2026-06-24', now), { ok: true, date: '2026-06-24' });
+  assert.deepEqual(validateLeaveDate(store, '2026-06-25', now), { ok: true, date: '2026-06-25' });
+  assert.equal(validateLeaveDate(store, '2026-06-26', now).ok, false);
+});
+
+test('builds selectable leave date options from store settings', () => {
+  const now = new Date('2026-06-22T12:00:00.000Z');
+  const store = { timezone: 'Asia/Tokyo', leave_min_notice_days: 2, leave_max_notice_days: 4 };
+
+  assert.deepEqual(leaveDateOptions(store, now), ['2026-06-24', '2026-06-25', '2026-06-26']);
+});
+
+test('returns leave month boundaries for counting monthly leave days', () => {
+  assert.deepEqual(leaveMonthRange('2026-06-23'), {
+    startDate: '2026-06-01',
+    endDate: '2026-07-01'
+  });
+});
+
+test('builds attendance action buttons without keeping reply keyboard', () => {
+  assert.deepEqual(attendanceActionReplyMarkup('STORE1', 'zh'), {
+    inline_keyboard: [[
+      { text: '上班签到', callback_data: 'att:in:STORE1' },
+      { text: '下班签退', callback_data: 'att:out:STORE1' }
+    ]]
+  });
+});
+
+test('keeps checkout approval callback data under Telegram limit', () => {
+  const requestId = 'OUT-5b24d17a-9ebf-4d1a-8754-c4fbb36c8ad4';
+  const buttons = checkoutApprovalKeyboard('DEFAULT', requestId, 1500000).flat();
+
+  assert.deepEqual(buttons.map((button) => button.callback_data), [
+    `att:af:DEFAULT:${requestId}`,
+    `att:anf:DEFAULT:${requestId}`,
+    `att:reject:DEFAULT:${requestId}`
+  ]);
+  assert.ok(buttons.every((button) => Buffer.byteLength(button.callback_data, 'utf8') <= 64));
+});
+
+test('uses split admin attendance approval actions only when a fine exists', () => {
+  assert.deepEqual(attendanceAdminActions(1500000), ['approve_fine', 'approve_no_fine', 'reject']);
+  assert.deepEqual(attendanceAdminActions(0), ['approve', 'reject']);
+});
+
+test('keeps original checkout fine when admin waives it', () => {
+  assert.deepEqual(attendanceFineDecision(1500000, false), { fine: 0, originalFine: 1500000 });
+  assert.deepEqual(attendanceFineDecision(1500000, true), { fine: 1500000, originalFine: 1500000 });
+  assert.deepEqual(attendanceFineDecision(0, false), { fine: 0, originalFine: 0 });
+});
+
+test('generates short automatic store ids', () => {
+  const id = makeStoreId();
+  assert.match(id, /^STORE_[A-F0-9]{6}$/);
+  assert.ok(id.length <= 12);
+});

@@ -1,0 +1,19 @@
+name = "staffbot-v2"
+main = "src/index.js"
+compatibility_date = "2026-06-15"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "staffbot_v2"
+database_id = "replace-with-your-d1-database-id"
+migrations_dir = "db/migrations"
+
+[vars]
+CURRENCY = "$"
+TIMEZONE = "Asia/Tokyo"
+CHECKIN_TIME = "18:30"
+CHECKOUT_TIME = "01:30"
+LATE_FINE = "0.5"
+EARLY_LEAVE_FINE = "1.5"
+# Put non-secret local defaults here only.
+# Use `wrangler secret put BOT_TOKEN`, `WEBHOOK_SECRET`, and `ADMIN_IDS`.
