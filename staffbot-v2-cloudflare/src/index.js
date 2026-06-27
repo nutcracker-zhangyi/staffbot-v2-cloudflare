@@ -2810,7 +2810,10 @@ function adminHtml() {
     .sort-btn { width:100%; padding:0; height:auto; min-height:0; border:0; background:transparent; color:inherit; font:inherit; text-align:left; cursor:pointer; }
     .sort-btn:hover:not(:disabled) { background:transparent; color:var(--accent); border-color:transparent; }
     td button { min-height:30px; padding:0 8px; font-size:12px; }
-    tbody tr:hover td { background:var(--panel-2); }
+    tbody tr:nth-child(odd) td { background:#010102; }
+    tbody tr:nth-child(even) td { background:#18191a; }
+    tbody tr:hover td { background:#242747; }
+    td.id-cell { max-width:96px; font-family:ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; color:var(--muted); }
     .row { display:flex; gap:8px; flex-wrap:wrap; align-items:center; min-width:0; }
     .muted { color:var(--muted); }
     .hidden { display:none; }
@@ -3527,13 +3530,24 @@ function adminHtml() {
     function tableCell(key, row, html) {
       if (html && key === 'action') return '<td>' + (row[key] || '') + '</td>';
       const value = formatDisplayValue(key, row[key]);
-      return '<td title="' + esc(value) + '">' + esc(value) + '</td>';
+      const compact = isCompactIdField(key);
+      return '<td' + (compact ? ' class="id-cell"' : '') + ' title="' + esc(value) + '">' + esc(compact ? compactId(value) : value) + '</td>';
     }
 
     function formatDisplayValue(key, value) {
       if (moneyFields.has(key)) return formatAdminMoneyForUi(value);
       if (isTimeField(key)) return formatAdminDateTimeForUi(value, currentStore().timezone || 'Asia/Tokyo');
       return value;
+    }
+
+    function isCompactIdField(key) {
+      return key === 'request_id' || key === 'record_id' || key === 'store_id' || key === 'admin_id';
+    }
+
+    function compactId(value) {
+      const text = String(value || '');
+      if (text.length <= 10) return text;
+      return text.slice(0, 4) + '…' + text.slice(-4);
     }
 
     function formatAdminMoneyForUi(value) {
