@@ -2771,61 +2771,62 @@ function adminHtml() {
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>StaffBot Admin</title>
   <style>
-    :root { color-scheme: light; --bg:#f8fafc; --panel:#fff; --ink:#0f172a; --muted:#64748b; --line:#e2e8f0; --soft:#f1f5f9; --soft-2:#eff6ff; --accent:#2563eb; --accent-2:#1d4ed8; --bad:#dc2626; --bad-soft:#fef2f2; --shadow:0 1px 2px rgba(15,23,42,.06); }
+    :root { color-scheme: dark; --bg:#010102; --panel:#0f1011; --panel-2:#141516; --panel-3:#18191a; --ink:#f7f8f8; --muted:#8a8f98; --muted-2:#62666d; --line:#23252a; --line-strong:#34343a; --soft:#18191a; --soft-2:#191a1b; --accent:#5e6ad2; --accent-2:#828fff; --bad:#ff6b6b; --bad-soft:#2a1416; --success:#27a644; --shadow:none; }
     * { box-sizing:border-box; }
-    body { margin:0; font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background:var(--bg); color:var(--ink); font-size:14px; font-variant-numeric:tabular-nums; }
-    header { display:flex; gap:16px; align-items:center; justify-content:space-between; padding:16px 24px; background:#fff; color:var(--ink); border-bottom:1px solid var(--line); }
-    h1 { font-size:19px; margin:0; font-weight:750; letter-spacing:0; }
-    h2 { margin:0 0 12px; font-size:15px; font-weight:750; }
-    main { max-width:1280px; margin:0 auto; padding:20px; }
-    a { color:var(--accent-2); text-decoration:none; font-weight:650; }
+    body { margin:0; font-family:"SF Pro Text", -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, system-ui, sans-serif; background:var(--bg); color:var(--ink); font-size:14px; font-variant-numeric:tabular-nums; letter-spacing:0; }
+    header { position:sticky; top:0; z-index:10; display:flex; gap:16px; align-items:center; justify-content:space-between; min-height:56px; padding:12px 24px; background:rgba(1,1,2,.92); color:var(--ink); border-bottom:1px solid var(--line); backdrop-filter:blur(16px); }
+    h1 { font-size:20px; margin:0; font-weight:650; letter-spacing:0; }
+    h2 { margin:0 0 14px; font-size:15px; font-weight:600; letter-spacing:0; }
+    main { max-width:1280px; margin:0 auto; padding:24px; }
+    a { color:var(--accent-2); text-decoration:none; font-weight:550; }
     a:hover { text-decoration:underline; }
-    .panel { background:var(--panel); border:1px solid var(--line); border-radius:8px; padding:16px; margin-bottom:14px; box-shadow:var(--shadow); }
+    .panel { background:var(--panel); border:1px solid var(--line); border-radius:12px; padding:18px; margin-bottom:16px; box-shadow:var(--shadow); }
+    .panel, .summary, .filter-panel, .table-wrap { box-shadow:inset 0 1px 0 rgba(255,255,255,.03); }
     .toolbar { display:flex; gap:10px; flex-wrap:wrap; align-items:center; justify-content:space-between; }
     .exports { display:flex; gap:8px; flex-wrap:nowrap; align-items:center; overflow:auto; padding-bottom:1px; }
-    .exports a { flex:0 0 auto; background:#fff; border:1px solid var(--line); border-radius:6px; padding:8px 10px; color:var(--ink); font-size:13px; white-space:nowrap; }
-    .exports a:hover { background:var(--soft-2); border-color:#bfdbfe; text-decoration:none; }
+    .exports a { flex:0 0 auto; background:var(--panel-2); border:1px solid var(--line); border-radius:8px; padding:8px 12px; color:var(--ink); font-size:13px; white-space:nowrap; }
+    .exports a:hover { background:var(--panel-3); border-color:var(--line-strong); text-decoration:none; }
     .grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(180px,1fr)); gap:12px; }
-    label { display:grid; gap:6px; color:var(--muted); font-size:12px; font-weight:650; min-width:0; }
-    input, select, button { height:38px; border:1px solid var(--line); border-radius:6px; padding:0 10px; font:inherit; background:#fff; color:var(--ink); }
-    input:focus, select:focus, button:focus-visible, a:focus-visible { outline:2px solid rgba(37,99,235,.24); outline-offset:2px; border-color:var(--accent); }
-    select[multiple] { height:auto; min-height:76px; padding:6px 10px; }
-    button { cursor:pointer; background:var(--accent); color:#fff; border-color:var(--accent); font-weight:650; white-space:nowrap; transition:background-color .16s ease, border-color .16s ease, color .16s ease; }
+    label { display:grid; gap:6px; color:var(--muted); font-size:12px; font-weight:500; min-width:0; }
+    input, select, button { min-height:40px; border:1px solid var(--line); border-radius:8px; padding:0 12px; font:inherit; background:var(--panel-2); color:var(--ink); }
+    input:focus, select:focus, button:focus-visible, a:focus-visible { outline:2px solid rgba(94,106,210,.5); outline-offset:2px; border-color:var(--accent); }
+    select[multiple] { height:auto; min-height:96px; padding:8px 12px; }
+    button { cursor:pointer; background:var(--accent); color:#fff; border-color:var(--accent); font-weight:550; white-space:nowrap; transition:background-color .16s ease, border-color .16s ease, color .16s ease; }
     button:hover:not(:disabled) { background:var(--accent-2); border-color:var(--accent-2); }
-    button.secondary { background:#fff; color:var(--ink); border-color:var(--line); }
-    button.secondary:hover:not(:disabled) { background:var(--soft); border-color:#cbd5e1; }
+    button.secondary { background:var(--panel); color:var(--ink); border-color:var(--line); }
+    button.secondary:hover:not(:disabled) { background:var(--panel-2); border-color:var(--line-strong); }
     button.danger { background:var(--bad-soft); color:var(--bad); border-color:#fecaca; }
     button.danger:hover:not(:disabled) { background:var(--bad); color:#fff; border-color:var(--bad); }
     button:disabled { opacity:.48; cursor:not-allowed; }
     button[aria-busy="true"] { cursor:wait; }
-    nav { display:flex; flex-wrap:nowrap; gap:4px; margin-bottom:14px; padding:4px; background:#e8eef6; border:1px solid var(--line); border-radius:8px; overflow:auto; }
-    nav button { flex:0 0 auto; height:34px; background:transparent; color:var(--muted); border-color:transparent; }
-    nav button:hover:not(:disabled) { background:#fff; color:var(--ink); border-color:transparent; }
+    nav { display:flex; flex-wrap:nowrap; gap:4px; margin-bottom:16px; padding:4px; background:var(--panel); border:1px solid var(--line); border-radius:12px; overflow:auto; }
+    nav button { flex:0 0 auto; min-height:36px; background:transparent; color:var(--muted); border-color:transparent; }
+    nav button:hover:not(:disabled) { background:var(--panel-2); color:var(--ink); border-color:transparent; }
     nav button.active { background:var(--accent); color:#fff; border-color:var(--accent); }
     table { width:max-content; min-width:100%; border-collapse:separate; border-spacing:0; font-size:13px; overflow:hidden; }
-    th, td { max-width:240px; padding:8px 9px; border-bottom:1px solid var(--line); text-align:left; vertical-align:middle; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
-    th { color:#475569; font-size:12px; font-weight:750; background:var(--soft); position:sticky; top:0; z-index:1; }
+    th, td { max-width:240px; padding:9px 10px; border-bottom:1px solid var(--line); text-align:left; vertical-align:middle; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+    th { color:var(--muted); font-size:12px; font-weight:600; background:var(--panel-2); position:sticky; top:0; z-index:1; }
     th:last-child, td:last-child { max-width:none; }
     .sort-btn { width:100%; padding:0; height:auto; min-height:0; border:0; background:transparent; color:inherit; font:inherit; text-align:left; cursor:pointer; }
     .sort-btn:hover:not(:disabled) { background:transparent; color:var(--accent); border-color:transparent; }
-    td button { height:30px; padding:0 8px; font-size:12px; }
-    tbody tr:hover td { background:#f8fbff; }
+    td button { min-height:30px; padding:0 8px; font-size:12px; }
+    tbody tr:hover td { background:var(--panel-2); }
     .row { display:flex; gap:8px; flex-wrap:wrap; align-items:center; min-width:0; }
     .muted { color:var(--muted); }
     .hidden { display:none; }
     .status { min-height:20px; color:var(--muted); font-size:13px; }
     .pager { display:flex; gap:8px; flex-wrap:wrap; align-items:center; justify-content:flex-end; padding-top:10px; color:var(--muted); font-size:13px; }
-    .pager button { height:32px; padding:0 9px; }
-    .table-wrap { overflow:auto; border:1px solid var(--line); border-radius:8px; background:#fff; }
+    .pager button { min-height:32px; padding:0 9px; }
+    .table-wrap { overflow:auto; border:1px solid var(--line); border-radius:12px; background:var(--panel); }
     .section-title { display:flex; align-items:center; justify-content:space-between; gap:10px; margin-top:16px; }
-    .summary, .filter-panel { border:1px solid var(--line); border-radius:8px; padding:12px; margin-bottom:12px; background:#fff; }
-    .filter-panel { background:#fbfdff; }
+    .summary, .filter-panel { border:1px solid var(--line); border-radius:12px; padding:14px; margin-bottom:14px; background:var(--panel); }
+    .filter-panel { background:var(--panel-2); }
     .summary-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(180px,1fr)); gap:10px; }
-    .summary-card { min-width:0; border:1px solid var(--line); border-radius:8px; padding:10px 12px; background:var(--soft); }
+    .summary-card { min-width:0; border:1px solid var(--line); border-radius:12px; padding:12px; background:var(--soft); }
     .summary-card strong { display:block; color:var(--muted); font-size:12px; margin-bottom:4px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
-    .summary-value { color:var(--ink); font-size:18px; font-weight:750; }
+    .summary-value { color:var(--ink); font-size:20px; font-weight:600; }
     .summary-detail { margin-top:4px; font-size:12px; line-height:1.45; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
-    @media (max-width: 720px) { main { padding:12px; } table { min-width:820px; } header { align-items:flex-start; flex-direction:column; padding:14px 12px; } .toolbar { align-items:stretch; } }
+    @media (max-width: 720px) { main { padding:12px; } table { min-width:820px; } header { align-items:flex-start; flex-direction:column; padding:14px 12px; } .toolbar { align-items:stretch; } input, select, button { min-height:44px; } nav button { min-height:40px; } }
   </style>
 </head>
 <body>
