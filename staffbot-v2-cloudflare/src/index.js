@@ -2830,6 +2830,7 @@ function adminHtml() {
     .store-chip { min-height:34px; background:var(--panel); color:var(--ink); border-color:var(--line); }
     .store-chip:hover:not(:disabled) { background:var(--panel-3); border-color:var(--line-strong); }
     .store-chip.active { background:#242747; border-color:var(--accent); color:#fff; }
+    .store-chip.active:hover:not(:disabled) { background:#2b2f58; border-color:var(--accent-2); color:#fff; }
     .summary-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(180px,1fr)); gap:10px; }
     .summary-card { min-width:0; border:1px solid var(--line); border-radius:12px; padding:12px; background:var(--soft); }
     .summary-card strong { display:block; color:var(--muted); font-size:12px; margin-bottom:4px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
