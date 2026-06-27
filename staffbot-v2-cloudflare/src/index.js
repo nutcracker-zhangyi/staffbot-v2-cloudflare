@@ -3222,7 +3222,7 @@ function adminHtml() {
       $('tab-members').innerHTML = await filterPanel(false) + '<h2>' + L('members') + '</h2>' +
         '<div class="grid"><label>' + L('telegram_id') + '<input id="memberId"></label><label>' + L('employee_name') + '<input id="memberName"></label><label>' + L('username') + '<input id="memberUsername"></label><label>' + L('role') + '<select id="memberRole"><option>employee</option><option>admin</option><option>owner</option></select></label><label>' + L('status') + '<select id="memberStatus"><option>active</option><option>pending</option><option>disabled</option></select></label><label>' + L('commission_rate') + '<input id="memberCommission" inputmode="decimal" value="60"></label></div>' +
         '<div class="row" style="margin-top:10px"><button id="saveMember">' + L('save_member') + '</button><button id="clearMember" class="secondary">' + L('clear') + '</button></div>' +
-        table(members.map((member) => ({ ...member, commission_rate: percentForDisplay(member.commission_rate) })), ['telegram_id','display_name','telegram_name','username','role','status','commission_rate','cycle_start','joined_at','action'], true, 'members') +
+        table(members.map((member) => ({ ...member, commission_rate: percentForDisplay(member.commission_rate) })), ['telegram_id','display_name','username','role','status','commission_rate','cycle_start','joined_at','action'], true, 'members') +
         pager('members', 'members_page', data.pagination && data.pagination.members);
       bindFilterControls();
       $('saveMember').onclick = () => withBusy($('saveMember'), async () => {
