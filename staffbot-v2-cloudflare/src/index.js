@@ -2824,12 +2824,18 @@ function adminHtml() {
     .section-title { display:flex; align-items:center; justify-content:space-between; gap:10px; margin-top:16px; }
     .summary, .filter-panel { border:1px solid var(--line); border-radius:12px; padding:14px; margin-bottom:14px; background:var(--panel); }
     .filter-panel { background:var(--panel-2); }
+    .member-filter { display:flex; gap:12px; align-items:flex-end; justify-content:space-between; flex-wrap:wrap; }
+    .filter-field { display:grid; gap:6px; color:var(--muted); font-size:12px; font-weight:500; min-width:0; }
+    .store-chips { display:flex; gap:8px; flex-wrap:wrap; }
+    .store-chip { min-height:34px; background:var(--panel); color:var(--ink); border-color:var(--line); }
+    .store-chip:hover:not(:disabled) { background:var(--panel-3); border-color:var(--line-strong); }
+    .store-chip.active { background:#242747; border-color:var(--accent); color:#fff; }
     .summary-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(180px,1fr)); gap:10px; }
     .summary-card { min-width:0; border:1px solid var(--line); border-radius:12px; padding:12px; background:var(--soft); }
     .summary-card strong { display:block; color:var(--muted); font-size:12px; margin-bottom:4px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
     .summary-value { color:var(--ink); font-size:20px; font-weight:600; }
     .summary-detail { margin-top:4px; font-size:12px; line-height:1.45; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
-    @media (max-width: 720px) { main { padding:12px; } table { min-width:820px; } header { align-items:flex-start; flex-direction:column; padding:14px 12px; } .toolbar { align-items:stretch; } input, select, button { min-height:44px; } nav button { min-height:40px; } }
+    @media (max-width: 720px) { main { padding:12px; } table { min-width:820px; } header { align-items:flex-start; flex-direction:column; padding:14px 12px; } .toolbar, .member-filter { align-items:stretch; } .member-filter > * { width:100%; } input, select, button { min-height:44px; } nav button { min-height:40px; } }
   </style>
 </head>
 <body>
@@ -3219,7 +3225,7 @@ function adminHtml() {
         ...member,
         action: '<button data-member-edit="' + esc(member.telegram_id) + '">' + L('edit') + '</button> <button class="' + (member.status === 'active' ? 'danger' : '') + '" data-member-toggle="' + esc(member.telegram_id) + '">' + (member.status === 'active' ? L('disable') : L('enable')) + '</button> <button class="danger" data-member-delete="' + esc(member.telegram_id) + '">' + L('delete') + '</button>'
       }));
-      $('tab-members').innerHTML = await filterPanel(false) + '<h2>' + L('members') + '</h2>' +
+      $('tab-members').innerHTML = memberFilterPanel() + '<h2>' + L('members') + '</h2>' +
         '<div class="grid"><label>' + L('telegram_id') + '<input id="memberId"></label><label>' + L('employee_name') + '<input id="memberName"></label><label>' + L('username') + '<input id="memberUsername"></label><label>' + L('role') + '<select id="memberRole"><option>employee</option><option>admin</option><option>owner</option></select></label><label>' + L('status') + '<select id="memberStatus"><option>active</option><option>pending</option><option>disabled</option></select></label><label>' + L('commission_rate') + '<input id="memberCommission" inputmode="decimal" value="60"></label></div>' +
         '<div class="row" style="margin-top:10px"><button id="saveMember">' + L('save_member') + '</button><button id="clearMember" class="secondary">' + L('clear') + '</button></div>' +
         table(members.map((member) => ({ ...member, commission_rate: percentForDisplay(member.commission_rate) })), ['telegram_id','display_name','username','role','status','commission_rate','cycle_start','joined_at','action'], true, 'members') +
@@ -3408,6 +3414,17 @@ function adminHtml() {
         '</div>';
     }
 
+    function memberFilterPanel() {
+      const selectedStores = new Set(activeFilterStores());
+      return '<div class="filter-panel member-filter">' +
+        '<div><h2>' + L('filter') + '</h2>' +
+        '<div class="filter-field"><span>' + L('stores_filter') + '</span><div class="store-chips" id="filterStores">' +
+        stores.map((store) => '<button type="button" class="store-chip' + (selectedStores.has(store.store_id) ? ' active' : '') + '" data-store-filter="' + esc(store.store_id) + '" aria-pressed="' + (selectedStores.has(store.store_id) ? 'true' : 'false') + '">' + esc(store.name) + '</button>').join('') +
+        '</div></div></div>' +
+        '<button id="applyFilters">' + L('search') + '</button>' +
+        '</div>';
+    }
+
     async function loadFilterMembers(storeIds) {
       const byId = new Map();
       for (const id of storeIds) {
@@ -3428,18 +3445,33 @@ function adminHtml() {
         if ($('filterMonthFrom')) filters.monthFrom = $('filterMonthFrom').value;
         if ($('filterMonthTo')) filters.monthTo = $('filterMonthTo').value;
         filters.employee = $('filterEmployee') ? $('filterEmployee').value || 'all' : 'all';
-        filters.stores = Array.from($('filterStores').selectedOptions).map((option) => option.value);
+        filters.stores = selectedFilterStores();
         resetPages(currentTab);
         updateExportLinks();
         await loadTab();
       });
-      $('filterStores').onchange = async () => {
-        filters.stores = Array.from($('filterStores').selectedOptions).map((option) => option.value);
-        filters.employee = 'all';
-        resetPages(currentTab);
-        updateExportLinks();
-        await loadTab();
-      };
+      if ($('filterStores').tagName === 'SELECT') {
+        $('filterStores').onchange = async () => {
+          filters.stores = selectedFilterStores();
+          filters.employee = 'all';
+          resetPages(currentTab);
+          updateExportLinks();
+          await loadTab();
+        };
+      } else {
+        document.querySelectorAll('[data-store-filter]').forEach((btn) => {
+          btn.onclick = () => {
+            btn.classList.toggle('active');
+            btn.setAttribute('aria-pressed', btn.classList.contains('active') ? 'true' : 'false');
+          };
+        });
+      }
+    }
+
+    function selectedFilterStores() {
+      if (!$('filterStores')) return [];
+      if ($('filterStores').tagName === 'SELECT') return Array.from($('filterStores').selectedOptions).map((option) => option.value);
+      return Array.from(document.querySelectorAll('[data-store-filter].active')).map((btn) => btn.dataset.storeFilter);
     }
 
     function actionTable(rows, cols, type, sortGroup) {
