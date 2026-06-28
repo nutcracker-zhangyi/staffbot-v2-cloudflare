@@ -3423,12 +3423,12 @@ function adminHtml() {
       return '<div class="filter-panel">' +
         '<h2>' + L('filter') + '</h2>' +
         '<div class="grid">' +
-        (includeEmployeeFilters ? '<label>' + L('month_from') + '<input id="filterMonthFrom" type="month" value="' + esc(filters.monthFrom) + '"></label>' +
-        '<label>' + L('month_to') + '<input id="filterMonthTo" type="month" value="' + esc(filters.monthTo) + '"></label>' +
-        '<label>' + L('employee') + '<select id="filterEmployee"><option value="all">' + L('all_employees') + '</option>' + members.map((member) => '<option value="' + esc(member.telegram_id) + '"' + (filters.employee === member.telegram_id ? ' selected' : '') + '>' + esc(member.display_name + ' (' + member.telegram_id + ')') + '</option>').join('') + '</select></label>' : '') +
-        '<label>' + L('stores_filter') + '<select id="filterStores" multiple size="' + Math.min(Math.max(stores.length, 2), 6) + '">' + stores.map((store) => '<option value="' + esc(store.store_id) + '"' + (selectedStores.has(store.store_id) ? ' selected' : '') + '>' + esc(store.name) + '</option>').join('') + '</select></label>' +
+        (includeEmployeeFilters ? '<label>' + L('month_from') + '<input data-filter-month-from type="month" value="' + esc(filters.monthFrom) + '"></label>' +
+        '<label>' + L('month_to') + '<input data-filter-month-to type="month" value="' + esc(filters.monthTo) + '"></label>' +
+        '<label>' + L('employee') + '<select data-filter-employee><option value="all">' + L('all_employees') + '</option>' + members.map((member) => '<option value="' + esc(member.telegram_id) + '"' + (filters.employee === member.telegram_id ? ' selected' : '') + '>' + esc(member.display_name + ' (' + member.telegram_id + ')') + '</option>').join('') + '</select></label>' : '') +
+        '<label>' + L('stores_filter') + '<select data-filter-stores multiple size="' + Math.min(Math.max(stores.length, 2), 6) + '">' + stores.map((store) => '<option value="' + esc(store.store_id) + '"' + (selectedStores.has(store.store_id) ? ' selected' : '') + '>' + esc(store.name) + '</option>').join('') + '</select></label>' +
         '</div>' +
-        '<div class="row" style="margin-top:10px"><button id="applyFilters">' + L('search') + '</button></div>' +
+        '<div class="row" style="margin-top:10px"><button data-apply-filters>' + L('search') + '</button></div>' +
         '</div>';
     }
 
@@ -3436,10 +3436,10 @@ function adminHtml() {
       const selectedStores = new Set(activeFilterStores());
       return '<div class="filter-panel member-filter">' +
         '<div><h2>' + L('filter') + '</h2>' +
-        '<div class="filter-field"><span>' + L('stores_filter') + '</span><div class="store-chips" id="filterStores">' +
+        '<div class="filter-field"><span>' + L('stores_filter') + '</span><div class="store-chips" data-filter-stores>' +
         stores.map((store) => '<button type="button" class="store-chip' + (selectedStores.has(store.store_id) ? ' active' : '') + '" data-store-filter="' + esc(store.store_id) + '" aria-pressed="' + (selectedStores.has(store.store_id) ? 'true' : 'false') + '">' + esc(store.name) + '</button>').join('') +
         '</div></div></div>' +
-        '<button id="applyFilters">' + L('search') + '</button>' +
+        '<button data-apply-filters>' + L('search') + '</button>' +
         '</div>';
     }
 
@@ -3459,18 +3459,25 @@ function adminHtml() {
     }
 
     function bindFilterControls() {
-      $('applyFilters').onclick = () => withBusy($('applyFilters'), async () => {
-        if ($('filterMonthFrom')) filters.monthFrom = $('filterMonthFrom').value;
-        if ($('filterMonthTo')) filters.monthTo = $('filterMonthTo').value;
-        filters.employee = $('filterEmployee') ? $('filterEmployee').value || 'all' : 'all';
-        filters.stores = selectedFilterStores();
+      const root = $('tab-' + currentTab);
+      const applyButton = root && root.querySelector('[data-apply-filters]');
+      const storeFilter = root && root.querySelector('[data-filter-stores]');
+      if (!applyButton || !storeFilter) return;
+      applyButton.onclick = () => withBusy(applyButton, async () => {
+        const monthFrom = root.querySelector('[data-filter-month-from]');
+        const monthTo = root.querySelector('[data-filter-month-to]');
+        const employee = root.querySelector('[data-filter-employee]');
+        if (monthFrom) filters.monthFrom = monthFrom.value;
+        if (monthTo) filters.monthTo = monthTo.value;
+        filters.employee = employee ? employee.value || 'all' : 'all';
+        filters.stores = selectedFilterStores(root);
         resetPages(currentTab);
         updateExportLinks();
         await loadTab();
       });
-      if ($('filterStores').tagName === 'SELECT') {
-        $('filterStores').onchange = async () => {
-          filters.stores = selectedFilterStores();
+      if (storeFilter.tagName === 'SELECT') {
+        storeFilter.onchange = async () => {
+          filters.stores = selectedFilterStores(root);
           filters.employee = 'all';
           resetPages(currentTab);
           updateExportLinks();
@@ -3486,10 +3493,11 @@ function adminHtml() {
       }
     }
 
-    function selectedFilterStores() {
-      if (!$('filterStores')) return [];
-      if ($('filterStores').tagName === 'SELECT') return Array.from($('filterStores').selectedOptions).map((option) => option.value);
-      return Array.from(document.querySelectorAll('[data-store-filter].active')).map((btn) => btn.dataset.storeFilter);
+    function selectedFilterStores(root = $('tab-' + currentTab)) {
+      const storeFilter = root && root.querySelector('[data-filter-stores]');
+      if (!storeFilter) return [];
+      if (storeFilter.tagName === 'SELECT') return Array.from(storeFilter.selectedOptions).map((option) => option.value);
+      return Array.from(root.querySelectorAll('[data-store-filter].active')).map((btn) => btn.dataset.storeFilter);
     }
 
     function actionTable(rows, cols, type, sortGroup) {
