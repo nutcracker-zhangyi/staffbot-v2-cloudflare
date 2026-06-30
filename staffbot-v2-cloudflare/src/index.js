@@ -19,9 +19,9 @@ const TEXT = {
   lang_set: { zh: '语言已设置为中文。', en: 'Language set to English.', vi: 'Đã chọn Tiếng Việt.' },
   welcome: { zh: '欢迎使用员工管理机器人。请选择操作：', en: 'Welcome to the Staff Bot. Choose an action:', vi: 'Chào mừng bạn đến với Staff Bot. Vui lòng chọn:' },
   help: {
-    zh: '可用命令：\n/store - 切换店铺\n/income - 提交收入\n/total - 查看总收入\n/salary - 申请工资\n/attendance - 打卡\n/leave - 请假\n/lang - 切换语言\n/cancel - 取消当前流程\n/ping - 测试机器人',
-    en: 'Commands:\n/store - Switch store\n/income - Submit income\n/total - Total income\n/salary - Request salary\n/attendance - Attendance\n/leave - Request leave\n/lang - Change language\n/cancel - Cancel current flow\n/ping - Test bot',
-    vi: 'Lệnh:\n/store - Đổi cửa hàng\n/income - Nộp thu nhập\n/total - Tổng thu nhập\n/salary - Yêu cầu lương\n/attendance - Chấm công\n/leave - Xin nghỉ\n/lang - Đổi ngôn ngữ\n/cancel - Hủy thao tác\n/ping - Kiểm tra bot'
+    zh: '可用命令：\n/store - 切换店铺\n/income - 提交收入\n/total - 查看总收入\n/salary - 申请工资\n/advance - 预支薪资\n/attendance - 打卡\n/leave - 请假\n/lang - 切换语言\n/cancel - 取消当前流程\n/ping - 测试机器人',
+    en: 'Commands:\n/store - Switch store\n/income - Submit income\n/total - Total income\n/salary - Request salary\n/advance - Salary advance\n/attendance - Attendance\n/leave - Request leave\n/lang - Change language\n/cancel - Cancel current flow\n/ping - Test bot',
+    vi: 'Lệnh:\n/store - Đổi cửa hàng\n/income - Nộp thu nhập\n/total - Tổng thu nhập\n/salary - Yêu cầu lương\n/advance - Ứng lương\n/attendance - Chấm công\n/leave - Xin nghỉ\n/lang - Đổi ngôn ngữ\n/cancel - Hủy thao tác\n/ping - Kiểm tra bot'
   },
   cancelled: { zh: '已取消当前流程。', en: 'Cancelled.', vi: 'Đã hủy thao tác.' },
   unknown: { zh: '无法识别。发送 /start 查看可用命令。', en: 'Unknown command. Send /start for help.', vi: 'Không hiểu lệnh. Gửi /start để xem hướng dẫn.' },
@@ -42,6 +42,7 @@ const TEXT = {
   btn_income: { zh: '提交收入', en: 'Submit Income', vi: 'Nộp thu nhập' },
   btn_total: { zh: '总收入', en: 'Total Income', vi: 'Tổng thu nhập' },
   btn_salary: { zh: '申请工资', en: 'Request Salary', vi: 'Yêu cầu lương' },
+  btn_advance: { zh: '预支薪资', en: 'Salary Advance', vi: 'Ứng lương' },
   btn_attendance: { zh: '打卡', en: 'Attendance', vi: 'Chấm công' },
   btn_leave: { zh: '请假', en: 'Leave', vi: 'Xin nghỉ' },
   btn_cancel: { zh: '取消', en: 'Cancel', vi: 'Hủy' },
@@ -53,6 +54,7 @@ const TEXT = {
   btn_share_location: { zh: '分享当前位置', en: 'Share Current Location', vi: 'Chia sẻ vị trí hiện tại' },
   ask_income: { zh: '请输入收入金额，例如：2000', en: 'Enter income amount, e.g. 2000', vi: 'Nhập số tiền thu nhập, ví dụ: 2000', ru: 'Введите сумму дохода, например: 2000' },
   ask_fine: { zh: '请输入罚款金额，没有罚款请输入 0', en: 'Enter fine amount, or 0 if none', vi: 'Nhập tiền phạt, nếu không có nhập 0', ru: 'Введите сумму штрафа или 0, если штрафа нет' },
+  ask_advance: { zh: '请输入预支薪资金额：', en: 'Enter salary advance amount:', vi: 'Nhập số tiền ứng lương:' },
   vnd_income_hint: {
     zh: '例如如果收入是300万越南盾的话，请输入3',
     en: 'For example, if income is 3,000,000 VND, enter 3.',
@@ -65,10 +67,16 @@ const TEXT = {
     vi: 'Tiền phạt VND cũng nhập theo triệu, ví dụ 500.000 VND nhập 0.5.',
     ru: 'Штрафы в VND тоже вводятся в миллионах, например 500 000 VND как 0.5.'
   },
+  vnd_advance_hint: {
+    zh: '越南盾预支也按百万输入，例如50万请输入0.5',
+    en: 'Enter VND advances in millions too, e.g. 500,000 VND as 0.5.',
+    vi: 'Ứng lương VND cũng nhập theo triệu, ví dụ 500.000 VND nhập 0.5.',
+    ru: 'Авансы в VND тоже вводятся в миллионах, например 500 000 VND как 0.5.'
+  },
   invalid_income: { zh: '收入金额无效，请输入正数，例如：2000', en: 'Invalid income. Enter a positive number, e.g. 2000', vi: 'Thu nhập không hợp lệ. Nhập số dương, ví dụ: 2000' },
   invalid_fine: { zh: '罚款金额无效，请输入 0 或正数。', en: 'Invalid fine. Enter 0 or a positive number.', vi: 'Tiền phạt không hợp lệ. Nhập 0 hoặc số dương.' },
-  income_submitted: { zh: '已提交审核。\n收入：{income}\n提成比例：{commission}\n提成收入：{commission_income}\n罚款：{fine}\n店铺：{store}\n管理员审核后会通知你。', en: 'Submitted for approval.\nIncome: {income}\nCommission: {commission}\nCommission income: {commission_income}\nFine: {fine}\nStore: {store}\nYou will be notified after review.', vi: 'Đã gửi để duyệt.\nThu nhập: {income}\nTỷ lệ hoa hồng: {commission}\nThu nhập hoa hồng: {commission_income}\nPhạt: {fine}\nCửa hàng: {store}' },
-  income_approved: { zh: '你的收入已批准。\n收入：{income}\n提成比例：{commission}\n提成收入：{commission_income}\n罚款：{fine}', en: 'Your income was approved.\nIncome: {income}\nCommission: {commission}\nCommission income: {commission_income}\nFine: {fine}', vi: 'Thu nhập của bạn đã được duyệt.\nThu nhập: {income}\nTỷ lệ hoa hồng: {commission}\nThu nhập hoa hồng: {commission_income}\nPhạt: {fine}' },
+  income_submitted: { zh: '已提交审核。\n收入：{income}\n提成比例：{commission}\n提成收入：{commission_income}\n店铺：{store}\n管理员审核后会通知你。', en: 'Submitted for approval.\nIncome: {income}\nCommission: {commission}\nCommission income: {commission_income}\nStore: {store}\nYou will be notified after review.', vi: 'Đã gửi để duyệt.\nThu nhập: {income}\nTỷ lệ hoa hồng: {commission}\nThu nhập hoa hồng: {commission_income}\nCửa hàng: {store}' },
+  income_approved: { zh: '你的收入已批准。\n收入：{income}\n提成比例：{commission}\n提成收入：{commission_income}', en: 'Your income was approved.\nIncome: {income}\nCommission: {commission}\nCommission income: {commission_income}', vi: 'Thu nhập của bạn đã được duyệt.\nThu nhập: {income}\nTỷ lệ hoa hồng: {commission}\nThu nhập hoa hồng: {commission_income}' },
   income_rejected: { zh: '你的收入提交已被驳回。\n原因：{reason}', en: 'Your income submission was rejected.\nReason: {reason}', vi: 'Đơn thu nhập bị từ chối.\nLý do: {reason}' },
   ask_reject_reason: { zh: '请输入驳回原因，或发送 /cancel 取消：', en: 'Enter rejection reason, or send /cancel:', vi: 'Nhập lý do từ chối, hoặc gửi /cancel:' },
   reject_recorded: { zh: '驳回已记录，员工已收到通知。', en: 'Rejection recorded and employee notified.', vi: 'Đã ghi nhận từ chối và thông báo cho nhân viên.' },
@@ -79,6 +87,12 @@ const TEXT = {
   salary_submitted: { zh: '工资申请已提交，审核后会通知你。', en: 'Salary request submitted.', vi: 'Đã gửi yêu cầu lương.' },
   salary_approved: { zh: '你的工资申请已批准。\n金额：{amount}\n周期：{start} ~ {end}\n新周期已开始。', en: 'Salary approved.\nAmount: {amount}\nPeriod: {start} ~ {end}\nA new cycle has started.', vi: 'Lương đã được duyệt.\nSố tiền: {amount}\nKỳ: {start} ~ {end}' },
   salary_rejected: { zh: '你的工资申请已被驳回。\n原因：{reason}', en: 'Salary request rejected.\nReason: {reason}', vi: 'Yêu cầu lương bị từ chối.\nLý do: {reason}' },
+  advance_pending: { zh: '你已有待审核的预支薪资申请，请等待审核。', en: 'You already have a pending salary advance request.', vi: 'Bạn đã có yêu cầu ứng lương đang chờ duyệt.' },
+  invalid_advance: { zh: '预支金额无效，请输入正数。', en: 'Invalid salary advance amount. Enter a positive number.', vi: 'Số tiền ứng lương không hợp lệ. Nhập số dương.' },
+  advance_exceeds_salary: { zh: '预支金额不能超过当前可申请工资：{amount}', en: 'Salary advance cannot exceed current requestable salary: {amount}', vi: 'Ứng lương không được vượt quá lương có thể yêu cầu hiện tại: {amount}' },
+  advance_submitted: { zh: '预支薪资申请已提交，审核后会通知你。\n金额：{amount}', en: 'Salary advance request submitted.\nAmount: {amount}', vi: 'Đã gửi yêu cầu ứng lương.\nSố tiền: {amount}' },
+  advance_approved: { zh: '你的预支薪资申请已批准。\n金额：{amount}\n该金额已从当前应付工资中扣除。', en: 'Salary advance approved.\nAmount: {amount}\nThis amount has been deducted from current payable salary.', vi: 'Ứng lương đã được duyệt.\nSố tiền: {amount}\nSố tiền này đã được trừ vào lương hiện tại.' },
+  advance_rejected: { zh: '你的预支薪资申请已被驳回。\n原因：{reason}', en: 'Salary advance request rejected.\nReason: {reason}', vi: 'Yêu cầu ứng lương bị từ chối.\nLý do: {reason}' },
   ask_location: { zh: '请分享当前位置以继续：', en: 'Please share your current location:', vi: 'Vui lòng chia sẻ vị trí hiện tại:' },
   location_received: { zh: '位置已收到。', en: 'Location received.', vi: 'Đã nhận vị trí.' },
   choose_attendance_action: { zh: '请选择签到或签退：', en: 'Choose check-in or checkout:', vi: 'Chọn vào ca hoặc ra ca:' },
@@ -109,7 +123,7 @@ const RU_TEXT = {
   choose_lang: 'Выберите язык:',
   lang_set: 'Язык изменен на русский.',
   welcome: 'Добро пожаловать в Staff Bot. Выберите действие:',
-  help: 'Команды:\n/store - сменить магазин\n/income - отправить доход\n/total - общий доход\n/salary - запросить зарплату\n/attendance - посещаемость\n/leave - отпуск\n/lang - сменить язык\n/cancel - отменить текущий процесс\n/ping - проверить бота',
+  help: 'Команды:\n/store - сменить магазин\n/income - отправить доход\n/total - общий доход\n/salary - запросить зарплату\n/advance - аванс зарплаты\n/attendance - посещаемость\n/leave - отпуск\n/lang - сменить язык\n/cancel - отменить текущий процесс\n/ping - проверить бота',
   cancelled: 'Текущий процесс отменен.',
   unknown: 'Команда не распознана. Отправьте /start для списка команд.',
   no_permission: 'У вас нет доступа.',
@@ -129,6 +143,7 @@ const RU_TEXT = {
   btn_income: 'Отправить доход',
   btn_total: 'Общий доход',
   btn_salary: 'Запросить зарплату',
+  btn_advance: 'Аванс зарплаты',
   btn_attendance: 'Посещаемость',
   btn_leave: 'Отпуск',
   btn_cancel: 'Отмена',
@@ -140,10 +155,11 @@ const RU_TEXT = {
   btn_share_location: 'Поделиться текущей геопозицией',
   ask_income: 'Введите сумму дохода, например: 2000',
   ask_fine: 'Введите сумму штрафа или 0, если штрафа нет',
+  ask_advance: 'Введите сумму аванса зарплаты:',
   invalid_income: 'Некорректная сумма дохода. Введите положительное число, например: 2000',
   invalid_fine: 'Некорректный штраф. Введите 0 или положительное число.',
-  income_submitted: 'Отправлено на проверку.\nДоход: {income}\nКомиссия: {commission}\nКомиссионный доход: {commission_income}\nШтраф: {fine}\nМагазин: {store}\nВы получите уведомление после проверки.',
-  income_approved: 'Ваш доход одобрен.\nДоход: {income}\nКомиссия: {commission}\nКомиссионный доход: {commission_income}\nШтраф: {fine}',
+  income_submitted: 'Отправлено на проверку.\nДоход: {income}\nКомиссия: {commission}\nКомиссионный доход: {commission_income}\nМагазин: {store}\nВы получите уведомление после проверки.',
+  income_approved: 'Ваш доход одобрен.\nДоход: {income}\nКомиссия: {commission}\nКомиссионный доход: {commission_income}',
   income_rejected: 'Ваш доход отклонен.\nПричина: {reason}',
   ask_reject_reason: 'Введите причину отклонения или отправьте /cancel:',
   reject_recorded: 'Отклонение сохранено, сотрудник уведомлен.',
@@ -154,6 +170,12 @@ const RU_TEXT = {
   salary_submitted: 'Запрос зарплаты отправлен.',
   salary_approved: 'Зарплата одобрена.\nСумма: {amount}\nПериод: {start} ~ {end}\nНачался новый цикл.',
   salary_rejected: 'Запрос зарплаты отклонен.\nПричина: {reason}',
+  advance_pending: 'У вас уже есть ожидающий запрос аванса зарплаты.',
+  invalid_advance: 'Некорректная сумма аванса. Введите положительное число.',
+  advance_exceeds_salary: 'Аванс не может превышать доступную зарплату: {amount}',
+  advance_submitted: 'Запрос аванса зарплаты отправлен.\nСумма: {amount}',
+  advance_approved: 'Аванс зарплаты одобрен.\nСумма: {amount}\nЭта сумма вычтена из текущей зарплаты к выплате.',
+  advance_rejected: 'Запрос аванса зарплаты отклонен.\nПричина: {reason}',
   ask_location: 'Поделитесь текущей геопозицией:',
   location_received: 'Геопозиция получена.',
   choose_attendance_action: 'Выберите начало или конец смены:',
@@ -299,6 +321,14 @@ async function handleMessage(message, env) {
   if (state && state.state === 'WAIT_SALARY_REJECT_REASON') {
     return finishSalaryReject(env, userId, chatId, state.data.store_id, state.data.request_id, text, lang);
   }
+  if (state && state.state === 'WAIT_ADVANCE_AMOUNT') {
+    const stateStore = await getStoreForMember(env, state.data.store_id, userId);
+    if (!stateStore) return sendMessage(env, chatId, t(lang, 'no_store'));
+    return handleSalaryAdvanceAmount(env, stateStore, userId, chatId, text, lang);
+  }
+  if (state && state.state === 'WAIT_ADVANCE_REJECT_REASON') {
+    return finishSalaryAdvanceReject(env, userId, chatId, state.data.store_id, state.data.request_id, text, lang);
+  }
   if (state && state.state === 'WAIT_LEAVE_DATE') {
     const stateStore = await getStoreForMember(env, state.data.store_id, userId);
     if (!stateStore) return sendMessage(env, chatId, t(lang, 'no_store'));
@@ -331,6 +361,10 @@ async function handleMessage(message, env) {
 
   if (isSalaryCommand(text, lang)) {
     return startSalary(env, store, userId, chatId, lang);
+  }
+
+  if (isSalaryAdvanceCommand(text, lang)) {
+    return startSalaryAdvance(env, store, userId, chatId, lang);
   }
 
   if (isAttendanceCommand(text, lang)) {
@@ -419,6 +453,39 @@ async function handleCallback(callback, env) {
     if (parts[1] === 'reject') return startSalaryReject(env, callback, userId, storeId, requestId, lang);
   }
 
+  if (parts[0] === 'sal') {
+    const storeId = parts[2] || DEFAULT_STORE_ID;
+    const requestId = parts[3] || '';
+    if (!(await isStoreAdmin(env, userId, storeId))) {
+      await audit(env, storeId, userId, 'unauthorized_salary_callback', data, {});
+      return answerCallback(env, callback.id, t(lang, 'no_permission'), true);
+    }
+    if (parts[1] === 'a') return approveSalary(env, callback, userId, storeId, requestId, lang);
+    if (parts[1] === 'r') return startSalaryReject(env, callback, userId, storeId, requestId, lang);
+  }
+
+  if (parts[0] === 'advance') {
+    const storeId = parts[2] || DEFAULT_STORE_ID;
+    const requestId = parts[3] || '';
+    if (!(await isStoreAdmin(env, userId, storeId))) {
+      await audit(env, storeId, userId, 'unauthorized_advance_callback', data, {});
+      return answerCallback(env, callback.id, t(lang, 'no_permission'), true);
+    }
+    if (parts[1] === 'approve') return approveSalaryAdvance(env, callback, userId, storeId, requestId, lang);
+    if (parts[1] === 'reject') return startSalaryAdvanceReject(env, callback, userId, storeId, requestId, lang);
+  }
+
+  if (parts[0] === 'adv') {
+    const storeId = parts[2] || DEFAULT_STORE_ID;
+    const requestId = parts[3] || '';
+    if (!(await isStoreAdmin(env, userId, storeId))) {
+      await audit(env, storeId, userId, 'unauthorized_advance_callback', data, {});
+      return answerCallback(env, callback.id, t(lang, 'no_permission'), true);
+    }
+    if (parts[1] === 'a') return approveSalaryAdvance(env, callback, userId, storeId, requestId, lang);
+    if (parts[1] === 'r') return startSalaryAdvanceReject(env, callback, userId, storeId, requestId, lang);
+  }
+
   if (parts[0] === 'att') {
     const storeId = parts[2] || DEFAULT_STORE_ID;
     const store = await getStore(env, storeId);
@@ -461,15 +528,18 @@ async function handleCallback(callback, env) {
 async function handleIncomeAmount(text, userId, chatId, env, lang, store) {
   const income = parseStoreAmount(store, text, false);
   if (income === null) return sendMessage(env, chatId, t(lang, 'invalid_income'));
-  await setState(env, userId, 'WAIT_INCOME_FINE', { store_id: store.store_id, income });
-  return sendMessage(env, chatId, amountPrompt(lang, store, 'fine'));
+  return submitIncome({ income, fine: 0 }, userId, chatId, env, lang, store);
 }
 
 async function handleIncomeFine(text, userId, chatId, data, env, lang, store) {
   const fine = parseStoreAmount(store, text, true);
   if (fine === null) return sendMessage(env, chatId, t(lang, 'invalid_fine'));
+  return submitIncome({ income: Number(data.income), fine }, userId, chatId, env, lang, store);
+}
 
+async function submitIncome(data, userId, chatId, env, lang, store) {
   const income = Number(data.income);
+  const fine = Number(data.fine || 0);
   const commissionRate = await getMemberCommissionRate(env, store.store_id, userId);
   const commissionIncome = calculateCommissionIncome(income, commissionRate);
   const requestId = makeId('INC');
@@ -493,17 +563,15 @@ async function handleIncomeFine(text, userId, chatId, data, env, lang, store) {
   }), mainMenu(lang));
 
   const employeeName = await getMemberDisplayName(env, store.store_id, userId);
-  await notifyStoreAdmins(env, store.store_id, [
-    '新的收入提交',
-    `店铺：${store.name}`,
-    `员工：${employeeName}`,
-    `员工 ID：${userId}`,
-    `收入：${formatMoney(store, income)}`,
-    `提成比例：${formatPercent(commissionRate)}`,
-    `提成收入：${formatMoney(store, commissionIncome)}`,
-    `罚款：${formatMoney(store, fine)}`,
-    `请求 ID：${requestId}`
-  ].join('\n'), {
+  await notifyStoreAdmins(env, store.store_id, incomeAdminNotificationText({
+    storeName: store.name,
+    employeeName,
+    userId,
+    income: formatMoney(store, income),
+    commission: formatPercent(commissionRate),
+    commissionIncome: formatMoney(store, commissionIncome),
+    requestId
+  }), {
     inline_keyboard: [[
       { text: t('zh', 'btn_approve'), callback_data: `income:approve:${store.store_id}:${requestId}` },
       { text: t('zh', 'btn_reject'), callback_data: `income:reject:${store.store_id}:${requestId}` }
@@ -603,8 +671,8 @@ async function confirmSalary(env, callback, store, userId, lang) {
     `请求 ID：${requestId}`
   ].join('\n'), {
     inline_keyboard: [[
-      { text: t('zh', 'btn_approve'), callback_data: `salary:approve:${store.store_id}:${requestId}` },
-      { text: t('zh', 'btn_reject'), callback_data: `salary:reject:${store.store_id}:${requestId}` }
+      { text: t('zh', 'btn_approve'), callback_data: compactCallbackData('sal', 'a', store.store_id, requestId) },
+      { text: t('zh', 'btn_reject'), callback_data: compactCallbackData('sal', 'r', store.store_id, requestId) }
     ]]
   });
   return answerCallback(env, callback.id, t(lang, 'salary_submitted'));
@@ -639,6 +707,102 @@ async function finishSalaryReject(env, adminId, chatId, storeId, requestId, reas
   if (!result.ok) return sendMessage(env, chatId, t(lang, 'already_processed'), mainMenu(lang));
   const empLang = await getUserLang(env, result.row.telegram_id);
   await sendMessage(env, result.row.telegram_id, render(empLang, 'salary_rejected', { reason: result.reason }));
+  return sendMessage(env, chatId, t(lang, 'reject_recorded'), mainMenu(lang));
+}
+
+async function startSalaryAdvance(env, store, userId, chatId, lang) {
+  const pending = await env.DB.prepare(`
+    SELECT request_id FROM salary_advance_requests WHERE store_id = ? AND telegram_id = ? AND status = 'pending'
+  `).bind(store.store_id, userId).first();
+  if (pending) return sendMessage(env, chatId, t(lang, 'advance_pending'), mainMenu(lang));
+
+  const total = await getTotalIncome(env, store.store_id, userId);
+  if (total <= 0) return sendMessage(env, chatId, render(lang, 'no_salary', { total: formatMoney(store, total) }), mainMenu(lang));
+
+  await setState(env, userId, 'WAIT_ADVANCE_AMOUNT', { store_id: store.store_id });
+  return sendMessage(env, chatId, [
+    render(lang, 'current_store', { store: store.name }),
+    render(lang, 'salary_confirm', {
+      store: store.name,
+      total: formatMoney(store, total),
+      commission: formatPercent(await getMemberCommissionRate(env, store.store_id, userId)),
+      amount: formatMoney(store, total)
+    }),
+    amountPrompt(lang, store, 'advance')
+  ].join('\n\n'));
+}
+
+async function handleSalaryAdvanceAmount(env, store, userId, chatId, text, lang) {
+  const amount = parseStoreAmount(store, text, false);
+  if (amount === null) return sendMessage(env, chatId, t(lang, 'invalid_advance'));
+
+  const total = await getTotalIncome(env, store.store_id, userId);
+  if (amount > total) {
+    return sendMessage(env, chatId, render(lang, 'advance_exceeds_salary', { amount: formatMoney(store, total) }), mainMenu(lang));
+  }
+  const pending = await env.DB.prepare(`
+    SELECT request_id FROM salary_advance_requests WHERE store_id = ? AND telegram_id = ? AND status = 'pending'
+  `).bind(store.store_id, userId).first();
+  if (pending) return sendMessage(env, chatId, t(lang, 'advance_pending'), mainMenu(lang));
+
+  const requestId = makeId('ADV');
+  const requestedAt = nowIso();
+  await env.DB.prepare(`
+    INSERT INTO salary_advance_requests
+      (request_id, store_id, telegram_id, amount, status, requested_at)
+    VALUES (?, ?, ?, ?, 'pending', ?)
+  `).bind(requestId, store.store_id, userId, amount, requestedAt).run();
+
+  await clearState(env, userId);
+  await sendMessage(env, chatId, render(lang, 'advance_submitted', { amount: formatMoney(store, amount) }), mainMenu(lang));
+
+  const employeeName = await getMemberDisplayName(env, store.store_id, userId);
+  await notifyStoreAdmins(env, store.store_id, [
+    '新的预支薪资申请',
+    `店铺：${store.name}`,
+    `员工：${employeeName}`,
+    `员工 ID：${userId}`,
+    `当前可申请工资：${formatMoney(store, total)}`,
+    `预支金额：${formatMoney(store, amount)}`,
+    `请求 ID：${requestId}`
+  ].join('\n'), {
+    inline_keyboard: [[
+      { text: t('zh', 'btn_approve'), callback_data: compactCallbackData('adv', 'a', store.store_id, requestId) },
+      { text: t('zh', 'btn_reject'), callback_data: compactCallbackData('adv', 'r', store.store_id, requestId) }
+    ]]
+  });
+}
+
+async function approveSalaryAdvance(env, callback, adminId, storeId, requestId, lang) {
+  const result = await approveSalaryAdvanceRequest(env, storeId, requestId, adminId);
+  if (!result.ok && result.error === 'amount_exceeds_salary') {
+    return answerCallback(env, callback.id, render(lang, 'advance_exceeds_salary', { amount: formatMoney(result.store, result.total || 0) }), true);
+  }
+  if (!result.ok) return answerCallback(env, callback.id, t(lang, 'already_processed'), true);
+  const empLang = await getUserLang(env, result.row.telegram_id);
+  await sendMessage(env, result.row.telegram_id, render(empLang, 'advance_approved', {
+    amount: formatMoney(result.store, result.row.amount)
+  }));
+  await editCallbackMessage(env, callback, `${callback.message.text}\n\n已批准 by ${adminId}`);
+  return answerCallback(env, callback.id, '已批准。');
+}
+
+async function startSalaryAdvanceReject(env, callback, adminId, storeId, requestId, lang) {
+  const found = await env.DB.prepare(`SELECT * FROM salary_advance_requests WHERE store_id = ? AND request_id = ?`).bind(storeId, requestId).first();
+  if (!found || found.status !== 'pending') return answerCallback(env, callback.id, t(lang, 'already_processed'), true);
+
+  await setState(env, adminId, 'WAIT_ADVANCE_REJECT_REASON', { store_id: storeId, request_id: requestId });
+  await editCallbackMessage(env, callback, `${callback.message.text}\n\n等待 ${adminId} 输入驳回原因`);
+  await sendMessage(env, adminId, `${t(lang, 'ask_reject_reason')}\n${requestId}`);
+  return answerCallback(env, callback.id);
+}
+
+async function finishSalaryAdvanceReject(env, adminId, chatId, storeId, requestId, reason, lang) {
+  const result = await rejectSalaryAdvanceRequest(env, storeId, requestId, adminId, reason || 'Rejected by admin');
+  await clearState(env, adminId);
+  if (!result.ok) return sendMessage(env, chatId, t(lang, 'already_processed'), mainMenu(lang));
+  const empLang = await getUserLang(env, result.row.telegram_id);
+  await sendMessage(env, result.row.telegram_id, render(empLang, 'advance_rejected', { reason: result.reason }));
   return sendMessage(env, chatId, t(lang, 'reject_recorded'), mainMenu(lang));
 }
 
@@ -1004,6 +1168,41 @@ async function rejectSalaryRequest(env, storeId, requestId, adminId, reason) {
     WHERE store_id = ? AND request_id = ?
   `).bind(nowIso(), adminId, reason, storeId, requestId).run();
   await audit(env, storeId, adminId, 'reject_salary', requestId, { reason, ...found });
+  return { ok: true, row: found, reason };
+}
+
+async function approveSalaryAdvanceRequest(env, storeId, requestId, adminId) {
+  const found = await env.DB.prepare(`SELECT * FROM salary_advance_requests WHERE store_id = ? AND request_id = ?`).bind(storeId, requestId).first();
+  if (!found || found.status !== 'pending') return { ok: false };
+  const store = await getStore(env, storeId);
+  const total = await getTotalIncome(env, storeId, found.telegram_id);
+  if (Number(found.amount || 0) > total) return { ok: false, error: 'amount_exceeds_salary', store, total };
+  const decidedAt = nowIso();
+  const recordId = makeId('REC');
+
+  await env.DB.batch([
+    env.DB.prepare(`UPDATE salary_advance_requests SET status = 'approved', decided_at = ?, admin_id = ? WHERE store_id = ? AND request_id = ?`)
+      .bind(decidedAt, adminId, storeId, requestId),
+    env.DB.prepare(`
+      INSERT INTO income_records
+        (record_id, store_id, telegram_id, income, commission_rate, commission_income, original_fine, fine, type, source, request_id, approved_at, admin_id)
+      VALUES (?, ?, ?, 0, 0.6, 0, ?, ?, 'advance', 'salary_advance', ?, ?, ?)
+    `).bind(recordId, storeId, found.telegram_id, found.amount, found.amount, requestId, decidedAt, adminId)
+  ]);
+
+  await audit(env, storeId, adminId, 'approve_salary_advance', requestId, found);
+  return { ok: true, row: found, store };
+}
+
+async function rejectSalaryAdvanceRequest(env, storeId, requestId, adminId, reason) {
+  const found = await env.DB.prepare(`SELECT * FROM salary_advance_requests WHERE store_id = ? AND request_id = ?`).bind(storeId, requestId).first();
+  if (!found || found.status !== 'pending') return { ok: false };
+  await env.DB.prepare(`
+    UPDATE salary_advance_requests
+    SET status = 'rejected', decided_at = ?, admin_id = ?, reject_reason = ?
+    WHERE store_id = ? AND request_id = ?
+  `).bind(nowIso(), adminId, reason, storeId, requestId).run();
+  await audit(env, storeId, adminId, 'reject_salary_advance', requestId, { reason, ...found });
   return { ok: true, row: found, reason };
 }
 
@@ -1410,6 +1609,7 @@ async function handleAdminApi(request, env, url, ctx) {
     if (parts[4] === 'members') return handleAdminMembers(request, env, url, storeId, parts, session.telegram_id);
     if (parts[4] === 'income') return handleAdminIncome(request, env, url, storeId, parts, session.telegram_id);
     if (parts[4] === 'salary') return handleAdminSalary(request, env, url, storeId, parts, session.telegram_id);
+    if (parts[4] === 'advances') return handleAdminSalaryAdvances(request, env, url, storeId, parts, session.telegram_id);
     if (parts[4] === 'attendance') return handleAdminAttendance(request, env, url, storeId, parts, session.telegram_id);
     if (parts[4] === 'leave') return handleAdminLeave(request, env, url, storeId, parts, session.telegram_id);
     if (parts[4] === 'logs' && request.method === 'GET') {
@@ -1852,6 +2052,76 @@ async function handleAdminSalary(request, env, url, storeId, parts, adminId) {
   return json({ ok: false, error: 'not_found' }, 404);
 }
 
+async function handleAdminSalaryAdvances(request, env, url, storeId, parts, adminId) {
+  if (parts.length === 5 && request.method === 'GET') {
+    const filters = await adminFilters(env, url, storeId, adminId);
+    if (!filters.ok) return json({ ok: false, error: filters.error }, filters.status);
+    const pendingWhere = [
+      `a.store_id IN (${placeholders(filters.storeIds.length)})`,
+      `a.status = 'pending'`
+    ];
+    const pendingParams = [...filters.storeIds];
+    const approvedWhere = [
+      `a.store_id IN (${placeholders(filters.storeIds.length)})`,
+      `a.status = 'approved'`
+    ];
+    const approvedParams = [...filters.storeIds];
+    const rejectedWhere = [
+      `a.store_id IN (${placeholders(filters.storeIds.length)})`,
+      `a.status = 'rejected'`
+    ];
+    const rejectedParams = [...filters.storeIds];
+    if (filters.employeeId) {
+      pendingWhere.push(`a.telegram_id = ?`);
+      pendingParams.push(filters.employeeId);
+      approvedWhere.push(`a.telegram_id = ?`);
+      approvedParams.push(filters.employeeId);
+      rejectedWhere.push(`a.telegram_id = ?`);
+      rejectedParams.push(filters.employeeId);
+    }
+    if (filters.monthStart) {
+      pendingWhere.push(`a.requested_at >= ? AND a.requested_at < ?`);
+      pendingParams.push(filters.monthStart, filters.monthEnd);
+      approvedWhere.push(`a.decided_at >= ? AND a.decided_at < ?`);
+      approvedParams.push(filters.monthStart, filters.monthEnd);
+      rejectedWhere.push(`a.requested_at >= ? AND a.requested_at < ?`);
+      rejectedParams.push(filters.monthStart, filters.monthEnd);
+    }
+    const advanceSort = {
+      ...adminSortColumns(['request_id','store_id','telegram_id','amount','status','requested_at','decided_at','admin_id','reject_reason'], 'a'),
+      display_name: 'display_name',
+      username: 'u.username'
+    };
+    const selectSql = (where) => `
+      SELECT a.*, COALESCE(NULLIF(m.display_name, ''), NULLIF(u.name, ''), NULLIF(u.username, ''), a.telegram_id) AS display_name, u.username
+      FROM salary_advance_requests a
+      LEFT JOIN users u ON u.telegram_id = a.telegram_id
+      LEFT JOIN store_members m ON m.store_id = a.store_id AND m.telegram_id = a.telegram_id
+      WHERE ${where.join(' AND ')}
+    `;
+    const pending = await listPagedRows(env, url, 'pending_page', 'pending', selectSql(pendingWhere), `SELECT COUNT(*) AS total FROM salary_advance_requests a WHERE ${pendingWhere.join(' AND ')}`, pendingParams, `ORDER BY a.requested_at DESC`, advanceSort);
+    const approved = await listPagedRows(env, url, 'approved_page', 'approved', selectSql(approvedWhere), `SELECT COUNT(*) AS total FROM salary_advance_requests a WHERE ${approvedWhere.join(' AND ')}`, approvedParams, `ORDER BY a.decided_at DESC`, advanceSort);
+    const rejected = await listPagedRows(env, url, 'rejected_page', 'rejected', selectSql(rejectedWhere), `SELECT COUNT(*) AS total FROM salary_advance_requests a WHERE ${rejectedWhere.join(' AND ')}`, rejectedParams, `ORDER BY COALESCE(a.decided_at, a.requested_at) DESC`, advanceSort);
+    return json({
+      ok: true,
+      pending: pending.pending,
+      approved: approved.approved,
+      rejected: rejected.rejected,
+      filters,
+      pagination: { pending: pending.pagination, approved: approved.pagination, rejected: rejected.pagination }
+    });
+  }
+  if (parts.length >= 7 && request.method === 'POST') {
+    const requestId = decodeURIComponent(parts[5]);
+    if (parts[6] === 'approve') return json(await approveSalaryAdvanceRequest(env, storeId, requestId, adminId));
+    if (parts[6] === 'reject') {
+      const body = await readJson(request);
+      return json(await rejectSalaryAdvanceRequest(env, storeId, requestId, adminId, String(body.reason || 'Rejected from admin page')));
+    }
+  }
+  return json({ ok: false, error: 'not_found' }, 404);
+}
+
 async function handleAdminAttendance(request, env, url, storeId, parts, adminId) {
   if (parts.length === 5 && request.method === 'GET') {
     const filters = await adminFilters(env, url, storeId, adminId);
@@ -2040,6 +2310,7 @@ async function exportCsv(env, url, storeId, type, adminId) {
     'members.csv': [`SELECT m.store_id, m.telegram_id, COALESCE(NULLIF(m.display_name, ''), NULLIF(u.name, ''), NULLIF(u.username, ''), m.telegram_id) AS display_name, u.name AS telegram_name, u.username, m.role, m.status, m.commission_rate, m.cycle_start, m.joined_at, m.updated_at FROM store_members m LEFT JOIN users u ON u.telegram_id = m.telegram_id WHERE ${memberStoreWhere.sql}`, memberStoreWhere.params],
     'income.csv': [`SELECT * FROM income_records WHERE ${storeWhere}${filters.employeeId ? ' AND telegram_id = ?' : ''}${filters.monthStart ? ' AND approved_at >= ? AND approved_at < ?' : ''} ORDER BY approved_at DESC`, [...filters.storeIds, ...(filters.employeeId ? [filters.employeeId] : []), ...(filters.monthStart ? [filters.monthStart, filters.monthEnd] : [])]],
     'salary.csv': [`SELECT * FROM salary_records WHERE ${storeWhere}${filters.employeeId ? ' AND telegram_id = ?' : ''}${filters.monthStart ? ' AND approved_at >= ? AND approved_at < ?' : ''} ORDER BY approved_at DESC`, [...filters.storeIds, ...(filters.employeeId ? [filters.employeeId] : []), ...(filters.monthStart ? [filters.monthStart, filters.monthEnd] : [])]],
+    'advances.csv': [`SELECT * FROM salary_advance_requests WHERE ${storeWhere}${filters.employeeId ? ' AND telegram_id = ?' : ''}${filters.monthStart ? ' AND requested_at >= ? AND requested_at < ?' : ''} ORDER BY requested_at DESC`, [...filters.storeIds, ...(filters.employeeId ? [filters.employeeId] : []), ...(filters.monthStart ? [filters.monthStart, filters.monthEnd] : [])]],
     'attendance.csv': [`SELECT * FROM attendance_records WHERE ${storeWhere}${filters.employeeId ? ' AND telegram_id = ?' : ''}${filters.monthDateStart ? ' AND business_date >= ? AND business_date < ?' : ''} ORDER BY timestamp DESC`, [...filters.storeIds, ...(filters.employeeId ? [filters.employeeId] : []), ...(filters.monthDateStart ? [filters.monthDateStart, filters.monthDateEnd] : [])]],
     'leave.csv': [`SELECT * FROM leave_requests WHERE ${storeWhere}${filters.employeeId ? ' AND telegram_id = ?' : ''}${filters.monthDateStart ? ' AND leave_date >= ? AND leave_date < ?' : ''} ORDER BY leave_date DESC, requested_at DESC`, [...filters.storeIds, ...(filters.employeeId ? [filters.employeeId] : []), ...(filters.monthDateStart ? [filters.monthDateStart, filters.monthDateEnd] : [])]]
   };
@@ -2249,6 +2520,10 @@ function isSalaryCommand(text, lang) {
   return commandMatches(text, ['/salary', 'salary'], allLangLabels(lang, 'btn_salary'));
 }
 
+function isSalaryAdvanceCommand(text, lang) {
+  return commandMatches(text, ['/advance', 'advance'], allLangLabels(lang, 'btn_advance'));
+}
+
 function isAttendanceCommand(text, lang) {
   return commandMatches(text, ['/attendance', 'attendance'], allLangLabels(lang, 'btn_attendance'));
 }
@@ -2270,12 +2545,17 @@ function commandMatches(text, commands, labels) {
   return commands.includes(normalized.toLowerCase()) || labels.includes(normalized);
 }
 
+export function compactCallbackData(prefix, action, storeId, requestId) {
+  return `${prefix}:${action}:${storeId}:${requestId}`;
+}
+
 function mainMenu(lang) {
   return {
     keyboard: [
       [{ text: t(lang, 'btn_store') }],
       [{ text: t(lang, 'btn_income') }, { text: t(lang, 'btn_total') }],
-      [{ text: t(lang, 'btn_salary') }, { text: t(lang, 'btn_attendance') }, { text: t(lang, 'btn_leave') }]
+      [{ text: t(lang, 'btn_salary') }, { text: t(lang, 'btn_advance') }],
+      [{ text: t(lang, 'btn_attendance') }, { text: t(lang, 'btn_leave') }]
     ],
     resize_keyboard: true,
     is_persistent: true
@@ -2324,12 +2604,25 @@ function t(lang, key) {
   return (TEXT[key] && (TEXT[key][lang] || TEXT[key].zh)) || key;
 }
 
-function render(lang, key, params) {
+export function render(lang, key, params) {
   let text = t(lang, key);
   for (const [name, value] of Object.entries(params || {})) {
     text = text.replaceAll(`{${name}}`, String(value));
   }
   return text;
+}
+
+export function incomeAdminNotificationText({ storeName, employeeName, userId, income, commission, commissionIncome, requestId }) {
+  return [
+    '新的收入提交',
+    `店铺：${storeName}`,
+    `员工：${employeeName}`,
+    `员工 ID：${userId}`,
+    `收入：${income}`,
+    `提成比例：${commission}`,
+    `提成收入：${commissionIncome}`,
+    `请求 ID：${requestId}`
+  ].join('\n');
 }
 
 function isGlobalAdmin(env, telegramId) {
@@ -2341,9 +2634,11 @@ function adminIds(env) {
 }
 
 function amountPrompt(lang, store, type) {
-  const base = t(lang, type === 'fine' ? 'ask_fine' : 'ask_income');
+  const key = type === 'fine' ? 'ask_fine' : type === 'advance' ? 'ask_advance' : 'ask_income';
+  const base = t(lang, key);
   if (!isVndStore(store)) return base;
-  return `${base}\n${t(lang, type === 'fine' ? 'vnd_fine_hint' : 'vnd_income_hint')}`;
+  const hintKey = type === 'fine' ? 'vnd_fine_hint' : type === 'advance' ? 'vnd_advance_hint' : 'vnd_income_hint';
+  return `${base}\n${t(lang, hintKey)}`;
 }
 
 function leaveRulePrompt(lang, store) {
@@ -2887,6 +3182,7 @@ function adminHtml() {
             <a id="exportMembers" data-i18n="members_csv">员工 CSV</a>
             <a id="exportIncome" data-i18n="income_csv">收入 CSV</a>
             <a id="exportSalary" data-i18n="salary_csv">工资 CSV</a>
+            <a id="exportAdvances" data-i18n="advances_csv">预支薪资 CSV</a>
             <a id="exportAttendance" data-i18n="attendance_csv">考勤 CSV</a>
             <a id="exportLeave" data-i18n="leave_csv">请假 CSV</a>
           </div>
@@ -2897,6 +3193,7 @@ function adminHtml() {
         <button data-tab="members" data-i18n="members">员工</button>
         <button data-tab="income" data-i18n="income">收入</button>
         <button data-tab="salary" data-i18n="salary">工资</button>
+        <button data-tab="advances" data-i18n="advances">预支薪资</button>
         <button data-tab="attendance" data-i18n="attendance">考勤</button>
         <button data-tab="leave" data-i18n="leave">请假</button>
         <button data-tab="logs" data-i18n="logs">日志</button>
@@ -2905,6 +3202,7 @@ function adminHtml() {
       <section id="tab-members" class="panel hidden"></section>
       <section id="tab-income" class="panel hidden"></section>
       <section id="tab-salary" class="panel hidden"></section>
+      <section id="tab-advances" class="panel hidden"></section>
       <section id="tab-attendance" class="panel hidden"></section>
       <section id="tab-leave" class="panel hidden"></section>
       <section id="tab-logs" class="panel hidden"></section>
@@ -2927,6 +3225,7 @@ function adminHtml() {
       members: { members_page: 1 },
       income: { pending_page: 1, records_page: 1, rejected_page: 1 },
       salary: { requests_page: 1, records_page: 1, rejected_page: 1 },
+      advances: { pending_page: 1, approved_page: 1, rejected_page: 1 },
       attendance: { pending_page: 1, approved_page: 1, rejected_page: 1 },
       leave: { pending_page: 1, approved_page: 1, rejected_page: 1 },
       logs: { logs_page: 1 }
@@ -2936,6 +3235,7 @@ function adminHtml() {
       members: { members: {} },
       income: { pending: {}, records: {}, rejected: {} },
       salary: { requests: {}, records: {}, rejected: {} },
+      advances: { pending: {}, approved: {}, rejected: {} },
       attendance: { pending: {}, approved: {}, rejected: {} },
       leave: { pending: {}, approved: {}, rejected: {} },
       logs: { logs: {} }
@@ -2947,8 +3247,8 @@ function adminHtml() {
     const I18N = {
       zh: {
         logout:'退出', login:'登录', telegram_id:'Telegram ID', code:'验证码', send_code:'发送验证码', verify_login:'验证登录',
-        refresh:'刷新', members_csv:'员工 CSV', income_csv:'收入 CSV', salary_csv:'工资 CSV', attendance_csv:'考勤 CSV', leave_csv:'请假 CSV',
-        stores:'店铺', members:'员工', income:'收入', salary:'工资', attendance:'考勤', leave:'请假', logs:'日志',
+        refresh:'刷新', members_csv:'员工 CSV', income_csv:'收入 CSV', salary_csv:'工资 CSV', advances_csv:'预支薪资 CSV', attendance_csv:'考勤 CSV', leave_csv:'请假 CSV',
+        stores:'店铺', members:'员工', income:'收入', salary:'工资', advances:'预支薪资', attendance:'考勤', leave:'请假', logs:'日志',
         store_id:'店铺 ID', name:'名称', timezone:'时区', currency:'货币', checkin_time:'签到时间', checkout_time:'签退时间',
         late_fine:'迟到罚款', early_leave_fine:'早退罚款', leave_min_notice_days:'最早提前天数', leave_max_notice_days:'最晚提前天数', leave_monthly_limit:'每月请假上限', leave_daily_limit:'同日请假人数上限', status:'状态', save_store:'保存店铺', clear:'清空', edit:'编辑',
         disable:'禁用', enable:'启用', delete:'删除', action:'操作', new_store:'新建店铺', employee_name:'姓名',
@@ -2958,7 +3258,7 @@ function adminHtml() {
         amount_snapshot:'申请金额', amount:'金额', requested_at:'申请时间', period_start:'周期开始', period_end:'周期结束',
         business_date:'营业日期', type:'类型', timestamp:'时间', latitude:'纬度', longitude:'经度', late:'迟到', early_leave:'早退',
         level:'级别', event:'事件', message_text:'消息', payload_json:'数据', created_at:'创建时间', leave_date:'请假日期',
-        pending_income:'待审批收入', income_records:'收入记录', rejected_income:'拒绝记录', salary_requests:'待审批工资', salary_records:'工资记录', rejected_salary:'拒绝记录', pending_leave:'待审批请假', approved_leave:'已批准请假', rejected_leave:'已拒绝请假', pending_attendance:'待审批签退', approved_attendance:'已批准考勤', rejected_attendance:'已驳回签退',
+        pending_income:'待审批收入', income_records:'收入记录', rejected_income:'拒绝记录', salary_requests:'待审批工资', salary_records:'工资记录', rejected_salary:'拒绝记录', pending_advances:'待审批预支', approved_advances:'已批准预支', rejected_advances:'已拒绝预支', pending_leave:'待审批请假', approved_leave:'已批准请假', rejected_leave:'已拒绝请假', pending_attendance:'待审批签退', approved_attendance:'已批准考勤', rejected_attendance:'已驳回签退',
         summary:'合计', pending_total:'待审批合计', approved_total:'已批准合计', rejected_total:'已拒绝合计', pending_days:'待审批天数', approved_days:'已批准天数', rejected_days:'已拒绝天数', income_total:'收入合计', commission_income_total:'提成收入合计', fine_total:'罚款合计', net_total:'净额合计',
         btn_approve:'批准', btn_approve_fine:'批准并罚款', btn_approve_no_fine:'批准不罚款', btn_reject:'驳回',
         filter:'筛选', month:'月份', month_from:'开始月份', month_to:'结束月份', employee:'员工', all_employees:'全部员工', stores_filter:'店铺（可多选）', search:'查询', prev_page:'上一页', next_page:'下一页', page_status:'第 {page} / {total_pages} 页，共 {total} 条',
@@ -2967,8 +3267,8 @@ function adminHtml() {
       },
       en: {
         logout:'Log out', login:'Login', telegram_id:'Telegram ID', code:'Code', send_code:'Send code', verify_login:'Verify login',
-        refresh:'Refresh', members_csv:'Members CSV', income_csv:'Income CSV', salary_csv:'Salary CSV', attendance_csv:'Attendance CSV', leave_csv:'Leave CSV',
-        stores:'Stores', members:'Members', income:'Income', salary:'Salary', attendance:'Attendance', leave:'Leave', logs:'Logs',
+        refresh:'Refresh', members_csv:'Members CSV', income_csv:'Income CSV', salary_csv:'Salary CSV', advances_csv:'Salary advances CSV', attendance_csv:'Attendance CSV', leave_csv:'Leave CSV',
+        stores:'Stores', members:'Members', income:'Income', salary:'Salary', advances:'Salary advances', attendance:'Attendance', leave:'Leave', logs:'Logs',
         store_id:'Store ID', name:'Name', timezone:'Timezone', currency:'Currency', checkin_time:'Check-in time', checkout_time:'Check-out time',
         late_fine:'Late fine', early_leave_fine:'Early leave fine', leave_min_notice_days:'Earliest leave days', leave_max_notice_days:'Latest leave days', leave_monthly_limit:'Monthly leave limit', leave_daily_limit:'Daily leave limit', status:'Status', save_store:'Save store', clear:'Clear', edit:'Edit',
         disable:'Disable', enable:'Enable', delete:'Delete', action:'Action', new_store:'New store', employee_name:'Employee name',
@@ -2978,7 +3278,7 @@ function adminHtml() {
         amount_snapshot:'Requested amount', amount:'Amount', requested_at:'Requested at', period_start:'Period start', period_end:'Period end',
         business_date:'Business date', type:'Type', timestamp:'Time', latitude:'Latitude', longitude:'Longitude', late:'Late', early_leave:'Early leave',
         level:'Level', event:'Event', message_text:'Message', payload_json:'Payload', created_at:'Created at', leave_date:'Leave date',
-        pending_income:'Pending income', income_records:'Income records', rejected_income:'Rejected records', salary_requests:'Pending salary', salary_records:'Salary records', rejected_salary:'Rejected records', pending_leave:'Pending leave', approved_leave:'Approved leave', rejected_leave:'Rejected leave', pending_attendance:'Pending checkout', approved_attendance:'Approved attendance', rejected_attendance:'Rejected checkout',
+        pending_income:'Pending income', income_records:'Income records', rejected_income:'Rejected records', salary_requests:'Pending salary', salary_records:'Salary records', rejected_salary:'Rejected records', pending_advances:'Pending advances', approved_advances:'Approved advances', rejected_advances:'Rejected advances', pending_leave:'Pending leave', approved_leave:'Approved leave', rejected_leave:'Rejected leave', pending_attendance:'Pending checkout', approved_attendance:'Approved attendance', rejected_attendance:'Rejected checkout',
         summary:'Summary', pending_total:'Pending total', approved_total:'Approved total', rejected_total:'Rejected total', pending_days:'Pending days', approved_days:'Approved days', rejected_days:'Rejected days', income_total:'Income total', commission_income_total:'Commission income total', fine_total:'Fine total', net_total:'Net total',
         btn_approve:'Approve', btn_approve_fine:'Approve with fine', btn_approve_no_fine:'Approve no fine', btn_reject:'Reject',
         filter:'Filter', month:'Month', month_from:'From month', month_to:'To month', employee:'Employee', all_employees:'All employees', stores_filter:'Stores (multi-select)', search:'Search', prev_page:'Previous', next_page:'Next', page_status:'Page {page} / {total_pages}, {total} rows',
@@ -2987,8 +3287,8 @@ function adminHtml() {
       },
       vi: {
         logout:'Đăng xuất', login:'Đăng nhập', telegram_id:'Telegram ID', code:'Mã', send_code:'Gửi mã', verify_login:'Xác minh',
-        refresh:'Làm mới', members_csv:'Nhân viên CSV', income_csv:'Thu nhập CSV', salary_csv:'Lương CSV', attendance_csv:'Chấm công CSV',
-        stores:'Cửa hàng', members:'Nhân viên', income:'Thu nhập', salary:'Lương', attendance:'Chấm công', logs:'Nhật ký',
+        refresh:'Làm mới', members_csv:'Nhân viên CSV', income_csv:'Thu nhập CSV', salary_csv:'Lương CSV', advances_csv:'Ứng lương CSV', attendance_csv:'Chấm công CSV',
+        stores:'Cửa hàng', members:'Nhân viên', income:'Thu nhập', salary:'Lương', advances:'Ứng lương', attendance:'Chấm công', logs:'Nhật ký',
         store_id:'ID cửa hàng', name:'Tên', timezone:'Múi giờ', currency:'Tiền tệ', checkin_time:'Giờ vào ca', checkout_time:'Giờ ra ca',
         late_fine:'Phạt đi muộn', early_leave_fine:'Phạt về sớm', status:'Trạng thái', save_store:'Lưu cửa hàng', clear:'Xóa form', edit:'Sửa',
         disable:'Tắt', enable:'Bật', delete:'Xóa', action:'Thao tác', new_store:'Cửa hàng mới', employee_name:'Tên nhân viên',
@@ -2998,7 +3298,7 @@ function adminHtml() {
         amount_snapshot:'Số tiền yêu cầu', amount:'Số tiền', requested_at:'Ngày yêu cầu', period_start:'Bắt đầu kỳ', period_end:'Kết thúc kỳ',
         business_date:'Ngày kinh doanh', type:'Loại', timestamp:'Thời gian', latitude:'Vĩ độ', longitude:'Kinh độ', late:'Đi muộn', early_leave:'Về sớm',
         level:'Mức', event:'Sự kiện', message_text:'Tin nhắn', payload_json:'Dữ liệu', created_at:'Tạo lúc',
-        pending_income:'Thu nhập chờ duyệt', income_records:'Bản ghi thu nhập', rejected_income:'Bản ghi từ chối', salary_requests:'Lương chờ duyệt', salary_records:'Bản ghi lương', rejected_salary:'Bản ghi từ chối', pending_attendance:'Ra ca chờ duyệt', approved_attendance:'Chấm công đã duyệt', rejected_attendance:'Ra ca bị từ chối',
+        pending_income:'Thu nhập chờ duyệt', income_records:'Bản ghi thu nhập', rejected_income:'Bản ghi từ chối', salary_requests:'Lương chờ duyệt', salary_records:'Bản ghi lương', rejected_salary:'Bản ghi từ chối', pending_advances:'Ứng lương chờ duyệt', approved_advances:'Ứng lương đã duyệt', rejected_advances:'Ứng lương bị từ chối', pending_attendance:'Ra ca chờ duyệt', approved_attendance:'Chấm công đã duyệt', rejected_attendance:'Ra ca bị từ chối',
         summary:'Tổng cộng', pending_total:'Tổng chờ duyệt', approved_total:'Tổng đã duyệt', rejected_total:'Tổng từ chối', income_total:'Tổng thu nhập', commission_income_total:'Tổng thu nhập hoa hồng', fine_total:'Tổng phạt', net_total:'Tổng ròng',
         btn_approve:'Duyệt', btn_approve_fine:'Duyệt kèm phạt', btn_approve_no_fine:'Duyệt không phạt', btn_reject:'Từ chối',
         filter:'Lọc', month:'Tháng', month_from:'Từ tháng', month_to:'Đến tháng', employee:'Nhân viên', all_employees:'Tất cả nhân viên', stores_filter:'Cửa hàng (chọn nhiều)', search:'Tìm',
@@ -3007,8 +3307,8 @@ function adminHtml() {
       },
       ru: {
         logout:'Выйти', login:'Вход', telegram_id:'Telegram ID', code:'Код', send_code:'Отправить код', verify_login:'Проверить вход',
-        refresh:'Обновить', members_csv:'Сотрудники CSV', income_csv:'Доход CSV', salary_csv:'Зарплата CSV', attendance_csv:'Посещаемость CSV',
-        stores:'Магазины', members:'Сотрудники', income:'Доход', salary:'Зарплата', attendance:'Посещаемость', logs:'Журналы',
+        refresh:'Обновить', members_csv:'Сотрудники CSV', income_csv:'Доход CSV', salary_csv:'Зарплата CSV', advances_csv:'Авансы CSV', attendance_csv:'Посещаемость CSV',
+        stores:'Магазины', members:'Сотрудники', income:'Доход', salary:'Зарплата', advances:'Авансы зарплаты', attendance:'Посещаемость', logs:'Журналы',
         store_id:'ID магазина', name:'Название', timezone:'Часовой пояс', currency:'Валюта', checkin_time:'Начало смены', checkout_time:'Конец смены',
         late_fine:'Штраф за опоздание', early_leave_fine:'Штраф за ранний уход', status:'Статус', save_store:'Сохранить магазин', clear:'Очистить', edit:'Редактировать',
         disable:'Отключить', enable:'Включить', delete:'Удалить', action:'Действие', new_store:'Новый магазин', employee_name:'Имя сотрудника',
@@ -3018,7 +3318,7 @@ function adminHtml() {
         amount_snapshot:'Сумма запроса', amount:'Сумма', requested_at:'Время запроса', period_start:'Начало периода', period_end:'Конец периода',
         business_date:'Рабочая дата', type:'Тип', timestamp:'Время', latitude:'Широта', longitude:'Долгота', late:'Опоздание', early_leave:'Ранний уход',
         level:'Уровень', event:'Событие', message_text:'Сообщение', payload_json:'Данные', created_at:'Создано',
-        pending_income:'Доход на проверке', income_records:'Записи дохода', rejected_income:'Отклоненные записи', salary_requests:'Зарплата на проверке', salary_records:'Записи зарплаты', rejected_salary:'Отклоненные записи', pending_attendance:'Завершение смены на проверке', approved_attendance:'Одобренная посещаемость', rejected_attendance:'Отклоненное завершение смены',
+        pending_income:'Доход на проверке', income_records:'Записи дохода', rejected_income:'Отклоненные записи', salary_requests:'Зарплата на проверке', salary_records:'Записи зарплаты', rejected_salary:'Отклоненные записи', pending_advances:'Авансы на проверке', approved_advances:'Одобренные авансы', rejected_advances:'Отклоненные авансы', pending_attendance:'Завершение смены на проверке', approved_attendance:'Одобренная посещаемость', rejected_attendance:'Отклоненное завершение смены',
         summary:'Итого', pending_total:'Ожидает итого', approved_total:'Одобрено итого', rejected_total:'Отклонено итого', income_total:'Доход итого', commission_income_total:'Комиссионный доход итого', fine_total:'Штраф итого', net_total:'Чистый итог',
         btn_approve:'Одобрить', btn_approve_fine:'Одобрить со штрафом', btn_approve_no_fine:'Одобрить без штрафа', btn_reject:'Отклонить',
         filter:'Фильтр', month:'Месяц', month_from:'С месяца', month_to:'По месяц', employee:'Сотрудник', all_employees:'Все сотрудники', stores_filter:'Магазины (можно несколько)', search:'Поиск',
@@ -3139,6 +3439,7 @@ function adminHtml() {
       $('exportMembers').href = base + 'members.csv';
       $('exportIncome').href = base + 'income.csv?' + query;
       $('exportSalary').href = base + 'salary.csv?' + query;
+      $('exportAdvances').href = base + 'advances.csv?' + query;
       $('exportAttendance').href = base + 'attendance.csv?' + query;
       $('exportLeave').href = base + 'leave.csv?' + query;
     }
@@ -3152,6 +3453,7 @@ function adminHtml() {
       if (currentTab === 'members') return renderMembers();
       if (currentTab === 'income') return renderIncome();
       if (currentTab === 'salary') return renderSalary();
+      if (currentTab === 'advances') return renderSalaryAdvances();
       if (currentTab === 'attendance') return renderAttendance();
       if (currentTab === 'leave') return renderLeave();
       if (currentTab === 'logs') return renderRows('logs', '/api/admin/stores/' + encodeURIComponent(storeId()) + '/logs');
@@ -3323,6 +3625,18 @@ function adminHtml() {
       bindPagers();
     }
 
+    async function renderSalaryAdvances() {
+      const data = await api('/api/admin/stores/' + encodeURIComponent(storeId()) + '/advances?' + queryWithPages('advances'));
+      $('tab-advances').innerHTML = await filterPanel() +
+        advanceSummaryPanel(data) +
+        sectionTitle('pending_advances') + actionTable(data.pending, ['request_id','telegram_id','display_name','amount','status','requested_at'], 'advances', 'pending') + pager('advances', 'pending_page', data.pagination && data.pagination.pending) +
+        sectionTitle('approved_advances') + table(data.approved, ['request_id','telegram_id','display_name','amount','status','requested_at','decided_at','admin_id'], false, 'approved') + pager('advances', 'approved_page', data.pagination && data.pagination.approved) +
+        sectionTitle('rejected_advances') + table(data.rejected, ['request_id','telegram_id','display_name','amount','status','requested_at','decided_at','admin_id','reject_reason'], false, 'rejected') + pager('advances', 'rejected_page', data.pagination && data.pagination.rejected);
+      bindFilterControls();
+      bindActions('advances');
+      bindPagers();
+    }
+
     async function renderRows(id, path) {
       const data = await api(path + '?' + pageQuery('logs'));
       $('tab-' + id).innerHTML = '<h2>' + L(id) + '</h2>' + table(data.rows, Object.keys((data.rows || [])[0] || {}), false, 'logs') + pager('logs', 'logs_page', data.pagination && data.pagination.rows);
@@ -3372,6 +3686,14 @@ function adminHtml() {
         { label: L('pending_total'), value: summaryMoney(pending) },
         { label: L('approved_total'), value: summaryMoney(approved) },
         { label: L('rejected_total'), value: summaryMoney(rejected) }
+      ]);
+    }
+
+    function advanceSummaryPanel(data) {
+      return summaryPanel([
+        { label: L('pending_total'), value: summaryMoney(sumRows(data.pending || [], 'amount')) },
+        { label: L('approved_total'), value: summaryMoney(sumRows(data.approved || [], 'amount')) },
+        { label: L('rejected_total'), value: summaryMoney(sumRows(data.rejected || [], 'amount')) }
       ]);
     }
 

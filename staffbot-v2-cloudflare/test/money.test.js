@@ -10,8 +10,11 @@ import {
   calculateSalaryAmount,
   checkoutFineRecordDrafts,
   checkoutFineWaiverAmount,
+  compactCallbackData,
   formatMoney,
-  parseStoreAmount
+  incomeAdminNotificationText,
+  parseStoreAmount,
+  render
 } from '../src/index.js';
 
 test('parses VND employee input as millions', () => {
@@ -83,4 +86,49 @@ test('totals commission income plus separate fine rows', () => {
     { type: 'fine', commission_income: 0, fine: 500000 },
     { type: 'fine', commission_income: 0, fine: -500000 }
   ]), 1800000 - 500000 + 500000);
+});
+
+test('totals salary advance rows as payroll deductions', () => {
+  assert.equal(calculateIncomeRowsTotal([
+    { type: 'income', commission_income: 1800000, fine: 0 },
+    { type: 'advance', commission_income: 0, fine: 500000 }
+  ]), 1300000);
+});
+
+test('income employee messages do not mention fines', () => {
+  const params = {
+    store: '店铺A',
+    income: '₫3,000,000',
+    commission: '60%',
+    commission_income: '₫1,800,000',
+    fine: '₫500,000'
+  };
+
+  assert.equal(render('zh', 'income_submitted', params).includes('罚款'), false);
+  assert.equal(render('zh', 'income_approved', params).includes('罚款'), false);
+});
+
+test('income admin approval notification does not mention fines', () => {
+  const text = incomeAdminNotificationText({
+    storeName: '店铺A',
+    employeeName: '员工A',
+    userId: '1001',
+    income: '₫3,000,000',
+    commission: '60%',
+    commissionIncome: '₫1,800,000',
+    fine: '₫500,000',
+    requestId: 'INC-1'
+  });
+
+  assert.equal(text.includes('罚款'), false);
+});
+
+test('keeps payroll approval callback data under Telegram limit', () => {
+  const salaryId = 'SALREQ-01f21cc1-dcff-4f1a-9bf8-2008d650d46e';
+  const advanceId = 'ADV-01f21cc1-dcff-4f1a-9bf8-2008d650d46e';
+
+  assert.ok(compactCallbackData('sal', 'a', 'DEFAULT', salaryId).length <= 64);
+  assert.ok(compactCallbackData('sal', 'r', 'DEFAULT', salaryId).length <= 64);
+  assert.ok(compactCallbackData('adv', 'a', 'DEFAULT', advanceId).length <= 64);
+  assert.ok(compactCallbackData('adv', 'r', 'DEFAULT', advanceId).length <= 64);
 });
