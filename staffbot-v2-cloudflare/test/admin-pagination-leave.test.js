@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 
 import {
   adminPage,
@@ -19,6 +20,8 @@ import {
   validateLeaveDate,
   visibleAdminStores
 } from '../src/index.js';
+
+const source = readFileSync(new URL('../src/index.js', import.meta.url), 'utf8');
 
 test('normalizes admin pagination to 100 rows per page', () => {
   assert.deepEqual(adminPage('1', 250), {
@@ -55,6 +58,16 @@ test('builds member query and SQL for all selected stores', () => {
     sql: 'm.store_id IN (?,?)',
     params: ['A', 'B']
   });
+});
+
+test('scopes admin filter controls to the active tab', () => {
+  for (const id of ['applyFilters', 'filterStores', 'filterMonthFrom', 'filterMonthTo', 'filterEmployee']) {
+    assert.doesNotMatch(source, new RegExp(`id="${id}"`));
+    assert.doesNotMatch(source, new RegExp(`\\$\\('${id}'\\)`));
+  }
+  for (const attr of ['data-apply-filters', 'data-filter-stores', 'data-filter-month-from', 'data-filter-month-to', 'data-filter-employee']) {
+    assert.match(source, new RegExp(attr));
+  }
 });
 
 test('builds admin sort SQL only from allowed fields', () => {
