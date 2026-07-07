@@ -12,6 +12,7 @@ CREATE TABLE IF NOT EXISTS stores (
   leave_max_notice_days INTEGER NOT NULL DEFAULT 5,
   leave_monthly_limit INTEGER NOT NULL DEFAULT 4,
   leave_daily_limit INTEGER NOT NULL DEFAULT 1,
+  leave_same_day_cutoff_hour INTEGER NOT NULL DEFAULT 5,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );
@@ -19,10 +20,10 @@ CREATE TABLE IF NOT EXISTS stores (
 INSERT OR IGNORE INTO stores (
   store_id, name, status, timezone, currency, checkin_time, checkout_time,
   late_fine, early_leave_fine, leave_min_notice_days, leave_max_notice_days,
-  leave_monthly_limit, leave_daily_limit, created_at, updated_at
+  leave_monthly_limit, leave_daily_limit, leave_same_day_cutoff_hour, created_at, updated_at
 ) VALUES (
   'DEFAULT', 'Default Store', 'active', 'Asia/Tokyo', '$', '18:30', '01:30',
-  0.5, 1.5, 1, 5, 4, 1, datetime('now'), datetime('now')
+  0.5, 1.5, 1, 5, 4, 1, 5, datetime('now'), datetime('now')
 );
 
 CREATE TABLE IF NOT EXISTS users (

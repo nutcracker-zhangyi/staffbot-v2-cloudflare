@@ -1702,7 +1702,7 @@ async function listAdminStores(env, url, adminId) {
   const orderSql = adminOrderSql(url, 'stores_page', adminSortColumns([
     'store_id','name','status','timezone','currency','checkin_time','checkout_time',
     'late_fine','early_leave_fine','leave_min_notice_days','leave_max_notice_days',
-    'leave_monthly_limit','leave_daily_limit'
+    'leave_monthly_limit','leave_daily_limit','leave_same_day_cutoff_hour'
   ], 's'), 'ORDER BY s.name');
   const allRows = isGlobalAdmin(env, adminId)
     ? await env.DB.prepare(`SELECT s.* FROM stores s WHERE s.status = 'active' ${orderSql}`).all()
@@ -1742,13 +1742,13 @@ async function createAdminStore(request, env, adminId) {
       INSERT INTO stores (
         store_id, name, status, timezone, currency, checkin_time, checkout_time,
         late_fine, early_leave_fine, leave_min_notice_days, leave_max_notice_days,
-        leave_monthly_limit, leave_daily_limit, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        leave_monthly_limit, leave_daily_limit, leave_same_day_cutoff_hour, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).bind(
       store.store_id, store.name, store.status, store.timezone, store.currency,
       store.checkin_time, store.checkout_time, store.late_fine, store.early_leave_fine,
       store.leave_min_notice_days, store.leave_max_notice_days, store.leave_monthly_limit,
-      store.leave_daily_limit, now, now
+      store.leave_daily_limit, store.leave_same_day_cutoff_hour, now, now
     ),
     ...globalAdminMembers
   ]);
@@ -1766,13 +1766,13 @@ async function updateAdminStore(request, env, adminId, storeId) {
       name = ?, status = ?, timezone = ?, currency = ?, checkin_time = ?,
       checkout_time = ?, late_fine = ?, early_leave_fine = ?,
       leave_min_notice_days = ?, leave_max_notice_days = ?,
-      leave_monthly_limit = ?, leave_daily_limit = ?, updated_at = ?
+      leave_monthly_limit = ?, leave_daily_limit = ?, leave_same_day_cutoff_hour = ?, updated_at = ?
     WHERE store_id = ?
   `).bind(
     next.name, next.status, next.timezone, next.currency, next.checkin_time,
     next.checkout_time, next.late_fine, next.early_leave_fine,
     next.leave_min_notice_days, next.leave_max_notice_days, next.leave_monthly_limit,
-    next.leave_daily_limit, nowIso(), storeId
+    next.leave_daily_limit, next.leave_same_day_cutoff_hour, nowIso(), storeId
   ).run();
   await audit(env, storeId, adminId, 'update_store', storeId, body);
   return json({ ok: true, store: next });
@@ -1915,7 +1915,8 @@ async function handleAdminIncome(request, env, url, storeId, parts, adminId) {
       username: 'u.username'
     };
     const recordSort = {
-      ...adminSortColumns(['record_id','store_id','telegram_id','type','income','commission_rate','commission_income','original_fine','fine','source','approved_at','admin_id'], 'r'),
+      ...adminSortColumns(['record_id','store_id','telegram_id','type','income','commission_rate','commission_income','original_fine','fine','approved_at','admin_id'], 'r'),
+      submitted_at: 'p.submitted_at',
       display_name: 'display_name',
       username: 'u.username'
     };
@@ -1934,8 +1935,9 @@ async function handleAdminIncome(request, env, url, storeId, parts, adminId) {
       WHERE ${rejectedWhere.join(' AND ')}
     `, `SELECT COUNT(*) AS total FROM pending_income p WHERE ${rejectedWhere.join(' AND ')}`, rejectedParams, `ORDER BY COALESCE(p.decided_at, p.submitted_at) DESC`, pendingSort);
     const records = await listPagedRows(env, url, 'records_page', 'records', `
-      SELECT r.*, COALESCE(NULLIF(m.display_name, ''), NULLIF(u.name, ''), NULLIF(u.username, ''), r.telegram_id) AS display_name, u.username
+      SELECT r.*, p.submitted_at, COALESCE(NULLIF(m.display_name, ''), NULLIF(u.name, ''), NULLIF(u.username, ''), r.telegram_id) AS display_name, u.username
       FROM income_records r
+      LEFT JOIN pending_income p ON p.store_id = r.store_id AND p.request_id = r.request_id
       LEFT JOIN users u ON u.telegram_id = r.telegram_id
       LEFT JOIN store_members m ON m.store_id = r.store_id AND m.telegram_id = r.telegram_id
       WHERE ${recordWhere.join(' AND ')}
@@ -2645,8 +2647,9 @@ function leaveRulePrompt(lang, store) {
   return render(lang, 'ask_leave_date', leaveRuleParams(store));
 }
 
-function leaveRuleParams(store) {
-  const min = normalizePositiveInt(store && store.leave_min_notice_days, 1, 1, 365);
+export function leaveRuleParams(store, now = new Date()) {
+  const tz = (store && store.timezone) || 'Asia/Tokyo';
+  const min = leaveWindowMinDays(store, now, tz);
   const max = Math.max(normalizePositiveInt(store && store.leave_max_notice_days, 5, 1, 365), min);
   return { min, max };
 }
@@ -2706,6 +2709,22 @@ export function formatAdminDateTime(value, timezone = 'Asia/Tokyo') {
   }).formatToParts(date);
   const map = Object.fromEntries(parts.filter((part) => part.type !== 'literal').map((part) => [part.type, part.value]));
   return `${map.year}/${map.month}/${map.day} ${map.hour}:${map.minute}:${map.second}`;
+}
+
+export function formatAdminShortDateHour(value, timezone = 'Asia/Tokyo') {
+  const text = String(value || '').trim();
+  if (!text) return '';
+  const date = new Date(text);
+  if (Number.isNaN(date.getTime())) return text;
+  const parts = new Intl.DateTimeFormat('en-CA', {
+    timeZone: timezone || 'Asia/Tokyo',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    hour12: false
+  }).formatToParts(date);
+  const map = Object.fromEntries(parts.filter((part) => part.type !== 'literal').map((part) => [part.type, part.value]));
+  return `${map.month}/${map.day} ${map.hour}点`;
 }
 
 function normalizeCommissionRate(value) {
@@ -2940,7 +2959,7 @@ export function validateLeaveDate(store, value, now = new Date()) {
   const minDays = normalizePositiveInt(store && store.leave_min_notice_days, 1, 1, 365);
   const maxDays = Math.max(normalizePositiveInt(store && store.leave_max_notice_days, 5, 1, 365), minDays);
   const today = localDate(now, tz);
-  const minDate = addIsoDays(today, minDays);
+  const minDate = addIsoDays(today, leaveWindowMinDays(store, now, tz));
   const maxDate = addIsoDays(today, maxDays);
   if (date < minDate || date > maxDate) return { ok: false, error: 'outside_window', min_date: minDate, max_date: maxDate };
   return { ok: true, date };
@@ -2948,7 +2967,7 @@ export function validateLeaveDate(store, value, now = new Date()) {
 
 export function leaveDateOptions(store, now = new Date()) {
   const tz = (store && store.timezone) || 'Asia/Tokyo';
-  const minDays = normalizePositiveInt(store && store.leave_min_notice_days, 1, 1, 365);
+  const minDays = leaveWindowMinDays(store, now, tz);
   const maxDays = Math.max(normalizePositiveInt(store && store.leave_max_notice_days, 5, 1, 365), minDays);
   const today = localDate(now, tz);
   const dates = [];
@@ -2956,6 +2975,12 @@ export function leaveDateOptions(store, now = new Date()) {
     dates.push(addIsoDays(today, day));
   }
   return dates;
+}
+
+function leaveWindowMinDays(store, now, tz) {
+  const minDays = normalizePositiveInt(store && store.leave_min_notice_days, 1, 1, 365);
+  const cutoffHour = normalizePositiveInt(store && store.leave_same_day_cutoff_hour, 5, 0, 23);
+  return minDays === 1 && Number(localParts(now, tz).hour) < cutoffHour ? 0 : minDays;
 }
 
 export function leaveMonthRange(leaveDate) {
@@ -3041,7 +3066,8 @@ function normalizeStoreInput(input) {
       normalizePositiveInt(input.leave_min_notice_days, 1, 1, 365)
     ),
     leave_monthly_limit: normalizePositiveInt(input.leave_monthly_limit, 4, 1, 31),
-    leave_daily_limit: normalizePositiveInt(input.leave_daily_limit, 1, 1, 100)
+    leave_daily_limit: normalizePositiveInt(input.leave_daily_limit, 1, 1, 100),
+    leave_same_day_cutoff_hour: normalizePositiveInt(input.leave_same_day_cutoff_hour, 5, 0, 23)
   };
 }
 
@@ -3250,7 +3276,7 @@ function adminHtml() {
         refresh:'刷新', members_csv:'员工 CSV', income_csv:'收入 CSV', salary_csv:'工资 CSV', advances_csv:'预支薪资 CSV', attendance_csv:'考勤 CSV', leave_csv:'请假 CSV',
         stores:'店铺', members:'员工', income:'收入', salary:'工资', advances:'预支薪资', attendance:'考勤', leave:'请假', logs:'日志',
         store_id:'店铺 ID', name:'名称', timezone:'时区', currency:'货币', checkin_time:'签到时间', checkout_time:'签退时间',
-        late_fine:'迟到罚款', early_leave_fine:'早退罚款', leave_min_notice_days:'最早提前天数', leave_max_notice_days:'最晚提前天数', leave_monthly_limit:'每月请假上限', leave_daily_limit:'同日请假人数上限', status:'状态', save_store:'保存店铺', clear:'清空', edit:'编辑',
+        late_fine:'迟到罚款', early_leave_fine:'早退罚款', leave_min_notice_days:'最早提前天数', leave_max_notice_days:'最晚提前天数', leave_monthly_limit:'每月请假上限', leave_daily_limit:'同日请假人数上限', leave_same_day_cutoff_hour:'当天请假截止小时', status:'状态', save_store:'保存店铺', clear:'清空', edit:'编辑',
         disable:'禁用', enable:'启用', delete:'删除', action:'操作', new_store:'新建店铺', employee_name:'姓名',
         username:'用户名', role:'角色', commission_rate:'提成比例', commission_income:'提成收入', save_member:'保存员工', telegram_name:'Telegram 名字', display_name:'员工姓名',
         cycle_start:'工资周期开始', joined_at:'加入时间', updated_at:'更新时间', request_id:'请求 ID', record_id:'记录 ID',
@@ -3270,7 +3296,7 @@ function adminHtml() {
         refresh:'Refresh', members_csv:'Members CSV', income_csv:'Income CSV', salary_csv:'Salary CSV', advances_csv:'Salary advances CSV', attendance_csv:'Attendance CSV', leave_csv:'Leave CSV',
         stores:'Stores', members:'Members', income:'Income', salary:'Salary', advances:'Salary advances', attendance:'Attendance', leave:'Leave', logs:'Logs',
         store_id:'Store ID', name:'Name', timezone:'Timezone', currency:'Currency', checkin_time:'Check-in time', checkout_time:'Check-out time',
-        late_fine:'Late fine', early_leave_fine:'Early leave fine', leave_min_notice_days:'Earliest leave days', leave_max_notice_days:'Latest leave days', leave_monthly_limit:'Monthly leave limit', leave_daily_limit:'Daily leave limit', status:'Status', save_store:'Save store', clear:'Clear', edit:'Edit',
+        late_fine:'Late fine', early_leave_fine:'Early leave fine', leave_min_notice_days:'Earliest leave days', leave_max_notice_days:'Latest leave days', leave_monthly_limit:'Monthly leave limit', leave_daily_limit:'Daily leave limit', leave_same_day_cutoff_hour:'Same-day leave cutoff hour', status:'Status', save_store:'Save store', clear:'Clear', edit:'Edit',
         disable:'Disable', enable:'Enable', delete:'Delete', action:'Action', new_store:'New store', employee_name:'Employee name',
         username:'Username', role:'Role', commission_rate:'Commission', commission_income:'Commission income', save_member:'Save member', telegram_name:'Telegram name', display_name:'Display name',
         cycle_start:'Cycle start', joined_at:'Joined at', updated_at:'Updated at', request_id:'Request ID', record_id:'Record ID',
@@ -3478,10 +3504,11 @@ function adminHtml() {
         '<label>' + L('leave_max_notice_days') + '<input id="storeLeaveMaxInput" inputmode="numeric" value="5"></label>' +
         '<label>' + L('leave_monthly_limit') + '<input id="storeLeaveMonthlyInput" inputmode="numeric" value="4"></label>' +
         '<label>' + L('leave_daily_limit') + '<input id="storeLeaveDailyInput" inputmode="numeric" value="1"></label>' +
+        '<label>' + L('leave_same_day_cutoff_hour') + '<input id="storeLeaveSameDayCutoffHourInput" inputmode="numeric" value="5"></label>' +
         '<label>' + L('status') + '<select id="storeStatusInput"><option value="active">active</option><option value="disabled">disabled</option></select></label>' +
         '</div>' +
         '<div class="row" style="margin-top:10px"><button id="saveStore">' + L('save_store') + '</button><button id="clearStore" class="secondary">' + L('clear') + '</button></div>' +
-        table(rows, ['store_id','name','status','timezone','currency','checkin_time','checkout_time','late_fine','early_leave_fine','leave_min_notice_days','leave_max_notice_days','leave_monthly_limit','leave_daily_limit','action'], true, 'stores') +
+        table(rows, ['store_id','name','status','timezone','currency','checkin_time','checkout_time','late_fine','early_leave_fine','leave_min_notice_days','leave_max_notice_days','leave_monthly_limit','leave_daily_limit','leave_same_day_cutoff_hour','action'], true, 'stores') +
         pager('stores', 'stores_page', window.storePagination && window.storePagination.stores, 'loadStores');
       $('saveStore').onclick = () => withBusy($('saveStore'), async () => {
         const id = $('storeIdInput').value.trim();
@@ -3498,6 +3525,7 @@ function adminHtml() {
           leave_max_notice_days: $('storeLeaveMaxInput').value,
           leave_monthly_limit: $('storeLeaveMonthlyInput').value,
           leave_daily_limit: $('storeLeaveDailyInput').value,
+          leave_same_day_cutoff_hour: $('storeLeaveSameDayCutoffHourInput').value,
           status: $('storeStatusInput').value
         };
         const exists = stores.some((store) => store.store_id === id);
@@ -3536,6 +3564,7 @@ function adminHtml() {
       $('storeLeaveMaxInput').value = store.leave_max_notice_days ?? 5;
       $('storeLeaveMonthlyInput').value = store.leave_monthly_limit ?? 4;
       $('storeLeaveDailyInput').value = store.leave_daily_limit ?? 1;
+      $('storeLeaveSameDayCutoffHourInput').value = store.leave_same_day_cutoff_hour ?? 5;
       $('storeStatusInput').value = store.status || 'active';
     }
 
@@ -3605,7 +3634,7 @@ function adminHtml() {
       $('tab-income').innerHTML = await filterPanel() +
         incomeSummaryPanel(data) +
         sectionTitle('pending_income') + incomeActionTable(data.pending, ['request_id','telegram_id','display_name','income','commission_rate','commission_income','fine','status','submitted_at'], 'pending', 'request_id', true, 'pending') + pager('income', 'pending_page', data.pagination && data.pagination.pending) +
-        sectionTitle('income_records') + incomeActionTable(data.records, ['record_id','telegram_id','display_name','type','income','commission_rate','commission_income','original_fine','fine','source','approved_at','admin_id'], 'records', 'record_id', false, 'records') + pager('income', 'records_page', data.pagination && data.pagination.records) +
+        sectionTitle('income_records') + incomeActionTable(data.records, ['record_id','telegram_id','display_name','type','income','commission_rate','commission_income','original_fine','fine','submitted_at','approved_at','admin_id'], 'records', 'record_id', false, 'records') + pager('income', 'records_page', data.pagination && data.pagination.records) +
         sectionTitle('rejected_income') + incomeActionTable(data.rejected, ['request_id','telegram_id','display_name','income','commission_rate','commission_income','fine','status','submitted_at','decided_at','admin_id','reject_reason'], 'pending', 'request_id', false, 'rejected') + pager('income', 'rejected_page', data.pagination && data.pagination.rejected);
       bindFilterControls();
       bindActions('income');
@@ -3916,6 +3945,7 @@ function adminHtml() {
 
     function formatDisplayValue(key, value) {
       if (moneyFields.has(key)) return formatAdminMoneyForUi(value);
+      if (key === 'submitted_at' || key === 'approved_at') return formatAdminShortDateHourForUi(value, currentStore().timezone || 'Asia/Tokyo');
       if (isTimeField(key)) return formatAdminDateTimeForUi(value, currentStore().timezone || 'Asia/Tokyo');
       return value;
     }
@@ -3959,6 +3989,22 @@ function adminHtml() {
       }).formatToParts(date);
       const map = Object.fromEntries(parts.filter((part) => part.type !== 'literal').map((part) => [part.type, part.value]));
       return map.year + '/' + map.month + '/' + map.day + ' ' + map.hour + ':' + map.minute + ':' + map.second;
+    }
+
+    function formatAdminShortDateHourForUi(value, timezone) {
+      const text = String(value || '').trim();
+      if (!text) return '';
+      const date = new Date(text);
+      if (Number.isNaN(date.getTime())) return text;
+      const parts = new Intl.DateTimeFormat('en-CA', {
+        timeZone: timezone || 'Asia/Tokyo',
+        month: '2-digit',
+        day: '2-digit',
+        hour: '2-digit',
+        hour12: false
+      }).formatToParts(date);
+      const map = Object.fromEntries(parts.filter((part) => part.type !== 'literal').map((part) => [part.type, part.value]));
+      return map.month + '/' + map.day + ' ' + map.hour + '点';
     }
 
     function pager(tab, key, meta, reloadName = 'loadTab') {

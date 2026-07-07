@@ -12,11 +12,13 @@ import {
   currentAdminStoreId,
   checkoutApprovalKeyboard,
   formatAdminDateTime,
+  formatAdminShortDateHour,
   makeStoreId,
   formatAdminMoney,
   memberListQuery,
   leaveDateOptions,
   leaveMonthRange,
+  leaveRuleParams,
   validateLeaveDate,
   visibleAdminStores
 } from '../src/index.js';
@@ -90,6 +92,16 @@ test('formats admin date time in store timezone', () => {
   assert.equal(formatAdminDateTime('', 'Asia/Tokyo'), '');
 });
 
+test('formats income request and approval times as month day and hour only', () => {
+  assert.equal(formatAdminShortDateHour('2026-06-24T12:34:56.000Z', 'Asia/Tokyo'), '06/24 21点');
+  assert.equal(formatAdminShortDateHour('', 'Asia/Tokyo'), '');
+});
+
+test('income records show request and approval time without source column', () => {
+  assert.match(source, /incomeActionTable\(data\.records, \['record_id','telegram_id','display_name','type','income','commission_rate','commission_income','original_fine','fine','submitted_at','approved_at','admin_id'\]/);
+  assert.doesNotMatch(source, /incomeActionTable\(data\.records, \[[^\]]*'source'[^\]]*\]/);
+});
+
 test('validates leave date in the next one to five local days', () => {
   const now = new Date('2026-06-22T12:00:00.000Z');
   const store = { timezone: 'Asia/Tokyo' };
@@ -99,6 +111,23 @@ test('validates leave date in the next one to five local days', () => {
   assert.equal(validateLeaveDate(store, '2026-06-22', now).ok, false);
   assert.equal(validateLeaveDate(store, '2026-06-28', now).ok, false);
   assert.equal(validateLeaveDate(store, '2026/06/23', now).ok, false);
+});
+
+test('allows same-day leave before 5am in the store timezone only', () => {
+  const store = { timezone: 'Asia/Ho_Chi_Minh' };
+
+  assert.deepEqual(validateLeaveDate(store, '2026-06-22', new Date('2026-06-21T21:59:00.000Z')), { ok: true, date: '2026-06-22' });
+  assert.equal(validateLeaveDate(store, '2026-06-22', new Date('2026-06-21T22:00:00.000Z')).ok, false);
+  assert.deepEqual(leaveDateOptions(store, new Date('2026-06-21T21:59:00.000Z'))[0], '2026-06-22');
+});
+
+test('uses store setting for same-day leave cutoff hour', () => {
+  const store = { timezone: 'Asia/Ho_Chi_Minh', leave_same_day_cutoff_hour: 3 };
+
+  assert.deepEqual(validateLeaveDate(store, '2026-06-22', new Date('2026-06-21T19:59:00.000Z')), { ok: true, date: '2026-06-22' });
+  assert.equal(validateLeaveDate(store, '2026-06-22', new Date('2026-06-21T20:00:00.000Z')).ok, false);
+  assert.deepEqual(leaveDateOptions(store, new Date('2026-06-21T19:59:00.000Z'))[0], '2026-06-22');
+  assert.deepEqual(leaveRuleParams(store, new Date('2026-06-21T19:59:00.000Z')), { min: 0, max: 5 });
 });
 
 test('validates leave date with store-specific rule settings', () => {
