@@ -1,0 +1,7 @@
+# Local secrets and generated exports
+.env
+*.local
+*.zip
+
+# clasp local project binding may contain project identifiers.
+.clasp.json

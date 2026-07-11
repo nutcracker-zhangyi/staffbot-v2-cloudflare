@@ -1900,14 +1900,9 @@ async function handleAdminIncome(request, env, url, storeId, parts, adminId) {
       recordWhere.push(`r.telegram_id = ?`);
       recordParams.push(filters.employeeId);
     }
-    if (filters.monthStart) {
-      pendingWhere.push(`p.submitted_at >= ? AND p.submitted_at < ?`);
-      pendingParams.push(filters.monthStart, filters.monthEnd);
-      rejectedWhere.push(`p.submitted_at >= ? AND p.submitted_at < ?`);
-      rejectedParams.push(filters.monthStart, filters.monthEnd);
-      recordWhere.push(`r.approved_at >= ? AND r.approved_at < ?`);
-      recordParams.push(filters.monthStart, filters.monthEnd);
-    }
+    addRangeFilter(pendingWhere, pendingParams, 'p.submitted_at', filters.monthStart, filters.monthEnd);
+    addRangeFilter(rejectedWhere, rejectedParams, 'p.submitted_at', filters.monthStart, filters.monthEnd);
+    addRangeFilter(recordWhere, recordParams, 'r.approved_at', filters.monthStart, filters.monthEnd);
     const pendingSort = {
       ...adminSortColumns(['request_id','store_id','telegram_id','income','commission_rate','commission_income','fine','status','submitted_at','decided_at','admin_id','reject_reason'], 'p'),
       original_fine: 'p.fine',
@@ -1998,14 +1993,9 @@ async function handleAdminSalary(request, env, url, storeId, parts, adminId) {
       recordWhere.push(`r.telegram_id = ?`);
       recordParams.push(filters.employeeId);
     }
-    if (filters.monthStart) {
-      requestWhere.push(`s.requested_at >= ? AND s.requested_at < ?`);
-      requestParams.push(filters.monthStart, filters.monthEnd);
-      rejectedWhere.push(`s.requested_at >= ? AND s.requested_at < ?`);
-      rejectedParams.push(filters.monthStart, filters.monthEnd);
-      recordWhere.push(`r.approved_at >= ? AND r.approved_at < ?`);
-      recordParams.push(filters.monthStart, filters.monthEnd);
-    }
+    addRangeFilter(requestWhere, requestParams, 's.requested_at', filters.monthStart, filters.monthEnd);
+    addRangeFilter(rejectedWhere, rejectedParams, 's.requested_at', filters.monthStart, filters.monthEnd);
+    addRangeFilter(recordWhere, recordParams, 'r.approved_at', filters.monthStart, filters.monthEnd);
     const requestSort = {
       ...adminSortColumns(['request_id','store_id','telegram_id','amount_snapshot','status','requested_at','decided_at','admin_id','reject_reason'], 's'),
       display_name: 'display_name',
@@ -2081,14 +2071,9 @@ async function handleAdminSalaryAdvances(request, env, url, storeId, parts, admi
       rejectedWhere.push(`a.telegram_id = ?`);
       rejectedParams.push(filters.employeeId);
     }
-    if (filters.monthStart) {
-      pendingWhere.push(`a.requested_at >= ? AND a.requested_at < ?`);
-      pendingParams.push(filters.monthStart, filters.monthEnd);
-      approvedWhere.push(`a.decided_at >= ? AND a.decided_at < ?`);
-      approvedParams.push(filters.monthStart, filters.monthEnd);
-      rejectedWhere.push(`a.requested_at >= ? AND a.requested_at < ?`);
-      rejectedParams.push(filters.monthStart, filters.monthEnd);
-    }
+    addRangeFilter(pendingWhere, pendingParams, 'a.requested_at', filters.monthStart, filters.monthEnd);
+    addRangeFilter(approvedWhere, approvedParams, 'a.decided_at', filters.monthStart, filters.monthEnd);
+    addRangeFilter(rejectedWhere, rejectedParams, 'a.requested_at', filters.monthStart, filters.monthEnd);
     const advanceSort = {
       ...adminSortColumns(['request_id','store_id','telegram_id','amount','status','requested_at','decided_at','admin_id','reject_reason'], 'a'),
       display_name: 'display_name',
@@ -2148,14 +2133,9 @@ async function handleAdminAttendance(request, env, url, storeId, parts, adminId)
       rejectedWhere.push(`p.telegram_id = ?`);
       rejectedParams.push(filters.employeeId);
     }
-    if (filters.monthDateStart) {
-      pendingWhere.push(`p.business_date >= ? AND p.business_date < ?`);
-      pendingParams.push(filters.monthDateStart, filters.monthDateEnd);
-      approvedWhere.push(`a.business_date >= ? AND a.business_date < ?`);
-      approvedParams.push(filters.monthDateStart, filters.monthDateEnd);
-      rejectedWhere.push(`p.business_date >= ? AND p.business_date < ?`);
-      rejectedParams.push(filters.monthDateStart, filters.monthDateEnd);
-    }
+    addRangeFilter(pendingWhere, pendingParams, 'p.business_date', filters.monthDateStart, filters.monthDateEnd);
+    addRangeFilter(approvedWhere, approvedParams, 'a.business_date', filters.monthDateStart, filters.monthDateEnd);
+    addRangeFilter(rejectedWhere, rejectedParams, 'p.business_date', filters.monthDateStart, filters.monthDateEnd);
     const pendingSelect = (where) => `
       SELECT p.*, COALESCE(NULLIF(m.display_name, ''), NULLIF(u.name, ''), NULLIF(u.username, ''), p.telegram_id) AS display_name, u.username
       FROM pending_checkout_requests p
@@ -2248,14 +2228,9 @@ async function handleAdminLeave(request, env, url, storeId, parts, adminId) {
       rejectedWhere.push(`l.telegram_id = ?`);
       rejectedParams.push(filters.employeeId);
     }
-    if (filters.monthDateStart) {
-      pendingWhere.push(`l.leave_date >= ? AND l.leave_date < ?`);
-      pendingParams.push(filters.monthDateStart, filters.monthDateEnd);
-      approvedWhere.push(`l.leave_date >= ? AND l.leave_date < ?`);
-      approvedParams.push(filters.monthDateStart, filters.monthDateEnd);
-      rejectedWhere.push(`l.leave_date >= ? AND l.leave_date < ?`);
-      rejectedParams.push(filters.monthDateStart, filters.monthDateEnd);
-    }
+    addRangeFilter(pendingWhere, pendingParams, 'l.leave_date', filters.monthDateStart, filters.monthDateEnd);
+    addRangeFilter(approvedWhere, approvedParams, 'l.leave_date', filters.monthDateStart, filters.monthDateEnd);
+    addRangeFilter(rejectedWhere, rejectedParams, 'l.leave_date', filters.monthDateStart, filters.monthDateEnd);
     const selectSql = (where) => `
       SELECT l.*, COALESCE(NULLIF(m.display_name, ''), NULLIF(u.name, ''), NULLIF(u.username, ''), l.telegram_id) AS display_name, u.username
       FROM leave_requests l
@@ -2310,11 +2285,11 @@ async function exportCsv(env, url, storeId, type, adminId) {
   const memberStoreWhere = adminStoreWhere('m', filters.storeIds);
   const map = {
     'members.csv': [`SELECT m.store_id, m.telegram_id, COALESCE(NULLIF(m.display_name, ''), NULLIF(u.name, ''), NULLIF(u.username, ''), m.telegram_id) AS display_name, u.name AS telegram_name, u.username, m.role, m.status, m.commission_rate, m.cycle_start, m.joined_at, m.updated_at FROM store_members m LEFT JOIN users u ON u.telegram_id = m.telegram_id WHERE ${memberStoreWhere.sql}`, memberStoreWhere.params],
-    'income.csv': [`SELECT * FROM income_records WHERE ${storeWhere}${filters.employeeId ? ' AND telegram_id = ?' : ''}${filters.monthStart ? ' AND approved_at >= ? AND approved_at < ?' : ''} ORDER BY approved_at DESC`, [...filters.storeIds, ...(filters.employeeId ? [filters.employeeId] : []), ...(filters.monthStart ? [filters.monthStart, filters.monthEnd] : [])]],
-    'salary.csv': [`SELECT * FROM salary_records WHERE ${storeWhere}${filters.employeeId ? ' AND telegram_id = ?' : ''}${filters.monthStart ? ' AND approved_at >= ? AND approved_at < ?' : ''} ORDER BY approved_at DESC`, [...filters.storeIds, ...(filters.employeeId ? [filters.employeeId] : []), ...(filters.monthStart ? [filters.monthStart, filters.monthEnd] : [])]],
-    'advances.csv': [`SELECT * FROM salary_advance_requests WHERE ${storeWhere}${filters.employeeId ? ' AND telegram_id = ?' : ''}${filters.monthStart ? ' AND requested_at >= ? AND requested_at < ?' : ''} ORDER BY requested_at DESC`, [...filters.storeIds, ...(filters.employeeId ? [filters.employeeId] : []), ...(filters.monthStart ? [filters.monthStart, filters.monthEnd] : [])]],
-    'attendance.csv': [`SELECT * FROM attendance_records WHERE ${storeWhere}${filters.employeeId ? ' AND telegram_id = ?' : ''}${filters.monthDateStart ? ' AND business_date >= ? AND business_date < ?' : ''} ORDER BY timestamp DESC`, [...filters.storeIds, ...(filters.employeeId ? [filters.employeeId] : []), ...(filters.monthDateStart ? [filters.monthDateStart, filters.monthDateEnd] : [])]],
-    'leave.csv': [`SELECT * FROM leave_requests WHERE ${storeWhere}${filters.employeeId ? ' AND telegram_id = ?' : ''}${filters.monthDateStart ? ' AND leave_date >= ? AND leave_date < ?' : ''} ORDER BY leave_date DESC, requested_at DESC`, [...filters.storeIds, ...(filters.employeeId ? [filters.employeeId] : []), ...(filters.monthDateStart ? [filters.monthDateStart, filters.monthDateEnd] : [])]]
+    'income.csv': exportSql(`SELECT * FROM income_records WHERE ${storeWhere}`, [...filters.storeIds], filters, 'approved_at', false, 'ORDER BY approved_at DESC'),
+    'salary.csv': exportSql(`SELECT * FROM salary_records WHERE ${storeWhere}`, [...filters.storeIds], filters, 'approved_at', false, 'ORDER BY approved_at DESC'),
+    'advances.csv': exportSql(`SELECT * FROM salary_advance_requests WHERE ${storeWhere}`, [...filters.storeIds], filters, 'requested_at', false, 'ORDER BY requested_at DESC'),
+    'attendance.csv': exportSql(`SELECT * FROM attendance_records WHERE ${storeWhere}`, [...filters.storeIds], filters, 'business_date', true, 'ORDER BY timestamp DESC'),
+    'leave.csv': exportSql(`SELECT * FROM leave_requests WHERE ${storeWhere}`, [...filters.storeIds], filters, 'leave_date', true, 'ORDER BY leave_date DESC, requested_at DESC')
   };
   const item = map[type];
   if (!item) return json({ ok: false, error: 'unknown_export' }, 404);
@@ -2355,21 +2330,57 @@ async function adminFilters(env, url, fallbackStoreId, adminId) {
 
   const employeeRaw = String(url.searchParams.get('employee') || '').trim();
   const employeeId = employeeRaw && employeeRaw !== 'all' ? employeeRaw : '';
-  const legacyMonth = String(url.searchParams.get('month') || '').trim();
-  const monthFrom = String(url.searchParams.get('month_from') || legacyMonth).trim();
-  const monthTo = String(url.searchParams.get('month_to') || legacyMonth || monthFrom).trim();
-  const range = monthRange(monthFrom, monthTo);
+  const hasDateFilter = url.searchParams.has('date_from') || url.searchParams.has('date_to');
+  const dateFrom = String(url.searchParams.get('date_from') || '').trim();
+  const dateTo = String(url.searchParams.get('date_to') || '').trim();
+  const store = await getStore(env, fallbackStoreId);
+  const range = hasDateFilter ? dateRange(dateFrom, dateTo, store && store.timezone) : legacyMonthRange(url);
   return {
     ok: true,
     storeIds,
     employeeId,
-    monthFrom,
-    monthTo,
+    monthFrom: dateFrom,
+    monthTo: dateTo,
     monthStart: range ? range.startIso : '',
     monthEnd: range ? range.endIso : '',
     monthDateStart: range ? range.startDate : '',
     monthDateEnd: range ? range.endDate : ''
   };
+}
+
+function addRangeFilter(where, params, column, start, end) {
+  if (start) {
+    where.push(`${column} >= ?`);
+    params.push(start);
+  }
+  if (end) {
+    where.push(`${column} < ?`);
+    params.push(end);
+  }
+}
+
+function exportSql(baseSql, params, filters, dateColumn, dateOnly, orderSql) {
+  const where = [];
+  const nextParams = [...params];
+  if (filters.employeeId) {
+    where.push('telegram_id = ?');
+    nextParams.push(filters.employeeId);
+  }
+  addRangeFilter(
+    where,
+    nextParams,
+    dateColumn,
+    dateOnly ? filters.monthDateStart : filters.monthStart,
+    dateOnly ? filters.monthDateEnd : filters.monthEnd
+  );
+  return [`${baseSql}${where.length ? ` AND ${where.join(' AND ')}` : ''} ${orderSql}`, nextParams];
+}
+
+function legacyMonthRange(url) {
+  const legacyMonth = String(url.searchParams.get('month') || '').trim();
+  const monthFrom = String(url.searchParams.get('month_from') || legacyMonth).trim();
+  const monthTo = String(url.searchParams.get('month_to') || legacyMonth || monthFrom).trim();
+  return monthRange(monthFrom, monthTo);
 }
 
 function parseMonth(month) {
@@ -2402,6 +2413,60 @@ function monthRange(monthFrom, monthTo) {
     startDate: start.toISOString().slice(0, 10),
     endDate: end.toISOString().slice(0, 10)
   };
+}
+
+function parseIsoDate(value) {
+  const dateText = String(value || '').trim();
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(dateText)) return null;
+  const [year, month, day] = dateText.split('-').map(Number);
+  const date = new Date(Date.UTC(year, month - 1, day));
+  if (date.toISOString().slice(0, 10) !== dateText) return null;
+  return dateText;
+}
+
+export function dateRange(dateFrom, dateTo, timezone = 'UTC') {
+  const from = parseIsoDate(dateFrom);
+  const to = parseIsoDate(dateTo);
+  if (!from && !to) return { startIso: '', endIso: '', startDate: '', endDate: '' };
+  let startDate = from || '';
+  let endDate = to || '';
+  if (startDate && endDate && startDate > endDate) {
+    const temp = startDate;
+    startDate = endDate;
+    endDate = temp;
+  }
+  const endExclusive = endDate ? addIsoDays(endDate, 1) : '';
+  return {
+    startIso: startDate ? zonedMidnightIso(startDate, timezone) : '',
+    endIso: endExclusive ? zonedMidnightIso(endExclusive, timezone) : '',
+    startDate,
+    endDate: endExclusive
+  };
+}
+
+function zonedMidnightIso(isoDate, timezone) {
+  const [year, month, day] = isoDate.split('-').map(Number);
+  let utc = Date.UTC(year, month - 1, day);
+  const target = Date.UTC(year, month - 1, day);
+  for (let i = 0; i < 3; i += 1) {
+    const parts = zonedParts(new Date(utc), timezone || 'UTC');
+    const seen = Date.UTC(Number(parts.year), Number(parts.month) - 1, Number(parts.day), Number(parts.hour), Number(parts.minute));
+    utc += target - seen;
+  }
+  return new Date(utc).toISOString();
+}
+
+function zonedParts(date, timezone) {
+  const parts = new Intl.DateTimeFormat('en-CA', {
+    timeZone: timezone || 'UTC',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    hourCycle: 'h23'
+  }).formatToParts(date);
+  return Object.fromEntries(parts.filter((part) => part.type !== 'literal').map((part) => [part.type, part.value]));
 }
 
 function placeholders(count) {
@@ -3239,10 +3304,9 @@ function adminHtml() {
     let stores = [];
     let currentTab = 'stores';
     let uiLang = localStorage.getItem('staffbot_admin_lang') || 'zh';
-    const currentMonth = new Date().toISOString().slice(0, 7);
     const filters = {
-      monthFrom: currentMonth,
-      monthTo: currentMonth,
+      dateFrom: '',
+      dateTo: '',
       employee: 'all',
       stores: []
     };
@@ -3287,7 +3351,7 @@ function adminHtml() {
         pending_income:'待审批收入', income_records:'收入记录', rejected_income:'拒绝记录', salary_requests:'待审批工资', salary_records:'工资记录', rejected_salary:'拒绝记录', pending_advances:'待审批预支', approved_advances:'已批准预支', rejected_advances:'已拒绝预支', pending_leave:'待审批请假', approved_leave:'已批准请假', rejected_leave:'已拒绝请假', pending_attendance:'待审批签退', approved_attendance:'已批准考勤', rejected_attendance:'已驳回签退',
         summary:'合计', pending_total:'待审批合计', approved_total:'已批准合计', rejected_total:'已拒绝合计', pending_days:'待审批天数', approved_days:'已批准天数', rejected_days:'已拒绝天数', income_total:'收入合计', commission_income_total:'提成收入合计', fine_total:'罚款合计', net_total:'净额合计',
         btn_approve:'批准', btn_approve_fine:'批准并罚款', btn_approve_no_fine:'批准不罚款', btn_reject:'驳回',
-        filter:'筛选', month:'月份', month_from:'开始月份', month_to:'结束月份', employee:'员工', all_employees:'全部员工', stores_filter:'店铺（可多选）', search:'查询', prev_page:'上一页', next_page:'下一页', page_status:'第 {page} / {total_pages} 页，共 {total} 条',
+        filter:'筛选', month:'月份', date_from:'开始日期', date_to:'结束日期', employee:'员工', all_employees:'全部员工', stores_filter:'店铺（可多选）', search:'查询', prev_page:'上一页', next_page:'下一页', page_status:'第 {page} / {total_pages} 页，共 {total} 条',
         sent_code:'验证码已发送到 Telegram。', sending:'发送中...', reject_reason:'驳回原因', no_data:'暂无数据',
         confirm_delete_member:'确定删除这个员工吗？', confirm_delete_store:'确定停用这个店铺吗？历史记录会保留。', default_store_cannot_be_deleted:'默认店铺不能删除。', confirm_delete_income:'确定删除这条收入记录吗？删除已批准收入会影响总收入和工资。', edit_fine:'修改罚款', prompt_fine:'请输入新的罚款金额'
       },
@@ -3307,7 +3371,7 @@ function adminHtml() {
         pending_income:'Pending income', income_records:'Income records', rejected_income:'Rejected records', salary_requests:'Pending salary', salary_records:'Salary records', rejected_salary:'Rejected records', pending_advances:'Pending advances', approved_advances:'Approved advances', rejected_advances:'Rejected advances', pending_leave:'Pending leave', approved_leave:'Approved leave', rejected_leave:'Rejected leave', pending_attendance:'Pending checkout', approved_attendance:'Approved attendance', rejected_attendance:'Rejected checkout',
         summary:'Summary', pending_total:'Pending total', approved_total:'Approved total', rejected_total:'Rejected total', pending_days:'Pending days', approved_days:'Approved days', rejected_days:'Rejected days', income_total:'Income total', commission_income_total:'Commission income total', fine_total:'Fine total', net_total:'Net total',
         btn_approve:'Approve', btn_approve_fine:'Approve with fine', btn_approve_no_fine:'Approve no fine', btn_reject:'Reject',
-        filter:'Filter', month:'Month', month_from:'From month', month_to:'To month', employee:'Employee', all_employees:'All employees', stores_filter:'Stores (multi-select)', search:'Search', prev_page:'Previous', next_page:'Next', page_status:'Page {page} / {total_pages}, {total} rows',
+        filter:'Filter', month:'Month', date_from:'From date', date_to:'To date', employee:'Employee', all_employees:'All employees', stores_filter:'Stores (multi-select)', search:'Search', prev_page:'Previous', next_page:'Next', page_status:'Page {page} / {total_pages}, {total} rows',
         sent_code:'Code sent to Telegram.', sending:'Sending...', reject_reason:'Reject reason', no_data:'No data',
         confirm_delete_member:'Delete this member?', confirm_delete_store:'Disable this store? History will be kept.', default_store_cannot_be_deleted:'The default store cannot be deleted.', confirm_delete_income:'Delete this income record? Deleting approved income changes totals and salary.', edit_fine:'Edit fine', prompt_fine:'Enter the new fine amount'
       },
@@ -3327,7 +3391,7 @@ function adminHtml() {
         pending_income:'Thu nhập chờ duyệt', income_records:'Bản ghi thu nhập', rejected_income:'Bản ghi từ chối', salary_requests:'Lương chờ duyệt', salary_records:'Bản ghi lương', rejected_salary:'Bản ghi từ chối', pending_advances:'Ứng lương chờ duyệt', approved_advances:'Ứng lương đã duyệt', rejected_advances:'Ứng lương bị từ chối', pending_attendance:'Ra ca chờ duyệt', approved_attendance:'Chấm công đã duyệt', rejected_attendance:'Ra ca bị từ chối',
         summary:'Tổng cộng', pending_total:'Tổng chờ duyệt', approved_total:'Tổng đã duyệt', rejected_total:'Tổng từ chối', income_total:'Tổng thu nhập', commission_income_total:'Tổng thu nhập hoa hồng', fine_total:'Tổng phạt', net_total:'Tổng ròng',
         btn_approve:'Duyệt', btn_approve_fine:'Duyệt kèm phạt', btn_approve_no_fine:'Duyệt không phạt', btn_reject:'Từ chối',
-        filter:'Lọc', month:'Tháng', month_from:'Từ tháng', month_to:'Đến tháng', employee:'Nhân viên', all_employees:'Tất cả nhân viên', stores_filter:'Cửa hàng (chọn nhiều)', search:'Tìm',
+        filter:'Lọc', month:'Tháng', date_from:'Từ ngày', date_to:'Đến ngày', employee:'Nhân viên', all_employees:'Tất cả nhân viên', stores_filter:'Cửa hàng (chọn nhiều)', search:'Tìm',
         sent_code:'Đã gửi mã đến Telegram.', sending:'Đang gửi...', reject_reason:'Lý do từ chối', no_data:'Không có dữ liệu',
         confirm_delete_member:'Xóa nhân viên này?', confirm_delete_store:'Tắt cửa hàng này? Lịch sử sẽ được giữ lại.', default_store_cannot_be_deleted:'Không thể xóa cửa hàng mặc định.', confirm_delete_income:'Xóa bản ghi thu nhập này? Xóa thu nhập đã duyệt sẽ ảnh hưởng tổng và lương.', edit_fine:'Sửa phạt', prompt_fine:'Nhập số tiền phạt mới'
       },
@@ -3347,7 +3411,7 @@ function adminHtml() {
         pending_income:'Доход на проверке', income_records:'Записи дохода', rejected_income:'Отклоненные записи', salary_requests:'Зарплата на проверке', salary_records:'Записи зарплаты', rejected_salary:'Отклоненные записи', pending_advances:'Авансы на проверке', approved_advances:'Одобренные авансы', rejected_advances:'Отклоненные авансы', pending_attendance:'Завершение смены на проверке', approved_attendance:'Одобренная посещаемость', rejected_attendance:'Отклоненное завершение смены',
         summary:'Итого', pending_total:'Ожидает итого', approved_total:'Одобрено итого', rejected_total:'Отклонено итого', income_total:'Доход итого', commission_income_total:'Комиссионный доход итого', fine_total:'Штраф итого', net_total:'Чистый итог',
         btn_approve:'Одобрить', btn_approve_fine:'Одобрить со штрафом', btn_approve_no_fine:'Одобрить без штрафа', btn_reject:'Отклонить',
-        filter:'Фильтр', month:'Месяц', month_from:'С месяца', month_to:'По месяц', employee:'Сотрудник', all_employees:'Все сотрудники', stores_filter:'Магазины (можно несколько)', search:'Поиск',
+        filter:'Фильтр', month:'Месяц', date_from:'С даты', date_to:'По дату', employee:'Сотрудник', all_employees:'Все сотрудники', stores_filter:'Магазины (можно несколько)', search:'Поиск',
         sent_code:'Код отправлен в Telegram.', sending:'Отправка...', reject_reason:'Причина отклонения', no_data:'Нет данных',
         confirm_delete_member:'Удалить этого сотрудника?', confirm_delete_store:'Отключить этот магазин? История сохранится.', default_store_cannot_be_deleted:'Магазин по умолчанию нельзя удалить.', confirm_delete_income:'Удалить эту запись дохода? Удаление одобренного дохода изменит итоги и зарплату.', edit_fine:'Изменить штраф', prompt_fine:'Введите новый штраф'
       }
@@ -3425,11 +3489,20 @@ function adminHtml() {
     }
     function filterQuery() {
       const params = new URLSearchParams();
-      if (filters.monthFrom) params.set('month_from', filters.monthFrom);
-      if (filters.monthTo) params.set('month_to', filters.monthTo);
+      if (filters.dateFrom) params.set('date_from', filters.dateFrom);
+      if (filters.dateTo) params.set('date_to', filters.dateTo);
       if (filters.employee && filters.employee !== 'all') params.set('employee', filters.employee);
       params.set('stores', activeFilterStores().join(','));
       return params.toString();
+    }
+    function syncFilterInputs(root = $('tab-' + currentTab)) {
+      const dateFrom = root && root.querySelector('[data-filter-date-from]');
+      const dateTo = root && root.querySelector('[data-filter-date-to]');
+      const employee = root && root.querySelector('[data-filter-employee]');
+      if (dateFrom) filters.dateFrom = dateFrom.value;
+      if (dateTo) filters.dateTo = dateTo.value;
+      if (employee) filters.employee = employee.value || 'all';
+      if (root && root.querySelector('[data-filter-stores]')) filters.stores = selectedFilterStores(root);
     }
     function pageQuery(tab) {
       const params = new URLSearchParams();
@@ -3774,8 +3847,8 @@ function adminHtml() {
       return '<div class="filter-panel">' +
         '<h2>' + L('filter') + '</h2>' +
         '<div class="grid">' +
-        (includeEmployeeFilters ? '<label>' + L('month_from') + '<input data-filter-month-from type="month" value="' + esc(filters.monthFrom) + '"></label>' +
-        '<label>' + L('month_to') + '<input data-filter-month-to type="month" value="' + esc(filters.monthTo) + '"></label>' +
+        (includeEmployeeFilters ? '<label>' + L('date_from') + '<input data-filter-date-from type="date" value="' + esc(filters.dateFrom) + '"></label>' +
+        '<label>' + L('date_to') + '<input data-filter-date-to type="date" value="' + esc(filters.dateTo) + '"></label>' +
         '<label>' + L('employee') + '<select data-filter-employee><option value="all">' + L('all_employees') + '</option>' + members.map((member) => '<option value="' + esc(member.telegram_id) + '"' + (filters.employee === member.telegram_id ? ' selected' : '') + '>' + esc(member.display_name + ' (' + member.telegram_id + ')') + '</option>').join('') + '</select></label>' : '') +
         '<label>' + L('stores_filter') + '<select data-filter-stores multiple size="' + Math.min(Math.max(stores.length, 2), 6) + '">' + stores.map((store) => '<option value="' + esc(store.store_id) + '"' + (selectedStores.has(store.store_id) ? ' selected' : '') + '>' + esc(store.name) + '</option>').join('') + '</select></label>' +
         '</div>' +
@@ -3815,20 +3888,14 @@ function adminHtml() {
       const storeFilter = root && root.querySelector('[data-filter-stores]');
       if (!applyButton || !storeFilter) return;
       applyButton.onclick = () => withBusy(applyButton, async () => {
-        const monthFrom = root.querySelector('[data-filter-month-from]');
-        const monthTo = root.querySelector('[data-filter-month-to]');
-        const employee = root.querySelector('[data-filter-employee]');
-        if (monthFrom) filters.monthFrom = monthFrom.value;
-        if (monthTo) filters.monthTo = monthTo.value;
-        filters.employee = employee ? employee.value || 'all' : 'all';
-        filters.stores = selectedFilterStores(root);
+        syncFilterInputs(root);
         resetPages(currentTab);
         updateExportLinks();
         await loadTab();
       });
       if (storeFilter.tagName === 'SELECT') {
         storeFilter.onchange = async () => {
-          filters.stores = selectedFilterStores(root);
+          syncFilterInputs(root);
           filters.employee = 'all';
           resetPages(currentTab);
           updateExportLinks();
@@ -4023,6 +4090,7 @@ function adminHtml() {
     function bindPagers() {
       document.querySelectorAll('[data-sort-col]').forEach((btn) => {
         btn.onclick = () => withBusy(btn, async () => {
+          syncFilterInputs();
           const group = btn.dataset.sortGroup;
           const col = btn.dataset.sortCol;
           const state = sorts[currentTab][group] || (sorts[currentTab][group] = {});
@@ -4039,6 +4107,7 @@ function adminHtml() {
       });
       document.querySelectorAll('[data-page-dir]').forEach((btn) => {
         btn.onclick = () => withBusy(btn, async () => {
+          syncFilterInputs();
           const box = btn.closest('[data-tab-page]');
           const tab = box.dataset.tabPage;
           const key = box.dataset.pageKey;
@@ -4069,7 +4138,7 @@ function adminHtml() {
       applyI18n();
       if (!$('app').classList.contains('hidden')) await loadTab();
     };
-    document.querySelectorAll('nav button').forEach((b) => b.onclick = () => { currentTab = b.dataset.tab; loadTab(); });
+    document.querySelectorAll('nav button').forEach((b) => b.onclick = () => { syncFilterInputs(); currentTab = b.dataset.tab; loadTab(); });
     boot();
   </script>
 </body>

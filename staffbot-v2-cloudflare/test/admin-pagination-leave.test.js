@@ -10,6 +10,7 @@ import {
   attendanceAdminActions,
   attendanceFineDecision,
   currentAdminStoreId,
+  dateRange,
   checkoutApprovalKeyboard,
   formatAdminDateTime,
   formatAdminShortDateHour,
@@ -67,9 +68,15 @@ test('scopes admin filter controls to the active tab', () => {
     assert.doesNotMatch(source, new RegExp(`id="${id}"`));
     assert.doesNotMatch(source, new RegExp(`\\$\\('${id}'\\)`));
   }
-  for (const attr of ['data-apply-filters', 'data-filter-stores', 'data-filter-month-from', 'data-filter-month-to', 'data-filter-employee']) {
+  for (const attr of ['data-apply-filters', 'data-filter-stores', 'data-filter-date-from', 'data-filter-date-to', 'data-filter-employee']) {
     assert.match(source, new RegExp(attr));
   }
+  assert.doesNotMatch(source, /type="month"/);
+});
+
+test('syncs visible filter inputs before admin tab changes', () => {
+  assert.match(source, /function syncFilterInputs\(/);
+  assert.match(source, /document\.querySelectorAll\('nav button'\)\.forEach\(\(b\) => b\.onclick = \(\) => \{ syncFilterInputs\(\); currentTab = b\.dataset\.tab; loadTab\(\); \}\);/);
 });
 
 test('builds admin sort SQL only from allowed fields', () => {
@@ -151,6 +158,42 @@ test('returns leave month boundaries for counting monthly leave days', () => {
   assert.deepEqual(leaveMonthRange('2026-06-23'), {
     startDate: '2026-06-01',
     endDate: '2026-07-01'
+  });
+});
+
+test('returns inclusive admin date filter boundaries', () => {
+  assert.deepEqual(dateRange('', ''), {
+    startIso: '',
+    endIso: '',
+    startDate: '',
+    endDate: ''
+  });
+  assert.deepEqual(dateRange('2026-07-08', ''), {
+    startIso: '2026-07-08T00:00:00.000Z',
+    endIso: '',
+    startDate: '2026-07-08',
+    endDate: ''
+  });
+  assert.deepEqual(dateRange('', '2026-07-08'), {
+    startIso: '',
+    endIso: '2026-07-09T00:00:00.000Z',
+    startDate: '',
+    endDate: '2026-07-09'
+  });
+  assert.deepEqual(dateRange('2026-07-10', '2026-07-08'), {
+    startIso: '2026-07-08T00:00:00.000Z',
+    endIso: '2026-07-11T00:00:00.000Z',
+    startDate: '2026-07-08',
+    endDate: '2026-07-11'
+  });
+});
+
+test('returns admin date filter boundaries in the store timezone', () => {
+  assert.deepEqual(dateRange('2026-07-01', '2026-07-01', 'Asia/Tokyo'), {
+    startIso: '2026-06-30T15:00:00.000Z',
+    endIso: '2026-07-01T15:00:00.000Z',
+    startDate: '2026-07-01',
+    endDate: '2026-07-02'
   });
 });
 
