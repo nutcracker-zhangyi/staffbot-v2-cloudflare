@@ -187,7 +187,8 @@ function attendanceStatsTestDatabase() {
     CREATE TABLE stores (store_id TEXT PRIMARY KEY, name TEXT, timezone TEXT, currency TEXT);
     CREATE TABLE users (telegram_id TEXT PRIMARY KEY, name TEXT, username TEXT);
     CREATE TABLE store_members (
-      store_id TEXT, telegram_id TEXT, display_name TEXT, status TEXT, joined_at TEXT
+      store_id TEXT, telegram_id TEXT, display_name TEXT, status TEXT, joined_at TEXT,
+      absence_check_enabled INTEGER NOT NULL DEFAULT 1, absence_check_enabled_at TEXT
     );
     CREATE TABLE attendance_records (
       record_id TEXT PRIMARY KEY, store_id TEXT, telegram_id TEXT,
@@ -208,9 +209,11 @@ function attendanceStatsTestDatabase() {
     INSERT INTO stores VALUES ('TOKYO', 'Tokyo Club', 'Asia/Tokyo', '¥');
     INSERT INTO users VALUES ('U1', 'Telegram Alice', 'alice');
     INSERT INTO users VALUES ('U2', 'Bob', 'bob');
-    INSERT INTO store_members VALUES ('TOKYO', 'U1', 'Alice', 'active', '2026-07-09T16:00:00.000Z');
-    INSERT INTO store_members VALUES ('TOKYO', 'U2', '', 'active', '2026-07-14T02:00:00.000Z');
-    INSERT INTO store_members VALUES ('TOKYO', 'U3', 'Disabled', 'disabled', '2026-07-01T00:00:00.000Z');
+    INSERT INTO store_members VALUES ('TOKYO', 'U1', 'Alice', 'active', '2026-07-09T16:00:00.000Z', 1, '2026-07-09T16:00:00.000Z');
+    INSERT INTO store_members VALUES ('TOKYO', 'U2', '', 'active', '2026-07-14T02:00:00.000Z', 1, '2026-07-14T02:00:00.000Z');
+    INSERT INTO store_members VALUES ('TOKYO', 'U3', 'Disabled', 'disabled', '2026-07-01T00:00:00.000Z', 1, '2026-07-01T00:00:00.000Z');
+    INSERT INTO store_members VALUES ('TOKYO', 'U4', 'Exempt', 'active', '2026-07-09T00:00:00.000Z', 0, NULL);
+    INSERT INTO store_members VALUES ('TOKYO', 'U5', 'Re-enabled', 'active', '2026-07-09T00:00:00.000Z', 1, '2026-07-12T15:00:00.000Z');
 
     INSERT INTO attendance_records VALUES ('IN-10', 'TOKYO', 'U1', '2026-07-10', 'checkin', 1);
     INSERT INTO attendance_records VALUES ('IN-11', 'TOKYO', 'U1', '2026-07-11', 'checkin', 0);
@@ -218,16 +221,23 @@ function attendanceStatsTestDatabase() {
     INSERT INTO attendance_records VALUES ('IN-12A', 'TOKYO', 'U1', '2026-07-12', 'checkin', 0);
     INSERT INTO attendance_records VALUES ('IN-12B', 'TOKYO', 'U1', '2026-07-12', 'checkin', 0);
     INSERT INTO attendance_records VALUES ('IN-15', 'TOKYO', 'U1', '2026-07-15', 'checkin', 1);
+    INSERT INTO attendance_records VALUES ('IN-U4-10', 'TOKYO', 'U4', '2026-07-10', 'checkin', 1);
+    INSERT INTO attendance_records VALUES ('IN-U5-10', 'TOKYO', 'U5', '2026-07-10', 'checkin', 1);
+    INSERT INTO attendance_records VALUES ('IN-U5-13', 'TOKYO', 'U5', '2026-07-13', 'checkin', 0);
     INSERT INTO leave_requests VALUES ('LEAVE-12', 'TOKYO', 'U1', '2026-07-12', 'approved');
     INSERT INTO leave_requests VALUES ('LEAVE-13A', 'TOKYO', 'U1', '2026-07-13', 'approved');
     INSERT INTO leave_requests VALUES ('LEAVE-13B', 'TOKYO', 'U1', '2026-07-13', 'approved');
     INSERT INTO leave_requests VALUES ('LEAVE-14', 'TOKYO', 'U1', '2026-07-14', 'rejected');
+    INSERT INTO leave_requests VALUES ('LEAVE-U4-11', 'TOKYO', 'U4', '2026-07-11', 'approved');
+    INSERT INTO leave_requests VALUES ('LEAVE-U5-11', 'TOKYO', 'U5', '2026-07-11', 'approved');
     INSERT INTO absence_fine_requests VALUES ('ABS-14', 'TOKYO', 'U1', '2026-07-14');
     INSERT INTO income_records VALUES ('F-LATE', 'TOKYO', 'U1', 500000, 'attendance_late', 'IN-10');
     INSERT INTO income_records VALUES ('F-EARLY', 'TOKYO', 'U1', 700000, 'attendance_early', 'OUT-11');
     INSERT INTO income_records VALUES ('F-ABS', 'TOKYO', 'U1', 1500000, 'attendance_absence', 'ABS-14');
     INSERT INTO income_records VALUES ('F-MANUAL', 'TOKYO', 'U1', 9000000, 'manual', NULL);
     INSERT INTO income_records VALUES ('F-FUTURE', 'TOKYO', 'U1', 100000, 'attendance_late', 'IN-15');
+    INSERT INTO income_records VALUES ('F-U4-LATE', 'TOKYO', 'U4', 400000, 'attendance_late', 'IN-U4-10');
+    INSERT INTO income_records VALUES ('F-U5-LATE', 'TOKYO', 'U5', 300000, 'attendance_late', 'IN-U5-10');
   `);
   return database;
 }
@@ -348,8 +358,38 @@ test('returns one full-range attendance statistics row per active employee', asy
     {
       store_id: 'TOKYO', store_name: 'Tokyo Club', currency: '¥', telegram_id: 'U2', display_name: 'Bob',
       work_days: 0, late_days: 0, absence_days: 1, leave_days: 0, fine_total: 0
+    },
+    {
+      store_id: 'TOKYO', store_name: 'Tokyo Club', currency: '¥', telegram_id: 'U4', display_name: 'Exempt',
+      work_days: 1, late_days: 1, absence_days: 0, leave_days: 1, fine_total: 400000
+    },
+    {
+      store_id: 'TOKYO', store_name: 'Tokyo Club', currency: '¥', telegram_id: 'U5', display_name: 'Re-enabled',
+      work_days: 2, late_days: 1, absence_days: 1, leave_days: 1, fine_total: 300000
     }
   ]);
+});
+
+test('keeps other statistics for an exempt employee but reports zero absence days', async () => {
+  const rows = await attendanceEmployeeStats({ DB: d1TestDatabase(attendanceStatsTestDatabase()) }, {
+    storeIds: ['TOKYO'], employeeId: 'U4', monthDateStart: '2026-07-09', monthDateEnd: '2026-07-21'
+  }, new Date('2026-07-15T03:00:00.000Z'));
+
+  assert.deepEqual(rows[0], {
+    store_id: 'TOKYO', store_name: 'Tokyo Club', currency: '¥', telegram_id: 'U4', display_name: 'Exempt',
+    work_days: 1, late_days: 1, absence_days: 0, leave_days: 1, fine_total: 400000
+  });
+});
+
+test('starts absence statistics for a re-enabled employee on the store-local enable date', async () => {
+  const rows = await attendanceEmployeeStats({ DB: d1TestDatabase(attendanceStatsTestDatabase()) }, {
+    storeIds: ['TOKYO'], employeeId: 'U5', monthDateStart: '2026-07-09', monthDateEnd: '2026-07-21'
+  }, new Date('2026-07-15T03:00:00.000Z'));
+
+  assert.deepEqual(rows[0], {
+    store_id: 'TOKYO', store_name: 'Tokyo Club', currency: '¥', telegram_id: 'U5', display_name: 'Re-enabled',
+    work_days: 2, late_days: 1, absence_days: 1, leave_days: 1, fine_total: 300000
+  });
 });
 
 test('hides disabled stores from admin store choices', () => {
@@ -1063,7 +1103,7 @@ test('recovers a sending notification lease older than fifteen minutes', async (
   });
 });
 
-test('discovers and notifies each completed-day absence once', async () => {
+test('discovers each absence once while excluding an exempt employee and a not-yet re-enabled employee', async () => {
   const store = {
     store_id: 'TOKYO',
     name: 'Tokyo Club',
@@ -1095,10 +1135,17 @@ test('discovers and notifies each completed-day absence once', async () => {
           },
           async all() {
             if (/FROM stores/.test(sql)) return { results: [store] };
-            if (/FROM store_members m/.test(sql)) return { results: [
-              { telegram_id: '10', joined_at: '2026-07-01T00:00:00.000Z', display_name: 'Alice' },
-              { telegram_id: '11', joined_at: '2026-07-15T00:00:00.000Z', display_name: 'Bob' }
-            ] };
+            if (/FROM store_members m/.test(sql)) {
+              const members = [
+                { telegram_id: '10', joined_at: '2026-07-01T00:00:00.000Z', display_name: 'Alice', absence_check_enabled: 1, absence_check_enabled_at: '2026-07-01T00:00:00.000Z' },
+                { telegram_id: '11', joined_at: '2026-07-15T00:00:00.000Z', display_name: 'Bob', absence_check_enabled: 1, absence_check_enabled_at: '2026-07-15T00:00:00.000Z' },
+                { telegram_id: '12', joined_at: '2026-07-01T00:00:00.000Z', display_name: 'Exempt', absence_check_enabled: 0, absence_check_enabled_at: null },
+                { telegram_id: '13', joined_at: '2026-07-01T00:00:00.000Z', display_name: 'Re-enabled', absence_check_enabled: 1, absence_check_enabled_at: '2026-07-14T15:00:00.000Z' }
+              ];
+              return { results: /m\.absence_check_enabled = 1/.test(sql)
+                ? members.filter((member) => member.absence_check_enabled === 1)
+                : members };
+            }
             if (/FROM absence_fine_requests/.test(sql)) {
               return { results: requests.filter((row) => row.store_id === params[0]) };
             }

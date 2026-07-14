@@ -2507,6 +2507,8 @@ export async function attendanceEmployeeStats(env, filters, now = new Date()) {
         m.telegram_id,
         COALESCE(NULLIF(m.display_name, ''), NULLIF(u.name, ''), NULLIF(u.username, ''), m.telegram_id) AS display_name,
         m.joined_at,
+        m.absence_check_enabled,
+        m.absence_check_enabled_at,
         e.business_date,
         e.event_kind,
         e.fine
@@ -2528,6 +2530,9 @@ export async function attendanceEmployeeStats(env, filters, now = new Date()) {
         const startDate = filters.monthDateStart && filters.monthDateStart > joinedDate
           ? filters.monthDateStart
           : joinedDate;
+        const enabledDate = row.absence_check_enabled_at
+          ? localDate(new Date(row.absence_check_enabled_at), timezone)
+          : startDate;
         member = {
           row: {
             store_id: row.store_id,
@@ -2542,6 +2547,9 @@ export async function attendanceEmployeeStats(env, filters, now = new Date()) {
             fine_total: 0
           },
           startDate,
+          absenceStartDate: Number(row.absence_check_enabled) === 1
+            ? (enabledDate > startDate ? enabledDate : startDate)
+            : null,
           workDates: new Set(),
           lateDates: new Set(),
           leaveDates: new Set()
@@ -2557,14 +2565,19 @@ export async function attendanceEmployeeStats(env, filters, now = new Date()) {
 
     for (const member of members.values()) {
       if (member.startDate <= endDate) {
-        const attendedOrLeave = new Set([...member.workDates, ...member.leaveDates]);
-        const eligibleDays = Math.floor(
-          (Date.parse(`${endDate}T00:00:00Z`) - Date.parse(`${member.startDate}T00:00:00Z`)) / 86400000
-        ) + 1;
         member.row.work_days = member.workDates.size;
         member.row.late_days = member.lateDates.size;
         member.row.leave_days = member.leaveDates.size;
-        member.row.absence_days = eligibleDays - attendedOrLeave.size;
+        if (member.absenceStartDate && member.absenceStartDate <= endDate) {
+          const attendedOrLeave = new Set(
+            [...member.workDates, ...member.leaveDates]
+              .filter((businessDate) => businessDate >= member.absenceStartDate)
+          );
+          const eligibleDays = Math.floor(
+            (Date.parse(`${endDate}T00:00:00Z`) - Date.parse(`${member.absenceStartDate}T00:00:00Z`)) / 86400000
+          ) + 1;
+          member.row.absence_days = eligibleDays - attendedOrLeave.size;
+        }
       }
       employeeStats.push(member.row);
     }
@@ -3379,12 +3392,14 @@ export async function processAbsenceFines(env, now = new Date()) {
       const candidates = await env.DB.prepare(`
         SELECT m.telegram_id,
                m.joined_at,
+               m.absence_check_enabled_at,
                COALESCE(NULLIF(m.display_name, ''), NULLIF(u.name, ''), NULLIF(u.username, ''), m.telegram_id) AS display_name
         FROM store_members m
         LEFT JOIN users u ON u.telegram_id = m.telegram_id
         WHERE m.store_id = ?
           AND m.status = 'active'
           AND m.role = 'employee'
+          AND m.absence_check_enabled = 1
           AND NOT EXISTS (
             SELECT 1 FROM attendance_records a
             WHERE a.store_id = m.store_id
@@ -3403,6 +3418,8 @@ export async function processAbsenceFines(env, now = new Date()) {
 
       for (const member of candidates.results || []) {
         if (localDate(new Date(member.joined_at), timezone) > businessDate) continue;
+        if (member.absence_check_enabled_at
+          && localDate(new Date(member.absence_check_enabled_at), timezone) > businessDate) continue;
         const fine = attendanceFineAmount(store, store.absence_fine);
         await env.DB.prepare(`
           INSERT OR IGNORE INTO absence_fine_requests
