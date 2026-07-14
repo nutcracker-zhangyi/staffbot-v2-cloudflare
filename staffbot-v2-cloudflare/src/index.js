@@ -1702,7 +1702,8 @@ async function listAdminStores(env, url, adminId) {
   const orderSql = adminOrderSql(url, 'stores_page', adminSortColumns([
     'store_id','name','status','timezone','currency','checkin_time','checkout_time',
     'late_fine','early_leave_fine','leave_min_notice_days','leave_max_notice_days',
-    'leave_monthly_limit','leave_daily_limit','leave_same_day_cutoff_hour'
+    'leave_monthly_limit','leave_daily_limit','leave_same_day_cutoff_hour','absence_fine',
+    'absence_fine_enabled_at','absence_last_checked_date'
   ], 's'), 'ORDER BY s.name');
   const allRows = isGlobalAdmin(env, adminId)
     ? await env.DB.prepare(`SELECT s.* FROM stores s WHERE s.status = 'active' ${orderSql}`).all()
@@ -1725,10 +1726,15 @@ async function listAdminStores(env, url, adminId) {
 async function createAdminStore(request, env, adminId) {
   if (!isGlobalAdmin(env, adminId)) return json({ ok: false, error: 'forbidden' }, 403);
   const body = await readJson(request);
-  const now = nowIso();
+  const nowDate = new Date();
+  const now = nowDate.toISOString();
   const storeId = cleanStoreId(body.store_id || body.name || makeStoreId());
   const name = String(body.name || storeId).trim();
-  const store = normalizeStoreInput({ ...body, store_id: storeId, name }, now);
+  const normalizedStore = normalizeStoreInput({ ...body, store_id: storeId, name });
+  const store = {
+    ...normalizedStore,
+    ...normalizeAbsenceFineSetting(body, normalizedStore, nowDate)
+  };
   const globalAdminMembers = adminIds(env).map((telegramId) => env.DB.prepare(`
     INSERT INTO store_members (store_id, telegram_id, role, status, cycle_start, joined_at, updated_at)
     VALUES (?, ?, 'admin', 'active', ?, ?, ?)
@@ -1742,13 +1748,15 @@ async function createAdminStore(request, env, adminId) {
       INSERT INTO stores (
         store_id, name, status, timezone, currency, checkin_time, checkout_time,
         late_fine, early_leave_fine, leave_min_notice_days, leave_max_notice_days,
-        leave_monthly_limit, leave_daily_limit, leave_same_day_cutoff_hour, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        leave_monthly_limit, leave_daily_limit, leave_same_day_cutoff_hour,
+        absence_fine, absence_fine_enabled_at, absence_last_checked_date, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).bind(
       store.store_id, store.name, store.status, store.timezone, store.currency,
       store.checkin_time, store.checkout_time, store.late_fine, store.early_leave_fine,
       store.leave_min_notice_days, store.leave_max_notice_days, store.leave_monthly_limit,
-      store.leave_daily_limit, store.leave_same_day_cutoff_hour, now, now
+      store.leave_daily_limit, store.leave_same_day_cutoff_hour, store.absence_fine,
+      store.absence_fine_enabled_at, store.absence_last_checked_date, now, now
     ),
     ...globalAdminMembers
   ]);
@@ -1760,19 +1768,25 @@ async function updateAdminStore(request, env, adminId, storeId) {
   const body = await readJson(request);
   const current = await getStore(env, storeId);
   if (!current) return json({ ok: false, error: 'not_found' }, 404);
-  const next = normalizeStoreInput({ ...current, ...body, store_id: storeId }, nowIso());
+  const now = new Date();
+  const next = {
+    ...normalizeStoreInput({ ...current, ...body, store_id: storeId }),
+    ...normalizeAbsenceFineSetting(body, current, now)
+  };
   await env.DB.prepare(`
     UPDATE stores SET
       name = ?, status = ?, timezone = ?, currency = ?, checkin_time = ?,
       checkout_time = ?, late_fine = ?, early_leave_fine = ?,
       leave_min_notice_days = ?, leave_max_notice_days = ?,
-      leave_monthly_limit = ?, leave_daily_limit = ?, leave_same_day_cutoff_hour = ?, updated_at = ?
+      leave_monthly_limit = ?, leave_daily_limit = ?, leave_same_day_cutoff_hour = ?,
+      absence_fine = ?, absence_fine_enabled_at = ?, absence_last_checked_date = ?, updated_at = ?
     WHERE store_id = ?
   `).bind(
     next.name, next.status, next.timezone, next.currency, next.checkin_time,
     next.checkout_time, next.late_fine, next.early_leave_fine,
     next.leave_min_notice_days, next.leave_max_notice_days, next.leave_monthly_limit,
-    next.leave_daily_limit, next.leave_same_day_cutoff_hour, nowIso(), storeId
+    next.leave_daily_limit, next.leave_same_day_cutoff_hour, next.absence_fine,
+    next.absence_fine_enabled_at, next.absence_last_checked_date, now.toISOString(), storeId
   ).run();
   await audit(env, storeId, adminId, 'update_store', storeId, body);
   return json({ ok: true, store: next });
@@ -3136,6 +3150,35 @@ function normalizeStoreInput(input) {
   };
 }
 
+export function normalizeAbsenceFineSetting(input, currentStore = {}, now = new Date()) {
+  const rawFine = Number(input && input.absence_fine);
+  const absenceFine = Number.isFinite(rawFine) && rawFine >= 0
+    ? rawFine
+    : Number(currentStore.absence_fine ?? 1.5);
+  const enabled = input && input.absence_fine_enabled === true;
+  if (!enabled) {
+    return {
+      absence_fine: absenceFine,
+      absence_fine_enabled_at: null,
+      absence_last_checked_date: null
+    };
+  }
+  if (currentStore.absence_fine_enabled_at) {
+    return {
+      absence_fine: absenceFine,
+      absence_fine_enabled_at: currentStore.absence_fine_enabled_at,
+      absence_last_checked_date: currentStore.absence_last_checked_date || null
+    };
+  }
+  const timezone = currentStore.timezone || input.timezone || 'Asia/Tokyo';
+  const enabledDate = localDate(now, timezone);
+  return {
+    absence_fine: absenceFine,
+    absence_fine_enabled_at: now.toISOString(),
+    absence_last_checked_date: addIsoDays(enabledDate, -1)
+  };
+}
+
 function validTime(value) {
   return /^\d{2}:\d{2}$/.test(String(value || ''));
 }
@@ -3330,7 +3373,7 @@ function adminHtml() {
       leave: { pending: {}, approved: {}, rejected: {} },
       logs: { logs: {} }
     };
-    const moneyFields = new Set(['income','commission_income','fine','original_fine','amount','amount_snapshot','late_fine','early_leave_fine']);
+    const moneyFields = new Set(['income','commission_income','fine','original_fine','amount','amount_snapshot','late_fine','early_leave_fine','absence_fine']);
     const timezones = ['Asia/Tokyo','Asia/Shanghai','Asia/Bangkok','Asia/Ho_Chi_Minh','Asia/Manila','Asia/Singapore','UTC'];
     const currencies = ['$', '¥', '₫', '฿', '₱', '€', '£'];
     const currencyLabels = { '$':'$ - USD', '¥':'¥ - JPY/CNY', '₫':'₫ - VND 越南盾', '฿':'฿ - THB', '₱':'₱ - PHP', '€':'€ - EUR', '£':'£ - GBP' };
@@ -3340,7 +3383,7 @@ function adminHtml() {
         refresh:'刷新', members_csv:'员工 CSV', income_csv:'收入 CSV', salary_csv:'工资 CSV', advances_csv:'预支薪资 CSV', attendance_csv:'考勤 CSV', leave_csv:'请假 CSV',
         stores:'店铺', members:'员工', income:'收入', salary:'工资', advances:'预支薪资', attendance:'考勤', leave:'请假', logs:'日志',
         store_id:'店铺 ID', name:'名称', timezone:'时区', currency:'货币', checkin_time:'签到时间', checkout_time:'签退时间',
-        late_fine:'迟到罚款', early_leave_fine:'早退罚款', leave_min_notice_days:'最早提前天数', leave_max_notice_days:'最晚提前天数', leave_monthly_limit:'每月请假上限', leave_daily_limit:'同日请假人数上限', leave_same_day_cutoff_hour:'当天请假截止小时', status:'状态', save_store:'保存店铺', clear:'清空', edit:'编辑',
+        late_fine:'迟到罚款', early_leave_fine:'早退罚款', absence_fine_enabled:'缺勤罚款', absence_fine:'缺勤罚款金额', leave_min_notice_days:'最早提前天数', leave_max_notice_days:'最晚提前天数', leave_monthly_limit:'每月请假上限', leave_daily_limit:'同日请假人数上限', leave_same_day_cutoff_hour:'当天请假截止小时', status:'状态', save_store:'保存店铺', clear:'清空', edit:'编辑',
         disable:'禁用', enable:'启用', delete:'删除', action:'操作', new_store:'新建店铺', employee_name:'姓名',
         username:'用户名', role:'角色', commission_rate:'提成比例', commission_income:'提成收入', save_member:'保存员工', telegram_name:'Telegram 名字', display_name:'员工姓名',
         cycle_start:'工资周期开始', joined_at:'加入时间', updated_at:'更新时间', request_id:'请求 ID', record_id:'记录 ID',
@@ -3360,7 +3403,7 @@ function adminHtml() {
         refresh:'Refresh', members_csv:'Members CSV', income_csv:'Income CSV', salary_csv:'Salary CSV', advances_csv:'Salary advances CSV', attendance_csv:'Attendance CSV', leave_csv:'Leave CSV',
         stores:'Stores', members:'Members', income:'Income', salary:'Salary', advances:'Salary advances', attendance:'Attendance', leave:'Leave', logs:'Logs',
         store_id:'Store ID', name:'Name', timezone:'Timezone', currency:'Currency', checkin_time:'Check-in time', checkout_time:'Check-out time',
-        late_fine:'Late fine', early_leave_fine:'Early leave fine', leave_min_notice_days:'Earliest leave days', leave_max_notice_days:'Latest leave days', leave_monthly_limit:'Monthly leave limit', leave_daily_limit:'Daily leave limit', leave_same_day_cutoff_hour:'Same-day leave cutoff hour', status:'Status', save_store:'Save store', clear:'Clear', edit:'Edit',
+        late_fine:'Late fine', early_leave_fine:'Early leave fine', absence_fine_enabled:'Absence fine', absence_fine:'Absence fine amount', leave_min_notice_days:'Earliest leave days', leave_max_notice_days:'Latest leave days', leave_monthly_limit:'Monthly leave limit', leave_daily_limit:'Daily leave limit', leave_same_day_cutoff_hour:'Same-day leave cutoff hour', status:'Status', save_store:'Save store', clear:'Clear', edit:'Edit',
         disable:'Disable', enable:'Enable', delete:'Delete', action:'Action', new_store:'New store', employee_name:'Employee name',
         username:'Username', role:'Role', commission_rate:'Commission', commission_income:'Commission income', save_member:'Save member', telegram_name:'Telegram name', display_name:'Display name',
         cycle_start:'Cycle start', joined_at:'Joined at', updated_at:'Updated at', request_id:'Request ID', record_id:'Record ID',
@@ -3380,7 +3423,7 @@ function adminHtml() {
         refresh:'Làm mới', members_csv:'Nhân viên CSV', income_csv:'Thu nhập CSV', salary_csv:'Lương CSV', advances_csv:'Ứng lương CSV', attendance_csv:'Chấm công CSV',
         stores:'Cửa hàng', members:'Nhân viên', income:'Thu nhập', salary:'Lương', advances:'Ứng lương', attendance:'Chấm công', logs:'Nhật ký',
         store_id:'ID cửa hàng', name:'Tên', timezone:'Múi giờ', currency:'Tiền tệ', checkin_time:'Giờ vào ca', checkout_time:'Giờ ra ca',
-        late_fine:'Phạt đi muộn', early_leave_fine:'Phạt về sớm', status:'Trạng thái', save_store:'Lưu cửa hàng', clear:'Xóa form', edit:'Sửa',
+        late_fine:'Phạt đi muộn', early_leave_fine:'Phạt về sớm', absence_fine_enabled:'Phạt vắng mặt', absence_fine:'Mức phạt vắng mặt', status:'Trạng thái', save_store:'Lưu cửa hàng', clear:'Xóa form', edit:'Sửa',
         disable:'Tắt', enable:'Bật', delete:'Xóa', action:'Thao tác', new_store:'Cửa hàng mới', employee_name:'Tên nhân viên',
         username:'Tên người dùng', role:'Vai trò', commission_rate:'Tỷ lệ hoa hồng', commission_income:'Thu nhập hoa hồng', save_member:'Lưu nhân viên', telegram_name:'Tên Telegram', display_name:'Tên hiển thị',
         cycle_start:'Bắt đầu kỳ lương', joined_at:'Ngày tham gia', updated_at:'Cập nhật', request_id:'ID yêu cầu', record_id:'ID bản ghi',
@@ -3400,7 +3443,7 @@ function adminHtml() {
         refresh:'Обновить', members_csv:'Сотрудники CSV', income_csv:'Доход CSV', salary_csv:'Зарплата CSV', advances_csv:'Авансы CSV', attendance_csv:'Посещаемость CSV',
         stores:'Магазины', members:'Сотрудники', income:'Доход', salary:'Зарплата', advances:'Авансы зарплаты', attendance:'Посещаемость', logs:'Журналы',
         store_id:'ID магазина', name:'Название', timezone:'Часовой пояс', currency:'Валюта', checkin_time:'Начало смены', checkout_time:'Конец смены',
-        late_fine:'Штраф за опоздание', early_leave_fine:'Штраф за ранний уход', status:'Статус', save_store:'Сохранить магазин', clear:'Очистить', edit:'Редактировать',
+        late_fine:'Штраф за опоздание', early_leave_fine:'Штраф за ранний уход', absence_fine_enabled:'Штраф за отсутствие', absence_fine:'Размер штрафа за отсутствие', status:'Статус', save_store:'Сохранить магазин', clear:'Очистить', edit:'Редактировать',
         disable:'Отключить', enable:'Включить', delete:'Удалить', action:'Действие', new_store:'Новый магазин', employee_name:'Имя сотрудника',
         username:'Имя пользователя', role:'Роль', commission_rate:'Комиссия', commission_income:'Комиссионный доход', save_member:'Сохранить сотрудника', telegram_name:'Имя Telegram', display_name:'Отображаемое имя',
         cycle_start:'Начало цикла', joined_at:'Дата вступления', updated_at:'Обновлено', request_id:'ID запроса', record_id:'ID записи',
@@ -3561,6 +3604,7 @@ function adminHtml() {
     function renderStores() {
       const rows = (window.storeRows || stores).map((store) => ({
         ...store,
+        absence_fine_enabled: store.absence_fine_enabled_at ? L('enable') : L('disable'),
         action: '<button data-store-edit="' + esc(store.store_id) + '">' + L('edit') + '</button> <button class="danger" data-store-delete="' + esc(store.store_id) + '">' + L('delete') + '</button>'
       }));
       $('tab-stores').innerHTML = '<h2>' + L('stores') + '</h2>' +
@@ -3578,10 +3622,15 @@ function adminHtml() {
         '<label>' + L('leave_monthly_limit') + '<input id="storeLeaveMonthlyInput" inputmode="numeric" value="4"></label>' +
         '<label>' + L('leave_daily_limit') + '<input id="storeLeaveDailyInput" inputmode="numeric" value="1"></label>' +
         '<label>' + L('leave_same_day_cutoff_hour') + '<input id="storeLeaveSameDayCutoffHourInput" inputmode="numeric" value="5"></label>' +
+        '<label>' + L('absence_fine_enabled') +
+          '<select id="storeAbsenceFineEnabledInput"><option value="false">' + L('disable') +
+          '</option><option value="true">' + L('enable') + '</option></select></label>' +
+        '<label>' + L('absence_fine') +
+          '<input id="storeAbsenceFineInput" inputmode="decimal" value="1.5"></label>' +
         '<label>' + L('status') + '<select id="storeStatusInput"><option value="active">active</option><option value="disabled">disabled</option></select></label>' +
         '</div>' +
         '<div class="row" style="margin-top:10px"><button id="saveStore">' + L('save_store') + '</button><button id="clearStore" class="secondary">' + L('clear') + '</button></div>' +
-        table(rows, ['store_id','name','status','timezone','currency','checkin_time','checkout_time','late_fine','early_leave_fine','leave_min_notice_days','leave_max_notice_days','leave_monthly_limit','leave_daily_limit','leave_same_day_cutoff_hour','action'], true, 'stores') +
+        table(rows, ['store_id','name','status','timezone','currency','checkin_time','checkout_time','late_fine','early_leave_fine','absence_fine_enabled','absence_fine','leave_min_notice_days','leave_max_notice_days','leave_monthly_limit','leave_daily_limit','leave_same_day_cutoff_hour','action'], true, 'stores') +
         pager('stores', 'stores_page', window.storePagination && window.storePagination.stores, 'loadStores');
       $('saveStore').onclick = () => withBusy($('saveStore'), async () => {
         const id = $('storeIdInput').value.trim();
@@ -3599,6 +3648,8 @@ function adminHtml() {
           leave_monthly_limit: $('storeLeaveMonthlyInput').value,
           leave_daily_limit: $('storeLeaveDailyInput').value,
           leave_same_day_cutoff_hour: $('storeLeaveSameDayCutoffHourInput').value,
+          absence_fine_enabled: $('storeAbsenceFineEnabledInput').value === 'true',
+          absence_fine: $('storeAbsenceFineInput').value,
           status: $('storeStatusInput').value
         };
         const exists = stores.some((store) => store.store_id === id);
@@ -3638,6 +3689,8 @@ function adminHtml() {
       $('storeLeaveMonthlyInput').value = store.leave_monthly_limit ?? 4;
       $('storeLeaveDailyInput').value = store.leave_daily_limit ?? 1;
       $('storeLeaveSameDayCutoffHourInput').value = store.leave_same_day_cutoff_hour ?? 5;
+      $('storeAbsenceFineEnabledInput').value = store.absence_fine_enabled_at ? 'true' : 'false';
+      $('storeAbsenceFineInput').value = store.absence_fine ?? 1.5;
       $('storeStatusInput').value = store.status || 'active';
     }
 

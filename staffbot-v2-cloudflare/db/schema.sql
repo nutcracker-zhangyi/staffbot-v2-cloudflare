@@ -13,6 +13,9 @@ CREATE TABLE IF NOT EXISTS stores (
   leave_monthly_limit INTEGER NOT NULL DEFAULT 4,
   leave_daily_limit INTEGER NOT NULL DEFAULT 1,
   leave_same_day_cutoff_hour INTEGER NOT NULL DEFAULT 5,
+  absence_fine REAL NOT NULL DEFAULT 1.5,
+  absence_fine_enabled_at TEXT,
+  absence_last_checked_date TEXT,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );
@@ -20,10 +23,11 @@ CREATE TABLE IF NOT EXISTS stores (
 INSERT OR IGNORE INTO stores (
   store_id, name, status, timezone, currency, checkin_time, checkout_time,
   late_fine, early_leave_fine, leave_min_notice_days, leave_max_notice_days,
-  leave_monthly_limit, leave_daily_limit, leave_same_day_cutoff_hour, created_at, updated_at
+  leave_monthly_limit, leave_daily_limit, leave_same_day_cutoff_hour,
+  absence_fine, absence_fine_enabled_at, absence_last_checked_date, created_at, updated_at
 ) VALUES (
   'DEFAULT', 'Default Store', 'active', 'Asia/Tokyo', '$', '18:30', '01:30',
-  0.5, 1.5, 1, 5, 4, 1, 5, datetime('now'), datetime('now')
+  0.5, 1.5, 1, 5, 4, 1, 5, 1.5, NULL, NULL, datetime('now'), datetime('now')
 );
 
 CREATE TABLE IF NOT EXISTS users (
@@ -112,6 +116,30 @@ CREATE INDEX IF NOT EXISTS idx_income_records_store_user_time
 
 CREATE INDEX IF NOT EXISTS idx_income_records_approved_at
   ON income_records (approved_at);
+
+CREATE TABLE IF NOT EXISTS absence_fine_requests (
+  request_id TEXT PRIMARY KEY,
+  store_id TEXT NOT NULL,
+  telegram_id TEXT NOT NULL,
+  business_date TEXT NOT NULL,
+  original_fine REAL NOT NULL,
+  fine REAL NOT NULL,
+  status TEXT NOT NULL DEFAULT 'pending',
+  created_at TEXT NOT NULL,
+  notified_at TEXT,
+  decided_at TEXT,
+  admin_id TEXT,
+  reject_reason TEXT,
+  income_record_id TEXT,
+  UNIQUE (store_id, telegram_id, business_date)
+);
+
+CREATE INDEX IF NOT EXISTS idx_absence_fine_store_status_date
+  ON absence_fine_requests (store_id, status, business_date);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_income_records_one_absence_fine
+  ON income_records (source, request_id)
+  WHERE source = 'attendance_absence';
 
 CREATE TABLE IF NOT EXISTS salary_requests (
   request_id TEXT PRIMARY KEY,

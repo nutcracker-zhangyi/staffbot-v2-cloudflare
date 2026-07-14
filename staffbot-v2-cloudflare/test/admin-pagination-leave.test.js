@@ -20,6 +20,7 @@ import {
   leaveDateOptions,
   leaveMonthRange,
   leaveRuleParams,
+  normalizeAbsenceFineSetting,
   validateLeaveDate,
   visibleAdminStores
 } from '../src/index.js';
@@ -152,6 +153,46 @@ test('builds selectable leave date options from store settings', () => {
   const store = { timezone: 'Asia/Tokyo', leave_min_notice_days: 2, leave_max_notice_days: 4 };
 
   assert.deepEqual(leaveDateOptions(store, now), ['2026-06-24', '2026-06-25', '2026-06-26']);
+});
+
+test('enables absence fines from the current store-local date only', () => {
+  const now = new Date('2026-07-14T03:30:00.000Z');
+  assert.deepEqual(normalizeAbsenceFineSetting(
+    { absence_fine_enabled: true, absence_fine: '1.5' },
+    { timezone: 'Asia/Tokyo', absence_fine_enabled_at: null },
+    now
+  ), {
+    absence_fine: 1.5,
+    absence_fine_enabled_at: '2026-07-14T03:30:00.000Z',
+    absence_last_checked_date: '2026-07-13'
+  });
+});
+
+test('keeps enable time while enabled and resets it after re-enabling', () => {
+  const current = {
+    timezone: 'Asia/Tokyo',
+    absence_fine: 1.5,
+    absence_fine_enabled_at: '2026-07-01T00:00:00.000Z',
+    absence_last_checked_date: '2026-07-12'
+  };
+  assert.equal(normalizeAbsenceFineSetting(
+    { absence_fine_enabled: true, absence_fine: '2' }, current,
+    new Date('2026-07-14T03:30:00.000Z')
+  ).absence_fine_enabled_at, current.absence_fine_enabled_at);
+  assert.deepEqual(normalizeAbsenceFineSetting(
+    { absence_fine_enabled: false, absence_fine: '2' }, current,
+    new Date('2026-07-14T03:30:00.000Z')
+  ), {
+    absence_fine: 2,
+    absence_fine_enabled_at: null,
+    absence_last_checked_date: null
+  });
+});
+
+test('admin store form exposes absence fine controls', () => {
+  assert.match(source, /storeAbsenceFineEnabledInput/);
+  assert.match(source, /storeAbsenceFineInput/);
+  assert.match(source, /absence_fine_enabled/);
 });
 
 test('returns leave month boundaries for counting monthly leave days', () => {
