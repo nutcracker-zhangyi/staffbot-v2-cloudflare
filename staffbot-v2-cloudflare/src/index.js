@@ -1296,25 +1296,61 @@ async function rejectSalaryAdvanceRequest(env, storeId, requestId, adminId, reas
   return { ok: true, row: found, reason };
 }
 
-async function approveLeaveRequest(env, storeId, requestId, adminId) {
+export async function approveLeaveRequest(env, storeId, requestId, adminId) {
   const found = await env.DB.prepare(`SELECT * FROM leave_requests WHERE store_id = ? AND request_id = ?`).bind(storeId, requestId).first();
-  if (!found || found.status !== 'pending') return { ok: false };
-  const store = await getStore(env, storeId);
-  const conflict = await env.DB.prepare(`
-    SELECT COUNT(*) AS total FROM leave_requests
-    WHERE store_id = ? AND leave_date = ? AND status = 'approved' AND request_id != ?
-  `).bind(storeId, found.leave_date, requestId).first();
-  if (Number(conflict && conflict.total ? conflict.total : 0) >= Number((store && store.leave_daily_limit) || 1)) {
-    return { ok: false, error: 'leave_conflict' };
+  if (!found || !['pending', 'approved'].includes(found.status)) return { ok: false };
+  if (found.status === 'pending') {
+    const store = await getStore(env, storeId);
+    const conflict = await env.DB.prepare(`
+      SELECT COUNT(*) AS total FROM leave_requests
+      WHERE store_id = ? AND leave_date = ? AND status = 'approved' AND request_id != ?
+    `).bind(storeId, found.leave_date, requestId).first();
+    if (Number(conflict && conflict.total ? conflict.total : 0) >= Number((store && store.leave_daily_limit) || 1)) {
+      return { ok: false, error: 'leave_conflict' };
+    }
   }
+  const absence = await env.DB.prepare(`
+    SELECT * FROM absence_fine_requests
+    WHERE store_id = ? AND telegram_id = ? AND business_date = ?
+      AND status IN ('pending', 'approved', 'rejected')
+  `).bind(storeId, found.telegram_id, found.leave_date).first();
+  if (found.status === 'approved' && !absence) return { ok: false };
+
   const decidedAt = nowIso();
-  await env.DB.prepare(`
-    UPDATE leave_requests SET status = 'approved', decided_at = ?, admin_id = ?
-    WHERE store_id = ? AND request_id = ?
-  `).bind(decidedAt, adminId, storeId, requestId).run();
-  await cancelAbsenceForApprovedLeave(env, storeId, found.telegram_id, found.leave_date, adminId);
-  await audit(env, storeId, adminId, 'approve_leave', requestId, found);
+  const statements = [];
+  if (found.status === 'pending') {
+    statements.push(env.DB.prepare(`
+      UPDATE leave_requests SET status = 'approved', decided_at = ?, admin_id = ?
+      WHERE store_id = ? AND request_id = ? AND status = 'pending'
+    `).bind(decidedAt, adminId, storeId, requestId));
+  }
+  if (absence) statements.push(...absenceCancellationStatements(env, storeId, absence.request_id, decidedAt, adminId));
+  const results = await env.DB.batch(statements);
+  if (found.status === 'pending' && mutationCount(results[0]) !== 1) return { ok: false };
+  const absenceResultIndex = statements.length - 1;
+  if (absence && mutationCount(results[absenceResultIndex]) !== 1) return { ok: false };
+  if (found.status === 'pending') await audit(env, storeId, adminId, 'approve_leave', requestId, found);
+  if (absence) await audit(env, storeId, adminId, 'cancel_absence_for_leave', absence.request_id, absence);
   return { ok: true, row: found };
+}
+
+function absenceCancellationStatements(env, storeId, requestId, decidedAt, adminId) {
+  return [
+    env.DB.prepare(`
+      UPDATE income_records SET fine = 0
+      WHERE store_id = ? AND source = 'attendance_absence'
+        AND record_id = (
+          SELECT income_record_id FROM absence_fine_requests
+          WHERE request_id = ? AND status = 'approved'
+        )
+    `).bind(storeId, requestId),
+    env.DB.prepare(`
+      UPDATE absence_fine_requests
+      SET status = 'cancelled', cancellation_reason = 'Approved leave',
+          decided_at = COALESCE(decided_at, ?), admin_id = COALESCE(admin_id, ?)
+      WHERE request_id = ? AND status IN ('pending', 'approved', 'rejected')
+    `).bind(decidedAt, adminId, requestId)
+  ];
 }
 
 export async function cancelAbsenceForApprovedLeave(env, storeId, telegramId, leaveDate, adminId) {
@@ -1326,22 +1362,7 @@ export async function cancelAbsenceForApprovedLeave(env, storeId, telegramId, le
   if (!found) return { ok: false };
 
   const decidedAt = nowIso();
-  const results = await env.DB.batch([
-    env.DB.prepare(`
-      UPDATE income_records SET fine = 0
-      WHERE store_id = ? AND source = 'attendance_absence'
-        AND record_id = (
-          SELECT income_record_id FROM absence_fine_requests
-          WHERE request_id = ? AND status = 'approved'
-        )
-    `).bind(storeId, found.request_id),
-    env.DB.prepare(`
-      UPDATE absence_fine_requests
-      SET status = 'cancelled', reject_reason = 'Approved leave',
-          decided_at = COALESCE(decided_at, ?), admin_id = COALESCE(admin_id, ?)
-      WHERE request_id = ? AND status IN ('pending', 'approved', 'rejected')
-    `).bind(decidedAt, adminId, found.request_id)
-  ]);
+  const results = await env.DB.batch(absenceCancellationStatements(env, storeId, found.request_id, decidedAt, adminId));
   if (mutationCount(results[1]) !== 1) return { ok: false };
   await audit(env, storeId, adminId, 'cancel_absence_for_leave', found.request_id, found);
   return { ok: true, row: found };
@@ -2341,18 +2362,28 @@ async function handleAdminAttendance(request, env, url, storeId, parts, adminId)
 }
 
 export function sumAttendanceEmployeeStats(rows) {
-  return (rows || []).reduce((total, row) => ({
-    work_days: total.work_days + Number(row.work_days || 0),
-    late_days: total.late_days + Number(row.late_days || 0),
-    absence_days: total.absence_days + Number(row.absence_days || 0),
-    leave_days: total.leave_days + Number(row.leave_days || 0),
-    fine_total: total.fine_total + Number(row.fine_total || 0)
-  }), { work_days: 0, late_days: 0, absence_days: 0, leave_days: 0, fine_total: 0 });
+  const totals = { work_days: 0, late_days: 0, absence_days: 0, leave_days: 0 };
+  const money = new Map();
+  for (const row of rows || []) {
+    totals.work_days += Number(row.work_days || 0);
+    totals.late_days += Number(row.late_days || 0);
+    totals.absence_days += Number(row.absence_days || 0);
+    totals.leave_days += Number(row.leave_days || 0);
+    const currency = String(row.currency || '');
+    money.set(currency, (money.get(currency) || 0) + Number(row.fine_total || 0));
+  }
+  const fineTotals = [...money].map(([currency, amount]) => ({ currency, amount }));
+  return {
+    ...totals,
+    fine_total: fineTotals.length <= 1 ? (fineTotals[0]?.amount || 0) : null,
+    currency: fineTotals.length === 1 ? fineTotals[0].currency : null,
+    fine_totals: fineTotals
+  };
 }
 
 export async function attendanceEmployeeStats(env, filters, now = new Date()) {
   const stores = await env.DB.prepare(`
-    SELECT store_id, name, timezone
+    SELECT store_id, name, timezone, currency
     FROM stores
     WHERE store_id IN (${placeholders(filters.storeIds.length)})
   `).bind(...filters.storeIds).all();
@@ -2367,29 +2398,32 @@ export async function attendanceEmployeeStats(env, filters, now = new Date()) {
     const selectedEnd = filters.monthDateEnd ? addIsoDays(filters.monthDateEnd, -1) : completedDate;
     const endDate = selectedEnd < completedDate ? selectedEnd : completedDate;
     const queryStart = filters.monthDateStart || '0000-01-01';
-    const memberWhere = [`m.store_id = (SELECT store_id FROM target)`, `m.status = 'active'`];
-    const params = [storeId, queryStart, endDate];
-    if (filters.employeeId) {
-      memberWhere.push(`m.telegram_id = ?`);
-      params.push(filters.employeeId);
-    }
+    const memberWhere = [
+      `m.store_id = (SELECT store_id FROM target)`,
+      `m.status = 'active'`,
+      `((SELECT employee_id FROM target) = '' OR m.telegram_id = (SELECT employee_id FROM target))`
+    ];
+    const params = [storeId, queryStart, endDate, filters.employeeId || ''];
     const rows = await env.DB.prepare(`
       WITH target AS (
-        SELECT ? AS store_id, ? AS start_date, ? AS end_date
+        SELECT ? AS store_id, ? AS start_date, ? AS end_date, ? AS employee_id
       ), attendance_events AS (
         SELECT a.store_id, a.telegram_id, a.business_date, 'work' AS event_kind, 0 AS fine
         FROM attendance_records a, target t
         WHERE a.store_id = t.store_id AND a.business_date BETWEEN t.start_date AND t.end_date
+          AND (t.employee_id = '' OR a.telegram_id = t.employee_id)
           AND a.type = 'checkin'
         UNION ALL
         SELECT a.store_id, a.telegram_id, a.business_date, 'late' AS event_kind, 0 AS fine
         FROM attendance_records a, target t
         WHERE a.store_id = t.store_id AND a.business_date BETWEEN t.start_date AND t.end_date
+          AND (t.employee_id = '' OR a.telegram_id = t.employee_id)
           AND a.type = 'checkin' AND a.late = 1
       ), leave_events AS (
         SELECT l.store_id, l.telegram_id, l.leave_date AS business_date, 'leave' AS event_kind, 0 AS fine
         FROM leave_requests l, target t
         WHERE l.store_id = t.store_id AND l.leave_date BETWEEN t.start_date AND t.end_date
+          AND (t.employee_id = '' OR l.telegram_id = t.employee_id)
           AND l.status = 'approved'
       ), attendance_fines AS (
         SELECT i.store_id, i.telegram_id, a.business_date, 'fine' AS event_kind, i.fine
@@ -2402,6 +2436,7 @@ export async function attendanceEmployeeStats(env, filters, now = new Date()) {
          AND a.business_date BETWEEN t.start_date AND t.end_date
          AND ((i.source = 'attendance_late' AND a.type = 'checkin')
            OR (i.source = 'attendance_early' AND a.type = 'checkout'))
+        WHERE t.employee_id = '' OR i.telegram_id = t.employee_id
       ), absence_fines AS (
         SELECT i.store_id, i.telegram_id, r.business_date, 'fine' AS event_kind, i.fine
         FROM income_records i
@@ -2412,6 +2447,7 @@ export async function attendanceEmployeeStats(env, filters, now = new Date()) {
          AND r.request_id = i.request_id
          AND r.business_date BETWEEN t.start_date AND t.end_date
         WHERE i.source = 'attendance_absence'
+          AND (t.employee_id = '' OR i.telegram_id = t.employee_id)
       ), events AS (
         SELECT * FROM attendance_events
         UNION ALL SELECT * FROM leave_events
@@ -2449,6 +2485,7 @@ export async function attendanceEmployeeStats(env, filters, now = new Date()) {
           row: {
             store_id: row.store_id,
             store_name: row.store_name,
+            currency: store.currency || '',
             telegram_id: row.telegram_id,
             display_name: row.display_name,
             work_days: 0,
@@ -3300,6 +3337,7 @@ export async function processAbsenceFines(env, now = new Date()) {
         LEFT JOIN users u ON u.telegram_id = m.telegram_id
         WHERE m.store_id = ?
           AND m.status = 'active'
+          AND m.role = 'employee'
           AND NOT EXISTS (
             SELECT 1 FROM attendance_records a
             WHERE a.store_id = m.store_id
@@ -3332,29 +3370,86 @@ export async function processAbsenceFines(env, now = new Date()) {
       store.absence_last_checked_date = businessDate;
     }
 
-    const pending = await env.DB.prepare(`
+    const requests = await env.DB.prepare(`
       SELECT r.*,
              COALESCE(NULLIF(m.display_name, ''), NULLIF(u.name, ''), NULLIF(u.username, ''), r.telegram_id) AS display_name
       FROM absence_fine_requests r
       LEFT JOIN store_members m ON m.store_id = r.store_id AND m.telegram_id = r.telegram_id
       LEFT JOIN users u ON u.telegram_id = r.telegram_id
-      WHERE r.store_id = ? AND r.status = 'pending' AND r.notified_at IS NULL
+      WHERE r.store_id = ? AND r.status = 'pending'
       ORDER BY r.business_date, r.created_at
     `).bind(store.store_id).all();
 
-    for (const request of pending.results || []) {
-      await notifyStoreAdmins(env, store.store_id, [
-        '缺勤罚款待审核',
-        `店铺：${store.name}`,
-        `员工：${request.display_name} (${request.telegram_id})`,
-        `日期：${request.business_date}`,
-        `建议罚款：${formatMoney(store, request.fine)}`
-      ].join('\n'), { inline_keyboard: absenceApprovalKeyboard(request.request_id) });
-      await env.DB.prepare(`
-        UPDATE absence_fine_requests SET notified_at = ? WHERE request_id = ? AND notified_at IS NULL
-      `).bind(now.toISOString(), request.request_id).run();
+    const adminRows = await env.DB.prepare(`
+      SELECT telegram_id FROM store_members
+      WHERE store_id = ? AND status = 'active' AND role IN ('admin', 'owner')
+    `).bind(store.store_id).all();
+    const admins = new Set([...(adminRows.results || []).map((row) => String(row.telegram_id)), ...adminIds(env)]);
+    for (const request of requests.results || []) {
+      for (const adminId of admins) {
+        await env.DB.prepare(`
+          INSERT OR IGNORE INTO absence_fine_notifications (request_id, admin_id)
+          VALUES (?, ?)
+        `).bind(request.request_id, adminId).run();
+      }
+    }
+
+    const staleClaim = new Date(now.getTime() - 15 * 60 * 1000).toISOString();
+    const notifications = await env.DB.prepare(`
+      SELECT n.*, r.store_id, r.telegram_id, r.business_date, r.fine,
+             COALESCE(NULLIF(m.display_name, ''), NULLIF(u.name, ''), NULLIF(u.username, ''), r.telegram_id) AS display_name
+      FROM absence_fine_notifications n
+      JOIN absence_fine_requests r ON r.request_id = n.request_id
+      LEFT JOIN store_members m ON m.store_id = r.store_id AND m.telegram_id = r.telegram_id
+      LEFT JOIN users u ON u.telegram_id = r.telegram_id
+      WHERE r.store_id = ? AND r.status = 'pending'
+        AND (n.status = 'pending' OR (n.status = 'sending' AND n.claimed_at < ?))
+      ORDER BY r.business_date, r.created_at, n.admin_id
+    `).bind(store.store_id, staleClaim).all();
+    for (const notification of notifications.results || []) {
+      await deliverAbsenceNotification(env, store, notification, now);
     }
   }
+}
+
+export async function deliverAbsenceNotification(env, store, notification, now = new Date()) {
+  const claimedAt = now.toISOString();
+  const staleClaim = new Date(now.getTime() - 15 * 60 * 1000).toISOString();
+  const claim = await env.DB.prepare(`
+    UPDATE absence_fine_notifications
+    SET status = 'sending', attempts = attempts + 1, claimed_at = ?, last_error = NULL
+    WHERE request_id = ? AND admin_id = ?
+      AND (status = 'pending' OR (status = 'sending' AND claimed_at < ?))
+  `).bind(claimedAt, notification.request_id, notification.admin_id, staleClaim).run();
+  if (mutationCount(claim) !== 1) return false;
+
+  let result;
+  try {
+    result = await sendMessage(env, notification.admin_id, [
+      '缺勤罚款待审核',
+      `店铺：${store.name}`,
+      `员工：${notification.display_name} (${notification.telegram_id})`,
+      `日期：${notification.business_date}`,
+      `建议罚款：${formatMoney(store, notification.fine)}`
+    ].join('\n'), { inline_keyboard: absenceApprovalKeyboard(notification.request_id) });
+  } catch (error) {
+    result = { ok: false, description: String(error && error.message ? error.message : error) };
+  }
+
+  if (result && result.ok === true) {
+    await env.DB.prepare(`
+      UPDATE absence_fine_notifications
+      SET status = 'sent', sent_at = ?, last_error = NULL
+      WHERE request_id = ? AND admin_id = ? AND status = 'sending' AND claimed_at = ?
+    `).bind(claimedAt, notification.request_id, notification.admin_id, claimedAt).run();
+    return true;
+  }
+  await env.DB.prepare(`
+    UPDATE absence_fine_notifications
+    SET status = 'pending', claimed_at = NULL, last_error = ?
+    WHERE request_id = ? AND admin_id = ? AND status = 'sending' AND claimed_at = ?
+  `).bind(JSON.stringify(result || { ok: false }), notification.request_id, notification.admin_id, claimedAt).run();
+  return false;
 }
 
 function getBusinessDate(date, tz) {
@@ -3541,7 +3636,10 @@ export function normalizeAbsenceFineSetting(input, currentStore = {}, now = new 
   const absenceFine = Number.isFinite(rawFine) && rawFine >= 0
     ? rawFine
     : Number(currentStore.absence_fine ?? 1.5);
-  const enabled = input && input.absence_fine_enabled === true;
+  const hasEnabled = !!input && Object.prototype.hasOwnProperty.call(input, 'absence_fine_enabled');
+  const enabled = hasEnabled
+    ? input.absence_fine_enabled === true
+    : !!currentStore.absence_fine_enabled_at;
   if (!enabled) {
     return {
       absence_fine: absenceFine,
@@ -3556,7 +3654,7 @@ export function normalizeAbsenceFineSetting(input, currentStore = {}, now = new 
       absence_last_checked_date: currentStore.absence_last_checked_date || null
     };
   }
-  const timezone = currentStore.timezone || input.timezone || 'Asia/Tokyo';
+  const timezone = String((input && input.timezone) || currentStore.timezone || 'Asia/Tokyo').trim();
   const enabledDate = localDate(now, timezone);
   return {
     absence_fine: absenceFine,
@@ -4264,13 +4362,16 @@ function adminHtml() {
 
     function attendanceSummaryPanel(data) {
       const summary = data.summary || {};
+      const fineTotal = (summary.fine_totals || []).length > 1
+        ? summary.fine_totals.map((item) => formatCurrencyAmount(item.currency, item.amount)).join(' / ')
+        : formatCurrencyAmount(summary.currency || '', summary.fine_total || 0);
       return '<div class="summary"><h2>' + L('summary') + '</h2>' +
         '<div class="summary-grid attendance-metrics">' + [
           { label:L('work_days'), value:String(summary.work_days || 0), tone:'success' },
           { label:L('late_days'), value:String(summary.late_days || 0), tone:'warning' },
           { label:L('absence_days'), value:String(summary.absence_days || 0), tone:'danger' },
           { label:L('leave_days'), value:String(summary.leave_days || 0), tone:'' },
-          { label:L('attendance_fine_total'), value:formatAdminMoneyForUi(summary.fine_total || 0), tone:'warning' }
+          { label:L('attendance_fine_total'), value:fineTotal, tone:'warning' }
         ].map((item) => '<div class="summary-card" data-status-tone="' + esc(item.tone) + '">' +
           '<strong>' + esc(item.label) + '</strong><div class="summary-value">' + esc(item.value) + '</div></div>').join('') +
         '</div></div>';
@@ -4294,7 +4395,7 @@ function adminHtml() {
       return '<div class="table-wrap"><table><thead><tr>' + cols.map((key) => tableHeader(key, 'summary')).join('') + '</tr></thead><tbody>' +
         rows.map((row) => '<tr>' + cols.map((key) => {
           if (key === 'action') return '<td><button class="secondary" data-attendance-detail="' + esc(row.telegram_id) + '">' + L('view_details') + '</button></td>';
-          const value = key === 'fine_total' ? formatAdminMoneyForUi(row[key] || 0) : String(row[key] || 0);
+          const value = key === 'fine_total' ? formatCurrencyAmount(row.currency || '', row[key] || 0) : String(row[key] || 0);
           const className = key === 'display_name' ? 'employee-name-cell' : numericColumns.has(key) ? 'metric-cell' : key === 'store_id' ? 'id-cell' : '';
           return '<td' + (className ? ' class="' + className + '"' : '') + ' title="' + esc(value) + '">' + esc(value) + '</td>';
         }).join('') + '</tr>').join('') +
@@ -4518,6 +4619,11 @@ function adminHtml() {
       const number = Number(value);
       if (!Number.isFinite(number)) return String(value);
       return number.toLocaleString('en-US', { maximumFractionDigits: 20 });
+    }
+
+    function formatCurrencyAmount(currency, value) {
+      const amount = formatAdminMoneyForUi(value);
+      return currency ? String(currency) + amount : amount;
     }
 
     function isTimeField(key) {

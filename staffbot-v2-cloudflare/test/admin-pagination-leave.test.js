@@ -13,6 +13,7 @@ import {
   attendanceFineDecision,
   absenceApprovalKeyboard,
   absenceScanDates,
+  approveLeaveRequest,
   approveAbsenceFineRequest,
   cancelAbsenceForApprovedLeave,
   completedAttendanceDate,
@@ -29,6 +30,7 @@ import {
   leaveRuleParams,
   normalizeAbsenceFineSetting,
   processAbsenceFines,
+  deliverAbsenceNotification,
   rejectAbsenceFineRequest,
   sumAttendanceEmployeeStats,
   validateLeaveDate,
@@ -37,6 +39,7 @@ import {
 
 const source = readFileSync(new URL('../src/index.js', import.meta.url), 'utf8');
 const wrangler = readFileSync(new URL('../wrangler.toml', import.meta.url), 'utf8');
+const absenceOutboxMigration = readFileSync(new URL('../db/migrations/017_absence_notification_outbox.sql', import.meta.url), 'utf8');
 
 function absenceTestDatabase() {
   const database = new DatabaseSync(':memory:');
@@ -53,6 +56,7 @@ function absenceTestDatabase() {
       decided_at TEXT,
       admin_id TEXT,
       reject_reason TEXT,
+      cancellation_reason TEXT,
       income_record_id TEXT
     );
     CREATE TABLE income_records (
@@ -129,7 +133,7 @@ function d1TestDatabase(database, beforeFirst) {
 function attendanceStatsTestDatabase() {
   const database = new DatabaseSync(':memory:');
   database.exec(`
-    CREATE TABLE stores (store_id TEXT PRIMARY KEY, name TEXT, timezone TEXT);
+    CREATE TABLE stores (store_id TEXT PRIMARY KEY, name TEXT, timezone TEXT, currency TEXT);
     CREATE TABLE users (telegram_id TEXT PRIMARY KEY, name TEXT, username TEXT);
     CREATE TABLE store_members (
       store_id TEXT, telegram_id TEXT, display_name TEXT, status TEXT, joined_at TEXT
@@ -150,7 +154,7 @@ function attendanceStatsTestDatabase() {
       request_id TEXT PRIMARY KEY, store_id TEXT, telegram_id TEXT, business_date TEXT
     );
 
-    INSERT INTO stores VALUES ('TOKYO', 'Tokyo Club', 'Asia/Tokyo');
+    INSERT INTO stores VALUES ('TOKYO', 'Tokyo Club', 'Asia/Tokyo', '¥');
     INSERT INTO users VALUES ('U1', 'Telegram Alice', 'alice');
     INSERT INTO users VALUES ('U2', 'Bob', 'bob');
     INSERT INTO store_members VALUES ('TOKYO', 'U1', 'Alice', 'active', '2026-07-09T16:00:00.000Z');
@@ -177,6 +181,34 @@ function attendanceStatsTestDatabase() {
   return database;
 }
 
+function notificationTestDatabase() {
+  const database = new DatabaseSync(':memory:');
+  database.exec(`
+    CREATE TABLE absence_fine_notifications (
+      request_id TEXT NOT NULL,
+      admin_id TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'pending',
+      attempts INTEGER NOT NULL DEFAULT 0,
+      claimed_at TEXT,
+      sent_at TEXT,
+      last_error TEXT,
+      PRIMARY KEY (request_id, admin_id)
+    );
+    CREATE TABLE bot_logs (
+      store_id TEXT, level TEXT, event TEXT, telegram_id TEXT,
+      message_text TEXT, payload_json TEXT, created_at TEXT
+    );
+  `);
+  return database;
+}
+
+function notificationRow(adminId) {
+  return {
+    request_id: 'ABS-1', admin_id: adminId, store_id: 'STORE1',
+    telegram_id: 'U1', display_name: 'Alice', business_date: '2026-07-14', fine: 1.5
+  };
+}
+
 test('normalizes admin pagination to 100 rows per page', () => {
   assert.deepEqual(adminPage('1', 250), {
     page: 1,
@@ -194,14 +226,34 @@ test('normalizes admin pagination to 100 rows per page', () => {
 
 test('sums person-day attendance rows without using pagination', () => {
   assert.deepEqual(sumAttendanceEmployeeStats([
-    { work_days: 2, late_days: 1, absence_days: 0, leave_days: 1, fine_total: 500000 },
-    { work_days: 1, late_days: 0, absence_days: 2, leave_days: 0, fine_total: 1500000 }
+    { currency: '¥', work_days: 2, late_days: 1, absence_days: 0, leave_days: 1, fine_total: 500000 },
+    { currency: '¥', work_days: 1, late_days: 0, absence_days: 2, leave_days: 0, fine_total: 1500000 }
   ]), {
     work_days: 3,
     late_days: 1,
     absence_days: 2,
     leave_days: 1,
-    fine_total: 2000000
+    fine_total: 2000000,
+    currency: '¥',
+    fine_totals: [{ currency: '¥', amount: 2000000 }]
+  });
+});
+
+test('groups aggregate attendance fines by currency instead of adding incompatible money', () => {
+  assert.deepEqual(sumAttendanceEmployeeStats([
+    { currency: '$', work_days: 1, fine_total: 10 },
+    { currency: '₫', work_days: 1, fine_total: 1500000 }
+  ]), {
+    work_days: 2,
+    late_days: 0,
+    absence_days: 0,
+    leave_days: 0,
+    fine_total: null,
+    currency: null,
+    fine_totals: [
+      { currency: '$', amount: 10 },
+      { currency: '₫', amount: 1500000 }
+    ]
   });
 });
 
@@ -230,11 +282,11 @@ test('returns one full-range attendance statistics row per active employee', asy
 
   assert.deepEqual(rows, [
     {
-      store_id: 'TOKYO', store_name: 'Tokyo Club', telegram_id: 'U1', display_name: 'Alice',
+      store_id: 'TOKYO', store_name: 'Tokyo Club', currency: '¥', telegram_id: 'U1', display_name: 'Alice',
       work_days: 3, late_days: 1, absence_days: 1, leave_days: 2, fine_total: 2700000
     },
     {
-      store_id: 'TOKYO', store_name: 'Tokyo Club', telegram_id: 'U2', display_name: 'Bob',
+      store_id: 'TOKYO', store_name: 'Tokyo Club', currency: '¥', telegram_id: 'U2', display_name: 'Bob',
       work_days: 0, late_days: 0, absence_days: 1, leave_days: 0, fine_total: 0
     }
   ]);
@@ -387,10 +439,52 @@ test('keeps enable time while enabled and resets it after re-enabling', () => {
   });
 });
 
+test('preserves absence fine enabled state when PATCH omits the switch', () => {
+  const current = {
+    timezone: 'Asia/Tokyo',
+    absence_fine: 1.5,
+    absence_fine_enabled_at: '2026-07-01T00:00:00.000Z',
+    absence_last_checked_date: '2026-07-12'
+  };
+  assert.deepEqual(normalizeAbsenceFineSetting({ absence_fine: '2' }, current), {
+    absence_fine: 2,
+    absence_fine_enabled_at: current.absence_fine_enabled_at,
+    absence_last_checked_date: current.absence_last_checked_date
+  });
+});
+
+test('uses the normalized next timezone for a newly enabled absence boundary', () => {
+  const now = new Date('2026-07-14T16:30:00.000Z');
+  assert.deepEqual(normalizeAbsenceFineSetting(
+    { absence_fine_enabled: true, timezone: 'Asia/Tokyo' },
+    { timezone: 'America/Los_Angeles', absence_fine_enabled_at: null },
+    now
+  ), {
+    absence_fine: 1.5,
+    absence_fine_enabled_at: now.toISOString(),
+    absence_last_checked_date: '2026-07-14'
+  });
+});
+
 test('admin store form exposes absence fine controls', () => {
   assert.match(source, /storeAbsenceFineEnabledInput/);
   assert.match(source, /storeAbsenceFineInput/);
   assert.match(source, /absence_fine_enabled/);
+});
+
+test('migrates absence cancellation audit and per-admin notification outbox', () => {
+  const database = new DatabaseSync(':memory:');
+  database.exec(`CREATE TABLE absence_fine_requests (request_id TEXT PRIMARY KEY);`);
+  database.exec(absenceOutboxMigration);
+  assert.ok(database.prepare(`SELECT 1 FROM pragma_table_info('absence_fine_requests') WHERE name = 'cancellation_reason'`).get());
+  assert.deepEqual(
+    database.prepare(`SELECT name FROM pragma_table_info('absence_fine_notifications') ORDER BY cid`).all().map((row) => row.name),
+    ['request_id', 'admin_id', 'status', 'attempts', 'claimed_at', 'sent_at', 'last_error']
+  );
+  assert.throws(
+    () => database.prepare(`INSERT INTO absence_fine_notifications (request_id, admin_id) VALUES ('ABS-1', 'A1'), ('ABS-1', 'A1')`).run(),
+    /UNIQUE constraint failed/
+  );
 });
 
 test('closes the previous business day at store-local noon', () => {
@@ -500,6 +594,31 @@ test('waives a fine when absence approval commits after the leave cancellation r
   assert.equal(fineRecord.original_fine, 1500000);
 });
 
+test('preserves rejected absence decision audit when approved leave cancels it', async () => {
+  const database = absenceTestDatabase();
+  database.prepare(`
+    UPDATE absence_fine_requests
+    SET status = 'rejected', decided_at = '2026-07-15T04:00:00.000Z',
+        admin_id = 'FINE-ADMIN', reject_reason = 'Employee was absent'
+    WHERE request_id = 'ABS-1'
+  `).run();
+  const result = await cancelAbsenceForApprovedLeave(
+    { DB: d1TestDatabase(database) }, 'STORE1', 'U1', '2026-07-14', 'LEAVE-ADMIN'
+  );
+
+  assert.equal(result.ok, true);
+  assert.deepEqual({ ...database.prepare(`
+    SELECT status, decided_at, admin_id, reject_reason, cancellation_reason
+    FROM absence_fine_requests WHERE request_id = 'ABS-1'
+  `).get() }, {
+    status: 'cancelled',
+    decided_at: '2026-07-15T04:00:00.000Z',
+    admin_id: 'FINE-ADMIN',
+    reject_reason: 'Employee was absent',
+    cancellation_reason: 'Approved leave'
+  });
+});
+
 test('does not approve an absence after approved leave cancellation wins the race', async () => {
   const database = absenceTestDatabase();
   let releaseApproval;
@@ -527,18 +646,151 @@ test('does not approve an absence after approved leave cancellation wins the rac
   assert.equal(database.prepare(`SELECT COUNT(*) AS total FROM admin_audit_logs WHERE action = 'approve_absence_fine'`).get().total, 0);
 });
 
+test('retries leave approval atomically after an injected batch failure', async () => {
+  const database = absenceTestDatabase();
+  database.exec(`
+    CREATE TABLE stores (store_id TEXT PRIMARY KEY, leave_daily_limit INTEGER);
+    INSERT INTO stores VALUES ('STORE1', 1);
+    CREATE TABLE leave_requests (
+      request_id TEXT PRIMARY KEY, store_id TEXT, telegram_id TEXT,
+      leave_date TEXT, status TEXT, decided_at TEXT, admin_id TEXT
+    );
+    INSERT INTO leave_requests VALUES ('LEAVE-1', 'STORE1', 'U1', '2026-07-14', 'pending', NULL, NULL);
+  `);
+  const base = d1TestDatabase(database);
+  let failOnce = true;
+  const env = {
+    DB: {
+      ...base,
+      async batch(statements) {
+        if (failOnce) {
+          failOnce = false;
+          throw new Error('injected batch failure');
+        }
+        return base.batch(statements);
+      }
+    }
+  };
+
+  await assert.rejects(
+    approveLeaveRequest(env, 'STORE1', 'LEAVE-1', 'LEAVE-ADMIN'),
+    /injected batch failure/
+  );
+  assert.equal(database.prepare(`SELECT status FROM leave_requests`).get().status, 'pending');
+  assert.equal(database.prepare(`SELECT status FROM absence_fine_requests`).get().status, 'pending');
+
+  const retry = await approveLeaveRequest(env, 'STORE1', 'LEAVE-1', 'LEAVE-ADMIN');
+  assert.equal(retry.ok, true);
+  assert.equal(database.prepare(`SELECT status FROM leave_requests`).get().status, 'approved');
+  assert.equal(database.prepare(`SELECT status FROM absence_fine_requests`).get().status, 'cancelled');
+});
+
+test('reconciles an already-approved leave with its uncancelled absence', async () => {
+  const database = absenceTestDatabase();
+  database.exec(`
+    CREATE TABLE stores (store_id TEXT PRIMARY KEY, leave_daily_limit INTEGER);
+    INSERT INTO stores VALUES ('STORE1', 1);
+    CREATE TABLE leave_requests (
+      request_id TEXT PRIMARY KEY, store_id TEXT, telegram_id TEXT,
+      leave_date TEXT, status TEXT, decided_at TEXT, admin_id TEXT
+    );
+    INSERT INTO leave_requests VALUES (
+      'LEAVE-1', 'STORE1', 'U1', '2026-07-14', 'approved',
+      '2026-07-15T03:00:00.000Z', 'LEAVE-ADMIN'
+    );
+  `);
+  const result = await approveLeaveRequest(
+    { DB: d1TestDatabase(database) }, 'STORE1', 'LEAVE-1', 'LEAVE-ADMIN'
+  );
+  assert.equal(result.ok, true);
+  assert.equal(database.prepare(`SELECT status FROM absence_fine_requests`).get().status, 'cancelled');
+});
+
+test('keeps failed Telegram absence notifications pending and retries them', async () => {
+  const database = notificationTestDatabase();
+  database.prepare(`INSERT INTO absence_fine_notifications (request_id, admin_id) VALUES ('ABS-1', 'A1')`).run();
+  const env = { BOT_TOKEN: 'test', DB: d1TestDatabase(database) };
+  const originalFetch = globalThis.fetch;
+  const results = [{ ok: false, description: 'blocked' }, { ok: true, result: { message_id: 1 } }];
+  globalThis.fetch = async () => new Response(JSON.stringify(results.shift()), {
+    headers: { 'content-type': 'application/json' }
+  });
+  try {
+    assert.equal(await deliverAbsenceNotification(env, { name: 'Store', currency: '$' }, notificationRow('A1'), new Date('2026-07-15T03:10:00Z')), false);
+    assert.equal(database.prepare(`SELECT status FROM absence_fine_notifications`).get().status, 'pending');
+    assert.equal(await deliverAbsenceNotification(env, { name: 'Store', currency: '$' }, notificationRow('A1'), new Date('2026-07-15T04:10:00Z')), true);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+  assert.deepEqual({ ...database.prepare(`SELECT status, attempts FROM absence_fine_notifications`).get() }, {
+    status: 'sent', attempts: 2
+  });
+});
+
+test('tracks partial multi-admin notification success independently', async () => {
+  const database = notificationTestDatabase();
+  database.exec(`
+    INSERT INTO absence_fine_notifications (request_id, admin_id) VALUES ('ABS-1', 'A1');
+    INSERT INTO absence_fine_notifications (request_id, admin_id) VALUES ('ABS-1', 'A2');
+  `);
+  const env = { BOT_TOKEN: 'test', DB: d1TestDatabase(database) };
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (_url, options) => {
+    const adminId = JSON.parse(options.body).chat_id;
+    return new Response(JSON.stringify(adminId === 'A1' ? { ok: true } : { ok: false, description: 'blocked' }), {
+      headers: { 'content-type': 'application/json' }
+    });
+  };
+  try {
+    await Promise.all([
+      deliverAbsenceNotification(env, { name: 'Store', currency: '$' }, notificationRow('A1')),
+      deliverAbsenceNotification(env, { name: 'Store', currency: '$' }, notificationRow('A2'))
+    ]);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+  assert.deepEqual(database.prepare(`SELECT admin_id, status FROM absence_fine_notifications ORDER BY admin_id`).all().map((row) => ({ ...row })), [
+    { admin_id: 'A1', status: 'sent' },
+    { admin_id: 'A2', status: 'pending' }
+  ]);
+});
+
+test('atomically claims an absence notification across overlapping Cron runs', async () => {
+  const database = notificationTestDatabase();
+  database.prepare(`INSERT INTO absence_fine_notifications (request_id, admin_id) VALUES ('ABS-1', 'A1')`).run();
+  const env = { BOT_TOKEN: 'test', DB: d1TestDatabase(database) };
+  const originalFetch = globalThis.fetch;
+  let sends = 0;
+  globalThis.fetch = async () => {
+    sends += 1;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    return new Response(JSON.stringify({ ok: true }), { headers: { 'content-type': 'application/json' } });
+  };
+  try {
+    const outcomes = await Promise.all([
+      deliverAbsenceNotification(env, { name: 'Store', currency: '$' }, notificationRow('A1')),
+      deliverAbsenceNotification(env, { name: 'Store', currency: '$' }, notificationRow('A1'))
+    ]);
+    assert.deepEqual(outcomes.sort(), [false, true]);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+  assert.equal(sends, 1);
+});
+
 test('discovers and notifies each completed-day absence once', async () => {
   const store = {
     store_id: 'TOKYO',
     name: 'Tokyo Club',
     timezone: 'Asia/Tokyo',
-    currency: '$',
+    currency: '₫',
     absence_fine: 1.5,
     absence_fine_enabled_at: '2026-07-14T03:00:00.000Z',
     absence_last_checked_date: '2026-07-13'
   };
   const requests = [];
   const notifications = [];
+  const outbox = [];
   const env = {
     BOT_TOKEN: 'test-token',
     ADMIN_IDS: '',
@@ -557,8 +809,14 @@ test('discovers and notifies each completed-day absence once', async () => {
               { telegram_id: '11', joined_at: '2026-07-15T00:00:00.000Z', display_name: 'Bob' }
             ] };
             if (/FROM absence_fine_requests/.test(sql)) {
-              return { results: requests.filter((row) => row.store_id === params[0] && !row.notified_at) };
+              return { results: requests.filter((row) => row.store_id === params[0]) };
             }
+            if (/FROM absence_fine_notifications n/.test(sql)) return {
+              results: outbox.filter((row) => row.status === 'pending').map((row) => ({
+                ...row,
+                ...requests.find((request) => request.request_id === row.request_id)
+              }))
+            };
             if (/role IN \('admin', 'owner'\)/.test(sql)) return { results: [{ telegram_id: '99' }] };
             throw new Error(`Unexpected all SQL: ${sql}`);
           },
@@ -566,17 +824,36 @@ test('discovers and notifies each completed-day absence once', async () => {
             if (/INSERT OR IGNORE INTO absence_fine_requests/.test(sql)) {
               const [request_id, store_id, telegram_id, business_date, original_fine, fine, created_at] = params;
               if (!requests.some((row) => row.store_id === store_id && row.telegram_id === telegram_id && row.business_date === business_date)) {
-                requests.push({ request_id, store_id, telegram_id, business_date, original_fine, fine, created_at, display_name: 'Alice' });
+                requests.push({ request_id, store_id, telegram_id, business_date, original_fine, fine, created_at, display_name: 'Alice', status: 'pending' });
               }
-              return { success: true };
+              return { success: true, meta: { changes: 1 } };
             }
             if (/UPDATE stores SET absence_last_checked_date/.test(sql)) {
               store.absence_last_checked_date = params[0];
-              return { success: true };
+              return { success: true, meta: { changes: 1 } };
             }
-            if (/UPDATE absence_fine_requests SET notified_at/.test(sql)) {
-              requests.find((row) => row.request_id === params[1]).notified_at = params[0];
-              return { success: true };
+            if (/INSERT OR IGNORE INTO absence_fine_notifications/.test(sql)) {
+              const [request_id, admin_id] = params;
+              if (!outbox.some((row) => row.request_id === request_id && row.admin_id === admin_id)) {
+                outbox.push({ request_id, admin_id, status: 'pending', attempts: 0 });
+              }
+              return { success: true, meta: { changes: 1 } };
+            }
+            if (/SET status = 'sending'/.test(sql)) {
+              const row = outbox.find((item) => item.request_id === params[1] && item.admin_id === params[2] && item.status === 'pending');
+              if (!row) return { success: true, meta: { changes: 0 } };
+              row.status = 'sending'; row.attempts += 1; row.claimed_at = params[0];
+              return { success: true, meta: { changes: 1 } };
+            }
+            if (/SET status = 'sent'/.test(sql)) {
+              const row = outbox.find((item) => item.request_id === params[1] && item.admin_id === params[2]);
+              row.status = 'sent'; row.sent_at = params[0];
+              return { success: true, meta: { changes: 1 } };
+            }
+            if (/SET status = 'pending'/.test(sql)) {
+              const row = outbox.find((item) => item.request_id === params[1] && item.admin_id === params[2]);
+              row.status = 'pending';
+              return { success: true, meta: { changes: 1 } };
             }
             throw new Error(`Unexpected run SQL: ${sql}`);
           }
@@ -600,15 +877,16 @@ test('discovers and notifies each completed-day absence once', async () => {
   assert.equal(requests.length, 1);
   assert.equal(requests[0].telegram_id, '10');
   assert.equal(requests[0].business_date, '2026-07-14');
-  assert.equal(requests[0].fine, 1.5);
+  assert.equal(requests[0].fine, 1500000);
   assert.equal(store.absence_last_checked_date, '2026-07-14');
   assert.equal(notifications.length, 1);
   assert.match(notifications[0].text, /Tokyo Club/);
   assert.match(notifications[0].text, /Alice/);
   assert.match(notifications[0].text, /2026-07-14/);
-  assert.match(notifications[0].text, /\$1\.50/);
+  assert.match(notifications[0].text, /₫1,500,000/);
   assert.deepEqual(notifications[0].reply_markup.inline_keyboard, absenceApprovalKeyboard(requests[0].request_id));
-  assert.ok(requests[0].notified_at);
+  assert.deepEqual(outbox.map((row) => row.status), ['sent']);
+  assert.match(source, /m\.role = 'employee'/);
 });
 
 test('registers the absence scan as an hourly Worker Cron', () => {

@@ -130,9 +130,24 @@ CREATE TABLE IF NOT EXISTS absence_fine_requests (
   decided_at TEXT,
   admin_id TEXT,
   reject_reason TEXT,
+  cancellation_reason TEXT,
   income_record_id TEXT,
   UNIQUE (store_id, telegram_id, business_date)
 );
+
+CREATE TABLE IF NOT EXISTS absence_fine_notifications (
+  request_id TEXT NOT NULL,
+  admin_id TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'pending',
+  attempts INTEGER NOT NULL DEFAULT 0,
+  claimed_at TEXT,
+  sent_at TEXT,
+  last_error TEXT,
+  PRIMARY KEY (request_id, admin_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_absence_notifications_delivery
+  ON absence_fine_notifications (status, claimed_at);
 
 CREATE INDEX IF NOT EXISTS idx_absence_fine_store_status_date
   ON absence_fine_requests (store_id, status, business_date);
