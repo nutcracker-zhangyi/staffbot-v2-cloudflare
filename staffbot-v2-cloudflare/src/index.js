@@ -526,6 +526,19 @@ async function handleCallback(callback, env) {
     if (parts[1] === 'reject') return startLeaveReject(env, callback, userId, storeId, requestId, lang);
   }
 
+  if (parts[0] === 'abs') {
+    const requestId = parts[2] || '';
+    const request = await env.DB.prepare(
+      `SELECT * FROM absence_fine_requests WHERE request_id = ?`
+    ).bind(requestId).first();
+    if (!request || !(await isStoreAdmin(env, userId, request.store_id))) {
+      await audit(env, request ? request.store_id : DEFAULT_STORE_ID, userId, 'unauthorized_absence_callback', data, {});
+      return answerCallback(env, callback.id, t(lang, 'no_permission'), true);
+    }
+    if (parts[1] === 'a') return approveAbsenceFine(env, callback, userId, request, lang);
+    if (parts[1] === 'r') return rejectAbsenceFine(env, callback, userId, request, lang);
+  }
+
   return answerCallback(env, callback.id);
 }
 
@@ -1039,6 +1052,20 @@ export function absenceApprovalKeyboard(requestId) {
   ]];
 }
 
+async function approveAbsenceFine(env, callback, adminId, request, lang) {
+  const result = await approveAbsenceFineRequest(env, request.request_id, adminId);
+  if (!result.ok) return answerCallback(env, callback.id, t(lang, 'already_processed'), true);
+  await editCallbackMessage(env, callback, `${callback.message.text}\n\n已批准罚款 by ${adminId}`);
+  return answerCallback(env, callback.id, '已批准罚款。');
+}
+
+async function rejectAbsenceFine(env, callback, adminId, request, lang) {
+  const result = await rejectAbsenceFineRequest(env, request.request_id, adminId);
+  if (!result.ok) return answerCallback(env, callback.id, t(lang, 'already_processed'), true);
+  await editCallbackMessage(env, callback, `${callback.message.text}\n\n已驳回 by ${adminId}`);
+  return answerCallback(env, callback.id, '已驳回。');
+}
+
 async function startCheckoutReject(env, callback, adminId, storeId, requestId, lang) {
   const found = await env.DB.prepare(`SELECT * FROM pending_checkout_requests WHERE store_id = ? AND request_id = ?`).bind(storeId, requestId).first();
   if (!found || found.status !== 'pending') return answerCallback(env, callback.id, t(lang, 'already_processed'), true);
@@ -1080,6 +1107,52 @@ async function hasAttendance(env, storeId, userId, businessDate, type) {
     WHERE store_id = ? AND telegram_id = ? AND business_date = ? AND type = ?
   `).bind(storeId, userId, businessDate, type).first();
   return !!row;
+}
+
+export async function approveAbsenceFineRequest(env, requestId, adminId) {
+  const found = await env.DB.prepare(`
+    SELECT * FROM absence_fine_requests WHERE request_id = ? AND status = 'pending'
+  `).bind(requestId).first();
+  if (!found) return { ok: false };
+
+  const decidedAt = nowIso();
+  const recordId = makeId('REC');
+  const draft = absenceFineRecordDraft(found, adminId, decidedAt, recordId);
+  await env.DB.batch([
+    env.DB.prepare(`
+      INSERT INTO income_records
+        (record_id, store_id, telegram_id, income, commission_rate, commission_income, original_fine, fine, type, source, request_id, approved_at, admin_id)
+      SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+      FROM absence_fine_requests WHERE request_id = ? AND status = 'pending'
+    `).bind(
+      draft.record_id, draft.store_id, draft.telegram_id, draft.income, draft.commission_rate,
+      draft.commission_income, draft.original_fine, draft.fine, draft.type, draft.source, draft.request_id,
+      draft.approved_at, draft.admin_id, requestId
+    ),
+    env.DB.prepare(`
+      UPDATE absence_fine_requests
+      SET status = 'approved', decided_at = ?, admin_id = ?, income_record_id = ?
+      WHERE request_id = ? AND status = 'pending'
+    `).bind(decidedAt, adminId, recordId, requestId)
+  ]);
+  await audit(env, found.store_id, adminId, 'approve_absence_fine', requestId, found);
+  return { ok: true, row: found, recordId };
+}
+
+export async function rejectAbsenceFineRequest(env, requestId, adminId) {
+  const found = await env.DB.prepare(`
+    SELECT * FROM absence_fine_requests WHERE request_id = ? AND status = 'pending'
+  `).bind(requestId).first();
+  if (!found) return { ok: false };
+
+  const reason = 'Rejected by admin';
+  await env.DB.prepare(`
+    UPDATE absence_fine_requests
+    SET status = 'rejected', decided_at = ?, admin_id = ?, reject_reason = ?
+    WHERE request_id = ? AND status = 'pending'
+  `).bind(nowIso(), adminId, reason, requestId).run();
+  await audit(env, found.store_id, adminId, 'reject_absence_fine', requestId, { reason, ...found });
+  return { ok: true, row: found, reason };
 }
 
 async function approveIncomeRequest(env, storeId, requestId, adminId) {
@@ -1228,11 +1301,40 @@ async function approveLeaveRequest(env, storeId, requestId, adminId) {
   if (Number(conflict && conflict.total ? conflict.total : 0) >= Number((store && store.leave_daily_limit) || 1)) {
     return { ok: false, error: 'leave_conflict' };
   }
+  const decidedAt = nowIso();
   await env.DB.prepare(`
     UPDATE leave_requests SET status = 'approved', decided_at = ?, admin_id = ?
     WHERE store_id = ? AND request_id = ?
-  `).bind(nowIso(), adminId, storeId, requestId).run();
+  `).bind(decidedAt, adminId, storeId, requestId).run();
+  await cancelAbsenceForApprovedLeave(env, storeId, found.telegram_id, found.leave_date, adminId);
   await audit(env, storeId, adminId, 'approve_leave', requestId, found);
+  return { ok: true, row: found };
+}
+
+export async function cancelAbsenceForApprovedLeave(env, storeId, telegramId, leaveDate, adminId) {
+  const found = await env.DB.prepare(`
+    SELECT * FROM absence_fine_requests
+    WHERE store_id = ? AND telegram_id = ? AND business_date = ?
+      AND status IN ('pending', 'approved', 'rejected')
+  `).bind(storeId, telegramId, leaveDate).first();
+  if (!found) return { ok: false };
+
+  const decidedAt = nowIso();
+  const statements = [];
+  if (found.status === 'approved' && found.income_record_id) {
+    statements.push(env.DB.prepare(`
+      UPDATE income_records SET fine = 0
+      WHERE store_id = ? AND record_id = ? AND type = 'fine'
+    `).bind(storeId, found.income_record_id));
+  }
+  statements.push(env.DB.prepare(`
+    UPDATE absence_fine_requests
+    SET status = 'cancelled', reject_reason = 'Approved leave',
+        decided_at = COALESCE(decided_at, ?), admin_id = COALESCE(admin_id, ?)
+    WHERE request_id = ? AND status IN ('pending', 'approved', 'rejected')
+  `).bind(decidedAt, adminId, found.request_id));
+  await env.DB.batch(statements);
+  await audit(env, storeId, adminId, 'cancel_absence_for_leave', found.request_id, found);
   return { ok: true, row: found };
 }
 
@@ -2839,6 +2941,24 @@ export function calculateNetIncome(income, fine, commissionRate) {
 
 export function calculateIncomeRowsTotal(rows) {
   return (rows || []).reduce((total, row) => total + Number(row.commission_income || 0) - Number(row.fine || 0), 0);
+}
+
+export function absenceFineRecordDraft(request, adminId, decidedAt, recordId) {
+  return {
+    record_id: recordId,
+    store_id: request.store_id,
+    telegram_id: request.telegram_id,
+    income: 0,
+    commission_rate: 0.6,
+    commission_income: 0,
+    original_fine: Number(request.original_fine || 0),
+    fine: Number(request.fine || 0),
+    type: 'fine',
+    source: 'attendance_absence',
+    request_id: request.request_id,
+    approved_at: decidedAt,
+    admin_id: adminId
+  };
 }
 
 export function approvedIncomeRecordDrafts(found, adminId, approvedAt, recordIds) {

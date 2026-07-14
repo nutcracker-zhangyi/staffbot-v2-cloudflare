@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import {
+  absenceFineRecordDraft,
   attendanceFineAmount,
   approvedIncomeRecordDrafts,
   calculateCommissionIncome,
@@ -16,6 +17,30 @@ import {
   parseStoreAmount,
   render
 } from '../src/index.js';
+
+test('creates one editable income fine from an approved absence', () => {
+  assert.deepEqual(absenceFineRecordDraft({
+    request_id: 'ABS-1',
+    store_id: 'STORE1',
+    telegram_id: 'U1',
+    original_fine: 1500000,
+    fine: 1500000
+  }, 'ADMIN1', '2026-07-15T03:10:00.000Z', 'REC-1'), {
+    record_id: 'REC-1',
+    store_id: 'STORE1',
+    telegram_id: 'U1',
+    income: 0,
+    commission_rate: 0.6,
+    commission_income: 0,
+    original_fine: 1500000,
+    fine: 1500000,
+    type: 'fine',
+    source: 'attendance_absence',
+    request_id: 'ABS-1',
+    approved_at: '2026-07-15T03:10:00.000Z',
+    admin_id: 'ADMIN1'
+  });
+});
 
 test('parses VND employee input as millions', () => {
   assert.equal(parseStoreAmount({ currency: '₫' }, '3', false), 3000000);

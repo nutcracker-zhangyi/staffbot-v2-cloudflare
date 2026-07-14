@@ -229,6 +229,18 @@ test('keeps absence approval callbacks below Telegram limit', () => {
   assert.ok(buttons.every((button) => Buffer.byteLength(button.callback_data, 'utf8') <= 64));
 });
 
+test('routes compact absence approval callbacks through store authorization', () => {
+  assert.match(source, /parts\[0\] === 'abs'/);
+  assert.match(source, /approveAbsenceFineRequest/);
+  assert.match(source, /rejectAbsenceFineRequest/);
+  assert.match(source, /cancelAbsenceForApprovedLeave/);
+});
+
+test('absence fines use the existing editable fine record path', () => {
+  assert.match(source, /found\.type !== 'fine'/);
+  assert.match(source, /source: 'attendance_absence'/);
+});
+
 test('discovers and notifies each completed-day absence once', async () => {
   const store = {
     store_id: 'TOKYO',
