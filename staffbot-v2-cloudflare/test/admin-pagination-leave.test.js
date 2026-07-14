@@ -568,6 +568,13 @@ test('normalizes employee absence check updates without resetting an enabled tim
   };
 
   assert.deepEqual(normalizeEmployeeAbsenceCheck({}, enabled, now), enabled);
+  assert.deepEqual(normalizeEmployeeAbsenceCheck({}, {
+    absence_check_enabled: 0,
+    absence_check_enabled_at: null
+  }, now), {
+    absence_check_enabled: 0,
+    absence_check_enabled_at: null
+  });
   assert.deepEqual(normalizeEmployeeAbsenceCheck({ absence_check_enabled: false }, enabled, now), {
     absence_check_enabled: 0,
     absence_check_enabled_at: null
@@ -637,6 +644,36 @@ test('disabling absence checks cancels only matching pending work', async () => 
   assert.equal(auditRow.action, 'update_member');
   assert.equal(auditRow.target_id, 'U1');
   assert.deepEqual(JSON.parse(auditRow.details_json).absence_check, { before: 1, after: 0 });
+});
+
+test('new member defaults to enabled employee absence check when switch is omitted', async () => {
+  const database = memberAbsenceTestDatabase();
+  const env = {
+    BOT_TOKEN: 'test-token',
+    WEBHOOK_SECRET: 'test-secret',
+    ADMIN_IDS: 'ADMIN',
+    DB: d1TestDatabase(database)
+  };
+  const response = await worker.fetch(new Request('https://example.com/api/admin/stores/S1/members', {
+    method: 'POST',
+    headers: {
+      cookie: 'staffbot_admin_session=session-1',
+      'content-type': 'application/json'
+    },
+    body: JSON.stringify({
+      telegram_id: 'U3', name: 'New Member', username: 'new-member',
+      role: 'employee', status: 'active', commission_rate: 0.6
+    })
+  }), env, { waitUntil() {} });
+
+  assert.equal(response.status, 200);
+  const member = database.prepare(`
+    SELECT absence_check_enabled, absence_check_enabled_at
+    FROM store_members WHERE store_id = 'S1' AND telegram_id = 'U3'
+  `).get();
+  assert.equal(member.absence_check_enabled, 1);
+  assert.ok(member.absence_check_enabled_at);
+  assert.equal(new Date(member.absence_check_enabled_at).toISOString(), member.absence_check_enabled_at);
 });
 
 test('closes the previous business day at store-local noon', () => {
