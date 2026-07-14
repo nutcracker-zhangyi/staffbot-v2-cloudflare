@@ -3661,10 +3661,16 @@ function adminHtml() {
     .store-chip.active { background:#242747; border-color:var(--accent); color:#fff; }
     .store-chip.active:hover:not(:disabled) { background:#2b2f58; border-color:var(--accent-2); color:#fff; }
     .summary-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(180px,1fr)); gap:10px; }
+    .summary-grid.attendance-metrics { grid-template-columns:repeat(auto-fit,minmax(150px,1fr)); }
     .summary-card { min-width:0; border:1px solid var(--line); border-radius:12px; padding:12px; background:var(--soft); }
+    .summary-card[data-status-tone="warning"] { border-color:rgba(255,180,80,.35); }
+    .summary-card[data-status-tone="danger"] { border-color:rgba(255,107,107,.35); }
+    .summary-card[data-status-tone="success"] { border-color:rgba(39,166,68,.30); }
     .summary-card strong { display:block; color:var(--muted); font-size:12px; margin-bottom:4px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
     .summary-value { color:var(--ink); font-size:20px; font-weight:600; }
     .summary-detail { margin-top:4px; font-size:12px; line-height:1.45; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+    .employee-name-cell { min-width:160px; font-weight:600; }
+    .metric-cell { text-align:right; font-variant-numeric:tabular-nums; }
     @media (max-width: 720px) { main { padding:12px; } table { min-width:820px; } header { align-items:flex-start; flex-direction:column; padding:14px 12px; } .toolbar, .member-filter { align-items:stretch; } .member-filter > * { width:100%; } input, select, button { min-height:44px; } nav button { min-height:40px; } }
   </style>
 </head>
@@ -3755,7 +3761,7 @@ function adminHtml() {
       income: { pending: {}, records: {}, rejected: {} },
       salary: { requests: {}, records: {}, rejected: {} },
       advances: { pending: {}, approved: {}, rejected: {} },
-      attendance: { pending: {}, approved: {}, rejected: {} },
+      attendance: { summary: {}, pending: {}, approved: {}, rejected: {} },
       leave: { pending: {}, approved: {}, rejected: {} },
       logs: { logs: {} }
     };
@@ -3778,7 +3784,7 @@ function adminHtml() {
         business_date:'营业日期', type:'类型', timestamp:'时间', latitude:'纬度', longitude:'经度', late:'迟到', early_leave:'早退',
         level:'级别', event:'事件', message_text:'消息', payload_json:'数据', created_at:'创建时间', leave_date:'请假日期',
         pending_income:'待审批收入', income_records:'收入记录', rejected_income:'拒绝记录', salary_requests:'待审批工资', salary_records:'工资记录', rejected_salary:'拒绝记录', pending_advances:'待审批预支', approved_advances:'已批准预支', rejected_advances:'已拒绝预支', pending_leave:'待审批请假', approved_leave:'已批准请假', rejected_leave:'已拒绝请假', pending_attendance:'待审批签退', approved_attendance:'已批准考勤', rejected_attendance:'已驳回签退',
-        summary:'合计', pending_total:'待审批合计', approved_total:'已批准合计', rejected_total:'已拒绝合计', pending_days:'待审批天数', approved_days:'已批准天数', rejected_days:'已拒绝天数', income_total:'收入合计', commission_income_total:'提成收入合计', fine_total:'罚款合计', net_total:'净额合计',
+        summary:'合计', work_days:'出勤天数', late_days:'迟到天数', absence_days:'缺勤天数', leave_days:'请假天数', attendance_fine_total:'考勤罚款合计', employee_attendance_summary:'员工考勤汇总', view_details:'查看明细', pending_total:'待审批合计', approved_total:'已批准合计', rejected_total:'已拒绝合计', pending_days:'待审批天数', approved_days:'已批准天数', rejected_days:'已拒绝天数', income_total:'收入合计', commission_income_total:'提成收入合计', fine_total:'罚款合计', net_total:'净额合计',
         btn_approve:'批准', btn_approve_fine:'批准并罚款', btn_approve_no_fine:'批准不罚款', btn_reject:'驳回',
         filter:'筛选', month:'月份', date_from:'开始日期', date_to:'结束日期', employee:'员工', all_employees:'全部员工', stores_filter:'店铺（可多选）', search:'查询', prev_page:'上一页', next_page:'下一页', page_status:'第 {page} / {total_pages} 页，共 {total} 条',
         sent_code:'验证码已发送到 Telegram。', sending:'发送中...', reject_reason:'驳回原因', no_data:'暂无数据',
@@ -3798,7 +3804,7 @@ function adminHtml() {
         business_date:'Business date', type:'Type', timestamp:'Time', latitude:'Latitude', longitude:'Longitude', late:'Late', early_leave:'Early leave',
         level:'Level', event:'Event', message_text:'Message', payload_json:'Payload', created_at:'Created at', leave_date:'Leave date',
         pending_income:'Pending income', income_records:'Income records', rejected_income:'Rejected records', salary_requests:'Pending salary', salary_records:'Salary records', rejected_salary:'Rejected records', pending_advances:'Pending advances', approved_advances:'Approved advances', rejected_advances:'Rejected advances', pending_leave:'Pending leave', approved_leave:'Approved leave', rejected_leave:'Rejected leave', pending_attendance:'Pending checkout', approved_attendance:'Approved attendance', rejected_attendance:'Rejected checkout',
-        summary:'Summary', pending_total:'Pending total', approved_total:'Approved total', rejected_total:'Rejected total', pending_days:'Pending days', approved_days:'Approved days', rejected_days:'Rejected days', income_total:'Income total', commission_income_total:'Commission income total', fine_total:'Fine total', net_total:'Net total',
+        summary:'Summary', work_days:'Work days', late_days:'Late days', absence_days:'Absence days', leave_days:'Leave days', attendance_fine_total:'Attendance fines', employee_attendance_summary:'Employee attendance summary', view_details:'View details', pending_total:'Pending total', approved_total:'Approved total', rejected_total:'Rejected total', pending_days:'Pending days', approved_days:'Approved days', rejected_days:'Rejected days', income_total:'Income total', commission_income_total:'Commission income total', fine_total:'Fine total', net_total:'Net total',
         btn_approve:'Approve', btn_approve_fine:'Approve with fine', btn_approve_no_fine:'Approve no fine', btn_reject:'Reject',
         filter:'Filter', month:'Month', date_from:'From date', date_to:'To date', employee:'Employee', all_employees:'All employees', stores_filter:'Stores (multi-select)', search:'Search', prev_page:'Previous', next_page:'Next', page_status:'Page {page} / {total_pages}, {total} rows',
         sent_code:'Code sent to Telegram.', sending:'Sending...', reject_reason:'Reject reason', no_data:'No data',
@@ -3818,7 +3824,7 @@ function adminHtml() {
         business_date:'Ngày kinh doanh', type:'Loại', timestamp:'Thời gian', latitude:'Vĩ độ', longitude:'Kinh độ', late:'Đi muộn', early_leave:'Về sớm',
         level:'Mức', event:'Sự kiện', message_text:'Tin nhắn', payload_json:'Dữ liệu', created_at:'Tạo lúc',
         pending_income:'Thu nhập chờ duyệt', income_records:'Bản ghi thu nhập', rejected_income:'Bản ghi từ chối', salary_requests:'Lương chờ duyệt', salary_records:'Bản ghi lương', rejected_salary:'Bản ghi từ chối', pending_advances:'Ứng lương chờ duyệt', approved_advances:'Ứng lương đã duyệt', rejected_advances:'Ứng lương bị từ chối', pending_attendance:'Ra ca chờ duyệt', approved_attendance:'Chấm công đã duyệt', rejected_attendance:'Ra ca bị từ chối',
-        summary:'Tổng cộng', pending_total:'Tổng chờ duyệt', approved_total:'Tổng đã duyệt', rejected_total:'Tổng từ chối', income_total:'Tổng thu nhập', commission_income_total:'Tổng thu nhập hoa hồng', fine_total:'Tổng phạt', net_total:'Tổng ròng',
+        summary:'Tổng cộng', work_days:'Ngày làm việc', late_days:'Ngày đi muộn', absence_days:'Ngày vắng mặt', leave_days:'Ngày nghỉ phép', attendance_fine_total:'Tổng phạt chấm công', employee_attendance_summary:'Tổng hợp chấm công nhân viên', view_details:'Xem chi tiết', pending_total:'Tổng chờ duyệt', approved_total:'Tổng đã duyệt', rejected_total:'Tổng từ chối', income_total:'Tổng thu nhập', commission_income_total:'Tổng thu nhập hoa hồng', fine_total:'Tổng phạt', net_total:'Tổng ròng',
         btn_approve:'Duyệt', btn_approve_fine:'Duyệt kèm phạt', btn_approve_no_fine:'Duyệt không phạt', btn_reject:'Từ chối',
         filter:'Lọc', month:'Tháng', date_from:'Từ ngày', date_to:'Đến ngày', employee:'Nhân viên', all_employees:'Tất cả nhân viên', stores_filter:'Cửa hàng (chọn nhiều)', search:'Tìm',
         sent_code:'Đã gửi mã đến Telegram.', sending:'Đang gửi...', reject_reason:'Lý do từ chối', no_data:'Không có dữ liệu',
@@ -3838,7 +3844,7 @@ function adminHtml() {
         business_date:'Рабочая дата', type:'Тип', timestamp:'Время', latitude:'Широта', longitude:'Долгота', late:'Опоздание', early_leave:'Ранний уход',
         level:'Уровень', event:'Событие', message_text:'Сообщение', payload_json:'Данные', created_at:'Создано',
         pending_income:'Доход на проверке', income_records:'Записи дохода', rejected_income:'Отклоненные записи', salary_requests:'Зарплата на проверке', salary_records:'Записи зарплаты', rejected_salary:'Отклоненные записи', pending_advances:'Авансы на проверке', approved_advances:'Одобренные авансы', rejected_advances:'Отклоненные авансы', pending_attendance:'Завершение смены на проверке', approved_attendance:'Одобренная посещаемость', rejected_attendance:'Отклоненное завершение смены',
-        summary:'Итого', pending_total:'Ожидает итого', approved_total:'Одобрено итого', rejected_total:'Отклонено итого', income_total:'Доход итого', commission_income_total:'Комиссионный доход итого', fine_total:'Штраф итого', net_total:'Чистый итог',
+        summary:'Итого', work_days:'Рабочие дни', late_days:'Дни опозданий', absence_days:'Дни отсутствия', leave_days:'Дни отпуска', attendance_fine_total:'Штрафы за посещаемость', employee_attendance_summary:'Сводка посещаемости сотрудников', view_details:'Подробнее', pending_total:'Ожидает итого', approved_total:'Одобрено итого', rejected_total:'Отклонено итого', income_total:'Доход итого', commission_income_total:'Комиссионный доход итого', fine_total:'Штраф итого', net_total:'Чистый итог',
         btn_approve:'Одобрить', btn_approve_fine:'Одобрить со штрафом', btn_approve_no_fine:'Одобрить без штрафа', btn_reject:'Отклонить',
         filter:'Фильтр', month:'Месяц', date_from:'С даты', date_to:'По дату', employee:'Сотрудник', all_employees:'Все сотрудники', stores_filter:'Магазины (можно несколько)', search:'Поиск',
         sent_code:'Код отправлен в Telegram.', sending:'Отправка...', reject_reason:'Причина отклонения', no_data:'Нет данных',
@@ -4188,10 +4194,20 @@ function adminHtml() {
       const data = await api('/api/admin/stores/' + encodeURIComponent(storeId()) + '/attendance?' + queryWithPages('attendance'));
       $('tab-attendance').innerHTML = await filterPanel() +
         attendanceSummaryPanel(data) +
+        sectionTitle('employee_attendance_summary') + attendanceEmployeeSummaryTable(data) +
         sectionTitle('pending_attendance') + attendanceActionTable(data.pending, ['request_id','telegram_id','display_name','business_date','timestamp','early_leave','original_fine','status','submitted_at'], 'pending') + pager('attendance', 'pending_page', data.pagination && data.pagination.pending) +
         sectionTitle('approved_attendance') + table(data.approved, ['record_id','telegram_id','display_name','business_date','type','timestamp','late','early_leave','original_fine','fine'], false, 'approved') + pager('attendance', 'approved_page', data.pagination && data.pagination.approved) +
         sectionTitle('rejected_attendance') + table(data.rejected, ['request_id','telegram_id','display_name','business_date','timestamp','early_leave','original_fine','status','submitted_at','decided_at','admin_id','reject_reason'], false, 'rejected') + pager('attendance', 'rejected_page', data.pagination && data.pagination.rejected);
       bindFilterControls();
+      document.querySelectorAll('[data-attendance-detail]').forEach((btn) => {
+        btn.onclick = () => withBusy(btn, async () => {
+          filters.employee = btn.dataset.attendanceDetail;
+          const employeeSelect = $('tab-attendance').querySelector('[data-filter-employee]');
+          if (employeeSelect) employeeSelect.value = filters.employee;
+          resetPages('attendance');
+          await renderAttendance();
+        });
+      });
       bindActions('attendance');
       bindPagers();
     }
@@ -4247,11 +4263,42 @@ function adminHtml() {
     }
 
     function attendanceSummaryPanel(data) {
-      return summaryPanel([
-        { label: L('pending_total'), value: String((data.pagination && data.pagination.pending && data.pagination.pending.total) || 0) },
-        { label: L('approved_total'), value: String((data.pagination && data.pagination.approved && data.pagination.approved.total) || 0) },
-        { label: L('rejected_total'), value: String((data.pagination && data.pagination.rejected && data.pagination.rejected.total) || 0) }
-      ]);
+      const summary = data.summary || {};
+      return '<div class="summary"><h2>' + L('summary') + '</h2>' +
+        '<div class="summary-grid attendance-metrics">' + [
+          { label:L('work_days'), value:String(summary.work_days || 0), tone:'success' },
+          { label:L('late_days'), value:String(summary.late_days || 0), tone:'warning' },
+          { label:L('absence_days'), value:String(summary.absence_days || 0), tone:'danger' },
+          { label:L('leave_days'), value:String(summary.leave_days || 0), tone:'' },
+          { label:L('attendance_fine_total'), value:formatAdminMoneyForUi(summary.fine_total || 0), tone:'warning' }
+        ].map((item) => '<div class="summary-card" data-status-tone="' + esc(item.tone) + '">' +
+          '<strong>' + esc(item.label) + '</strong><div class="summary-value">' + esc(item.value) + '</div></div>').join('') +
+        '</div></div>';
+    }
+
+    function attendanceEmployeeSummaryTable(data) {
+      const rows = [...(data.employee_stats || [])];
+      const state = sorts.attendance.summary || {};
+      const numericColumns = new Set(['work_days', 'late_days', 'absence_days', 'leave_days', 'fine_total']);
+      if (state.sort) {
+        rows.sort((a, b) => {
+          const comparison = numericColumns.has(state.sort)
+            ? Number(a[state.sort] || 0) - Number(b[state.sort] || 0)
+            : String(a[state.sort] || '').localeCompare(String(b[state.sort] || ''));
+          return state.dir === 'desc' ? -comparison : comparison;
+        });
+      }
+      const cols = activeFilterStores().length > 1
+        ? ['store_id', 'display_name', 'work_days', 'late_days', 'absence_days', 'leave_days', 'fine_total', 'action']
+        : ['display_name', 'work_days', 'late_days', 'absence_days', 'leave_days', 'fine_total', 'action'];
+      return '<div class="table-wrap"><table><thead><tr>' + cols.map((key) => tableHeader(key, 'summary')).join('') + '</tr></thead><tbody>' +
+        rows.map((row) => '<tr>' + cols.map((key) => {
+          if (key === 'action') return '<td><button class="secondary" data-attendance-detail="' + esc(row.telegram_id) + '">' + L('view_details') + '</button></td>';
+          const value = key === 'fine_total' ? formatAdminMoneyForUi(row[key] || 0) : String(row[key] || 0);
+          const className = key === 'display_name' ? 'employee-name-cell' : numericColumns.has(key) ? 'metric-cell' : key === 'store_id' ? 'id-cell' : '';
+          return '<td' + (className ? ' class="' + className + '"' : '') + ' title="' + esc(value) + '">' + esc(value) + '</td>';
+        }).join('') + '</tr>').join('') +
+        '</tbody></table></div>';
     }
 
     function summaryPanel(items) {

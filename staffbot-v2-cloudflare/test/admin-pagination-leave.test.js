@@ -210,6 +210,15 @@ test('attendance API returns summary and employee statistics', () => {
   assert.match(source, /summary: sumAttendanceEmployeeStats/);
 });
 
+test('attendance page renders five metrics and a multi-employee drill-down table', () => {
+  for (const key of ['work_days', 'late_days', 'absence_days', 'leave_days', 'attendance_fine_total']) {
+    assert.match(source, new RegExp(`${key}:`));
+  }
+  assert.match(source, /attendanceEmployeeSummaryTable/);
+  assert.match(source, /data-attendance-detail/);
+  assert.match(source, /data-status-tone/);
+});
+
 test('returns one full-range attendance statistics row per active employee', async () => {
   const database = attendanceStatsTestDatabase();
   const rows = await attendanceEmployeeStats({ DB: d1TestDatabase(database) }, {
