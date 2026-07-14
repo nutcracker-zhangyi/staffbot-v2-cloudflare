@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
+import { DatabaseSync } from 'node:sqlite';
 
 import {
   adminPage,
@@ -11,6 +12,8 @@ import {
   attendanceFineDecision,
   absenceApprovalKeyboard,
   absenceScanDates,
+  approveAbsenceFineRequest,
+  cancelAbsenceForApprovedLeave,
   completedAttendanceDate,
   currentAdminStoreId,
   dateRange,
@@ -25,12 +28,101 @@ import {
   leaveRuleParams,
   normalizeAbsenceFineSetting,
   processAbsenceFines,
+  rejectAbsenceFineRequest,
   validateLeaveDate,
   visibleAdminStores
 } from '../src/index.js';
 
 const source = readFileSync(new URL('../src/index.js', import.meta.url), 'utf8');
 const wrangler = readFileSync(new URL('../wrangler.toml', import.meta.url), 'utf8');
+
+function absenceTestDatabase() {
+  const database = new DatabaseSync(':memory:');
+  database.exec(`
+    CREATE TABLE absence_fine_requests (
+      request_id TEXT PRIMARY KEY,
+      store_id TEXT NOT NULL,
+      telegram_id TEXT NOT NULL,
+      business_date TEXT NOT NULL,
+      original_fine REAL NOT NULL,
+      fine REAL NOT NULL,
+      status TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      decided_at TEXT,
+      admin_id TEXT,
+      reject_reason TEXT,
+      income_record_id TEXT
+    );
+    CREATE TABLE income_records (
+      record_id TEXT PRIMARY KEY,
+      store_id TEXT NOT NULL,
+      telegram_id TEXT NOT NULL,
+      income REAL NOT NULL,
+      commission_rate REAL NOT NULL,
+      commission_income REAL NOT NULL,
+      original_fine REAL NOT NULL,
+      fine REAL NOT NULL,
+      type TEXT NOT NULL,
+      source TEXT NOT NULL,
+      request_id TEXT,
+      approved_at TEXT NOT NULL,
+      admin_id TEXT NOT NULL
+    );
+    CREATE UNIQUE INDEX one_absence_fine
+      ON income_records (source, request_id) WHERE source = 'attendance_absence';
+    CREATE TABLE admin_audit_logs (
+      store_id TEXT, admin_id TEXT, action TEXT, target_id TEXT,
+      details_json TEXT, created_at TEXT
+    );
+  `);
+  database.prepare(`
+    INSERT INTO absence_fine_requests
+      (request_id, store_id, telegram_id, business_date, original_fine, fine, status, created_at)
+    VALUES ('ABS-1', 'STORE1', 'U1', '2026-07-14', 1500000, 1500000, 'pending', '2026-07-15T03:00:00.000Z')
+  `).run();
+  return database;
+}
+
+function d1TestDatabase(database, beforeFirst) {
+  function prepare(sql) {
+    let params = [];
+    return {
+      bind(...values) {
+        params = values;
+        return this;
+      },
+      async first() {
+        const row = database.prepare(sql).get(...params) || null;
+        if (beforeFirst) await beforeFirst(sql, row);
+        return row;
+      },
+      async all() {
+        return { results: database.prepare(sql).all(...params) };
+      },
+      async run() {
+        return this._run();
+      },
+      _run() {
+        const result = database.prepare(sql).run(...params);
+        return { success: true, meta: { changes: Number(result.changes) } };
+      }
+    };
+  }
+  return {
+    prepare,
+    async batch(statements) {
+      database.exec('BEGIN IMMEDIATE');
+      try {
+        const results = statements.map((statement) => statement._run());
+        database.exec('COMMIT');
+        return results;
+      } catch (error) {
+        database.exec('ROLLBACK');
+        throw error;
+      }
+    }
+  };
+}
 
 test('normalizes admin pagination to 100 rows per page', () => {
   assert.deepEqual(adminPage('1', 250), {
@@ -239,6 +331,99 @@ test('routes compact absence approval callbacks through store authorization', ()
 test('absence fines use the existing editable fine record path', () => {
   assert.match(source, /found\.type !== 'fine'/);
   assert.match(source, /source: 'attendance_absence'/);
+});
+
+test('approves an absence fine exactly once across replayed requests', async () => {
+  const database = absenceTestDatabase();
+  const env = { DB: d1TestDatabase(database) };
+
+  const first = await approveAbsenceFineRequest(env, 'ABS-1', 'ADMIN1');
+  const replay = await approveAbsenceFineRequest(env, 'ABS-1', 'ADMIN2');
+
+  assert.equal(first.ok, true);
+  assert.equal(replay.ok, false);
+  assert.equal(database.prepare(`SELECT COUNT(*) AS total FROM income_records`).get().total, 1);
+  assert.equal(database.prepare(`SELECT status FROM absence_fine_requests WHERE request_id = 'ABS-1'`).get().status, 'approved');
+  assert.equal(database.prepare(`SELECT COUNT(*) AS total FROM admin_audit_logs WHERE action = 'approve_absence_fine'`).get().total, 1);
+});
+
+test('reports only the winning concurrent absence decision as successful', async () => {
+  const database = absenceTestDatabase();
+  let reads = 0;
+  let releaseReads;
+  const readsReleased = new Promise((resolve) => { releaseReads = resolve; });
+  const env = {
+    DB: d1TestDatabase(database, async (sql) => {
+      if (!/absence_fine_requests WHERE request_id = \? AND status = 'pending'/.test(sql)) return;
+      reads += 1;
+      if (reads === 2) releaseReads();
+      await readsReleased;
+    })
+  };
+
+  const [approval, rejection] = await Promise.all([
+    approveAbsenceFineRequest(env, 'ABS-1', 'ADMIN1'),
+    rejectAbsenceFineRequest(env, 'ABS-1', 'ADMIN2')
+  ]);
+
+  assert.deepEqual([approval.ok, rejection.ok].sort(), [false, true]);
+  assert.equal(database.prepare(`SELECT COUNT(*) AS total FROM income_records`).get().total, approval.ok ? 1 : 0);
+  assert.equal(database.prepare(`SELECT COUNT(*) AS total FROM admin_audit_logs`).get().total, 1);
+});
+
+test('waives a fine when absence approval commits after the leave cancellation read', async () => {
+  const database = absenceTestDatabase();
+  let releaseCancellation;
+  let cancellationRead;
+  const cancellationWasRead = new Promise((resolve) => { cancellationRead = resolve; });
+  const cancelEnv = {
+    DB: d1TestDatabase(database, async (sql) => {
+      if (!/status IN \('pending', 'approved', 'rejected'\)/.test(sql)) return;
+      cancellationRead();
+      await new Promise((resolve) => { releaseCancellation = resolve; });
+    })
+  };
+  const approvalEnv = { DB: d1TestDatabase(database) };
+
+  const cancellation = cancelAbsenceForApprovedLeave(cancelEnv, 'STORE1', 'U1', '2026-07-14', 'LEAVE-ADMIN');
+  await cancellationWasRead;
+  const approval = await approveAbsenceFineRequest(approvalEnv, 'ABS-1', 'FINE-ADMIN');
+  releaseCancellation();
+  const cancelled = await cancellation;
+
+  assert.equal(approval.ok, true);
+  assert.equal(cancelled.ok, true);
+  assert.equal(database.prepare(`SELECT status FROM absence_fine_requests WHERE request_id = 'ABS-1'`).get().status, 'cancelled');
+  const fineRecord = database.prepare(`SELECT fine, original_fine FROM income_records`).get();
+  assert.equal(fineRecord.fine, 0);
+  assert.equal(fineRecord.original_fine, 1500000);
+});
+
+test('does not approve an absence after approved leave cancellation wins the race', async () => {
+  const database = absenceTestDatabase();
+  let releaseApproval;
+  let approvalRead;
+  const approvalWasRead = new Promise((resolve) => { approvalRead = resolve; });
+  const approvalEnv = {
+    DB: d1TestDatabase(database, async (sql) => {
+      if (!/absence_fine_requests WHERE request_id = \? AND status = 'pending'/.test(sql)) return;
+      approvalRead();
+      await new Promise((resolve) => { releaseApproval = resolve; });
+    })
+  };
+  const cancelEnv = { DB: d1TestDatabase(database) };
+
+  const approval = approveAbsenceFineRequest(approvalEnv, 'ABS-1', 'FINE-ADMIN');
+  await approvalWasRead;
+  const cancelled = await cancelAbsenceForApprovedLeave(cancelEnv, 'STORE1', 'U1', '2026-07-14', 'LEAVE-ADMIN');
+  releaseApproval();
+  const approved = await approval;
+
+  assert.equal(cancelled.ok, true);
+  assert.equal(approved.ok, false);
+  assert.equal(database.prepare(`SELECT COUNT(*) AS total FROM income_records`).get().total, 0);
+  assert.equal(database.prepare(`SELECT status FROM absence_fine_requests WHERE request_id = 'ABS-1'`).get().status, 'cancelled');
+  assert.equal(database.prepare(`SELECT COUNT(*) AS total FROM admin_audit_logs WHERE action = 'approve_absence_fine'`).get().total, 0);
 });
 
 test('discovers and notifies each completed-day absence once', async () => {

@@ -1109,6 +1109,10 @@ async function hasAttendance(env, storeId, userId, businessDate, type) {
   return !!row;
 }
 
+function mutationCount(result) {
+  return Number(result && result.meta ? result.meta.changes : 0);
+}
+
 export async function approveAbsenceFineRequest(env, requestId, adminId) {
   const found = await env.DB.prepare(`
     SELECT * FROM absence_fine_requests WHERE request_id = ? AND status = 'pending'
@@ -1118,7 +1122,7 @@ export async function approveAbsenceFineRequest(env, requestId, adminId) {
   const decidedAt = nowIso();
   const recordId = makeId('REC');
   const draft = absenceFineRecordDraft(found, adminId, decidedAt, recordId);
-  await env.DB.batch([
+  const results = await env.DB.batch([
     env.DB.prepare(`
       INSERT INTO income_records
         (record_id, store_id, telegram_id, income, commission_rate, commission_income, original_fine, fine, type, source, request_id, approved_at, admin_id)
@@ -1135,6 +1139,7 @@ export async function approveAbsenceFineRequest(env, requestId, adminId) {
       WHERE request_id = ? AND status = 'pending'
     `).bind(decidedAt, adminId, recordId, requestId)
   ]);
+  if (mutationCount(results[1]) !== 1) return { ok: false };
   await audit(env, found.store_id, adminId, 'approve_absence_fine', requestId, found);
   return { ok: true, row: found, recordId };
 }
@@ -1146,11 +1151,12 @@ export async function rejectAbsenceFineRequest(env, requestId, adminId) {
   if (!found) return { ok: false };
 
   const reason = 'Rejected by admin';
-  await env.DB.prepare(`
+  const result = await env.DB.prepare(`
     UPDATE absence_fine_requests
     SET status = 'rejected', decided_at = ?, admin_id = ?, reject_reason = ?
     WHERE request_id = ? AND status = 'pending'
   `).bind(nowIso(), adminId, reason, requestId).run();
+  if (mutationCount(result) !== 1) return { ok: false };
   await audit(env, found.store_id, adminId, 'reject_absence_fine', requestId, { reason, ...found });
   return { ok: true, row: found, reason };
 }
@@ -1320,20 +1326,23 @@ export async function cancelAbsenceForApprovedLeave(env, storeId, telegramId, le
   if (!found) return { ok: false };
 
   const decidedAt = nowIso();
-  const statements = [];
-  if (found.status === 'approved' && found.income_record_id) {
-    statements.push(env.DB.prepare(`
+  const results = await env.DB.batch([
+    env.DB.prepare(`
       UPDATE income_records SET fine = 0
-      WHERE store_id = ? AND record_id = ? AND type = 'fine'
-    `).bind(storeId, found.income_record_id));
-  }
-  statements.push(env.DB.prepare(`
-    UPDATE absence_fine_requests
-    SET status = 'cancelled', reject_reason = 'Approved leave',
-        decided_at = COALESCE(decided_at, ?), admin_id = COALESCE(admin_id, ?)
-    WHERE request_id = ? AND status IN ('pending', 'approved', 'rejected')
-  `).bind(decidedAt, adminId, found.request_id));
-  await env.DB.batch(statements);
+      WHERE store_id = ? AND source = 'attendance_absence'
+        AND record_id = (
+          SELECT income_record_id FROM absence_fine_requests
+          WHERE request_id = ? AND status = 'approved'
+        )
+    `).bind(storeId, found.request_id),
+    env.DB.prepare(`
+      UPDATE absence_fine_requests
+      SET status = 'cancelled', reject_reason = 'Approved leave',
+          decided_at = COALESCE(decided_at, ?), admin_id = COALESCE(admin_id, ?)
+      WHERE request_id = ? AND status IN ('pending', 'approved', 'rejected')
+    `).bind(decidedAt, adminId, found.request_id)
+  ]);
+  if (mutationCount(results[1]) !== 1) return { ok: false };
   await audit(env, storeId, adminId, 'cancel_absence_for_leave', found.request_id, found);
   return { ok: true, row: found };
 }
