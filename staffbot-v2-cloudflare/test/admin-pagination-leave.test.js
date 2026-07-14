@@ -184,6 +184,9 @@ function attendanceStatsTestDatabase() {
 function notificationTestDatabase() {
   const database = new DatabaseSync(':memory:');
   database.exec(`
+    CREATE TABLE absence_fine_requests (
+      request_id TEXT PRIMARY KEY, store_id TEXT NOT NULL, status TEXT NOT NULL
+    );
     CREATE TABLE absence_fine_notifications (
       request_id TEXT NOT NULL,
       admin_id TEXT NOT NULL,
@@ -198,6 +201,12 @@ function notificationTestDatabase() {
       store_id TEXT, level TEXT, event TEXT, telegram_id TEXT,
       message_text TEXT, payload_json TEXT, created_at TEXT
     );
+    CREATE TABLE store_members (
+      store_id TEXT, telegram_id TEXT, status TEXT, role TEXT
+    );
+    INSERT INTO absence_fine_requests VALUES ('ABS-1', 'STORE1', 'pending');
+    INSERT INTO store_members VALUES ('STORE1', 'A1', 'active', 'admin');
+    INSERT INTO store_members VALUES ('STORE1', 'A2', 'active', 'admin');
   `);
   return database;
 }
@@ -778,6 +787,90 @@ test('atomically claims an absence notification across overlapping Cron runs', a
   assert.equal(sends, 1);
 });
 
+test('cancels a queued absence notification when admin access was revoked', async () => {
+  const database = notificationTestDatabase();
+  database.prepare(`INSERT INTO absence_fine_notifications (request_id, admin_id) VALUES ('ABS-1', 'A1')`).run();
+  database.prepare(`UPDATE store_members SET status = 'disabled' WHERE telegram_id = 'A1'`).run();
+  const env = { BOT_TOKEN: 'test', ADMIN_IDS: '', DB: d1TestDatabase(database) };
+  const originalFetch = globalThis.fetch;
+  let sends = 0;
+  globalThis.fetch = async () => { sends += 1; return new Response(JSON.stringify({ ok: true })); };
+  try {
+    assert.equal(await deliverAbsenceNotification(env, { name: 'Store', currency: '$' }, notificationRow('A1')), false);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+  assert.equal(sends, 0);
+  assert.deepEqual({ ...database.prepare(`SELECT status, last_error FROM absence_fine_notifications`).get() }, {
+    status: 'cancelled', last_error: 'admin_access_revoked'
+  });
+});
+
+test('cancels a queued notification when its absence request was already decided', async () => {
+  const database = notificationTestDatabase();
+  database.prepare(`INSERT INTO absence_fine_notifications (request_id, admin_id) VALUES ('ABS-1', 'A1')`).run();
+  database.prepare(`UPDATE absence_fine_requests SET status = 'approved' WHERE request_id = 'ABS-1'`).run();
+  const env = { BOT_TOKEN: 'test', ADMIN_IDS: '', DB: d1TestDatabase(database) };
+  const originalFetch = globalThis.fetch;
+  let sends = 0;
+  globalThis.fetch = async () => { sends += 1; return new Response(JSON.stringify({ ok: true })); };
+  try {
+    assert.equal(await deliverAbsenceNotification(env, { name: 'Store', currency: '$' }, notificationRow('A1')), false);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+  assert.equal(sends, 0);
+  assert.deepEqual({ ...database.prepare(`SELECT status, last_error FROM absence_fine_notifications`).get() }, {
+    status: 'cancelled', last_error: 'absence_request_not_pending'
+  });
+});
+
+test('does not steal a fresh sending notification lease', async () => {
+  const database = notificationTestDatabase();
+  database.prepare(`
+    INSERT INTO absence_fine_notifications (request_id, admin_id, status, claimed_at)
+    VALUES ('ABS-1', 'A1', 'sending', '2026-07-15T03:05:00.000Z')
+  `).run();
+  const env = { BOT_TOKEN: 'test', ADMIN_IDS: '', DB: d1TestDatabase(database) };
+  const originalFetch = globalThis.fetch;
+  let sends = 0;
+  globalThis.fetch = async () => { sends += 1; return new Response(JSON.stringify({ ok: true })); };
+  try {
+    assert.equal(await deliverAbsenceNotification(
+      env, { name: 'Store', currency: '$' }, notificationRow('A1'), new Date('2026-07-15T03:10:00.000Z')
+    ), false);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+  assert.equal(sends, 0);
+  assert.deepEqual({ ...database.prepare(`SELECT status, claimed_at, attempts FROM absence_fine_notifications`).get() }, {
+    status: 'sending', claimed_at: '2026-07-15T03:05:00.000Z', attempts: 0
+  });
+});
+
+test('recovers a sending notification lease older than fifteen minutes', async () => {
+  const database = notificationTestDatabase();
+  database.prepare(`
+    INSERT INTO absence_fine_notifications (request_id, admin_id, status, claimed_at)
+    VALUES ('ABS-1', 'A1', 'sending', '2026-07-15T02:54:59.000Z')
+  `).run();
+  const env = { BOT_TOKEN: 'test', ADMIN_IDS: '', DB: d1TestDatabase(database) };
+  const originalFetch = globalThis.fetch;
+  let sends = 0;
+  globalThis.fetch = async () => { sends += 1; return new Response(JSON.stringify({ ok: true }), { headers: { 'content-type': 'application/json' } }); };
+  try {
+    assert.equal(await deliverAbsenceNotification(
+      env, { name: 'Store', currency: '$' }, notificationRow('A1'), new Date('2026-07-15T03:10:00.000Z')
+    ), true);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+  assert.equal(sends, 1);
+  assert.deepEqual({ ...database.prepare(`SELECT status, attempts FROM absence_fine_notifications`).get() }, {
+    status: 'sent', attempts: 1
+  });
+});
+
 test('discovers and notifies each completed-day absence once', async () => {
   const store = {
     store_id: 'TOKYO',
@@ -801,6 +894,12 @@ test('discovers and notifies each completed-day absence once', async () => {
           bind(...values) {
             params = values;
             return this;
+          },
+          async first() {
+            if (/role IN \('admin', 'owner'\)/.test(sql)) {
+              return params[1] === '99' ? { telegram_id: '99' } : null;
+            }
+            throw new Error(`Unexpected first SQL: ${sql}`);
           },
           async all() {
             if (/FROM stores/.test(sql)) return { results: [store] };

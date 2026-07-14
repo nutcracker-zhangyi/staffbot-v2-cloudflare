@@ -3413,6 +3413,10 @@ export async function processAbsenceFines(env, now = new Date()) {
 }
 
 export async function deliverAbsenceNotification(env, store, notification, now = new Date()) {
+  if (!(await isStoreAdmin(env, notification.admin_id, notification.store_id))) {
+    await cancelAbsenceNotification(env, notification, 'admin_access_revoked');
+    return false;
+  }
   const claimedAt = now.toISOString();
   const staleClaim = new Date(now.getTime() - 15 * 60 * 1000).toISOString();
   const claim = await env.DB.prepare(`
@@ -3420,8 +3424,29 @@ export async function deliverAbsenceNotification(env, store, notification, now =
     SET status = 'sending', attempts = attempts + 1, claimed_at = ?, last_error = NULL
     WHERE request_id = ? AND admin_id = ?
       AND (status = 'pending' OR (status = 'sending' AND claimed_at < ?))
-  `).bind(claimedAt, notification.request_id, notification.admin_id, staleClaim).run();
-  if (mutationCount(claim) !== 1) return false;
+      AND EXISTS (
+        SELECT 1 FROM absence_fine_requests r
+        WHERE r.request_id = absence_fine_notifications.request_id
+          AND r.store_id = ? AND r.status = 'pending'
+      )
+  `).bind(claimedAt, notification.request_id, notification.admin_id, staleClaim, notification.store_id).run();
+  if (mutationCount(claim) !== 1) {
+    await env.DB.prepare(`
+      UPDATE absence_fine_notifications
+      SET status = 'cancelled', claimed_at = NULL, last_error = 'absence_request_not_pending'
+      WHERE request_id = ? AND admin_id = ? AND status != 'sent'
+        AND NOT EXISTS (
+          SELECT 1 FROM absence_fine_requests r
+          WHERE r.request_id = absence_fine_notifications.request_id
+            AND r.store_id = ? AND r.status = 'pending'
+        )
+    `).bind(notification.request_id, notification.admin_id, notification.store_id).run();
+    return false;
+  }
+  if (!(await isStoreAdmin(env, notification.admin_id, notification.store_id))) {
+    await cancelAbsenceNotification(env, notification, 'admin_access_revoked');
+    return false;
+  }
 
   let result;
   try {
@@ -3450,6 +3475,14 @@ export async function deliverAbsenceNotification(env, store, notification, now =
     WHERE request_id = ? AND admin_id = ? AND status = 'sending' AND claimed_at = ?
   `).bind(JSON.stringify(result || { ok: false }), notification.request_id, notification.admin_id, claimedAt).run();
   return false;
+}
+
+async function cancelAbsenceNotification(env, notification, reason) {
+  await env.DB.prepare(`
+    UPDATE absence_fine_notifications
+    SET status = 'cancelled', claimed_at = NULL, last_error = ?
+    WHERE request_id = ? AND admin_id = ? AND status != 'sent'
+  `).bind(reason, notification.request_id, notification.admin_id).run();
 }
 
 function getBusinessDate(date, tz) {
