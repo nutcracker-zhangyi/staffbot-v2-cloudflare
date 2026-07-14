@@ -4290,6 +4290,7 @@ function adminHtml() {
       const data = await api('/api/admin/stores/' + encodeURIComponent(storeId()) + '/members?' + memberListQuery(filterQuery(), pageQuery('members')));
       const members = (data.members || []).map((member) => ({
         ...member,
+        absence_check_enabled: member.absence_check_enabled === 0 ? L('disable') : L('enable'),
         action: '<button data-member-edit="' + esc(member.telegram_id) + '">' + L('edit') + '</button> <button class="' + (member.status === 'active' ? 'danger' : '') + '" data-member-toggle="' + esc(member.telegram_id) + '">' + (member.status === 'active' ? L('disable') : L('enable')) + '</button> <button class="danger" data-member-delete="' + esc(member.telegram_id) + '">' + L('delete') + '</button>'
       }));
       $('tab-members').innerHTML = memberFilterPanel() + '<h2>' + L('members') + '</h2>' +
@@ -4323,7 +4324,7 @@ function adminHtml() {
               role: member.role,
               status: member.status === 'active' ? 'disabled' : 'active',
               commission_rate: member.commission_rate,
-              absence_check_enabled: member.absence_check_enabled
+              absence_check_enabled: member.absence_check_enabled !== 0
             })
           });
           await renderMembers();

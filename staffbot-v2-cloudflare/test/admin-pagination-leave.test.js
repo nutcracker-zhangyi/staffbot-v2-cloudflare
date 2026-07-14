@@ -537,8 +537,10 @@ test('member form exposes daily absence checking', () => {
   assert.equal((source.match(/absence_check_enabled:'[^']+'/g) || []).length, 4);
   assert.equal((source.match(/m\.commission_rate,\s*m\.absence_check_enabled,/g) || []).length, 2);
   assert.match(source, /\['store_id','telegram_id','display_name','username','role','status','commission_rate','absence_check_enabled','cycle_start','joined_at','action'\]/);
+  assert.match(source, /absence_check_enabled:\s*member\.absence_check_enabled === 0 \? L\('disable'\) : L\('enable'\)/);
   assert.match(source, /absence_check_enabled:\s*\$\('memberAbsenceCheck'\)\.value === 'true'/);
-  assert.match(source, /absence_check_enabled:\s*member\.absence_check_enabled/);
+  assert.match(source, /absence_check_enabled:\s*member\.absence_check_enabled !== 0/);
+  assert.doesNotMatch(source, /absence_check_enabled:\s*member\.absence_check_enabled\s*[,}]/);
   assert.match(source, /\$\('memberAbsenceCheck'\)\.value\s*=\s*member\.absence_check_enabled === 0 \? 'false' : 'true'/);
 });
 
