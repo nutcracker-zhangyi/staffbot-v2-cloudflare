@@ -2007,8 +2007,17 @@ async function handleAdminMembers(request, env, url, storeId, parts, adminId) {
   const role = ['employee', 'admin', 'owner'].includes(body.role) ? body.role : 'employee';
   const status = ['active', 'pending', 'disabled'].includes(body.status) ? body.status : 'active';
   const commissionRate = normalizeCommissionRate(body.commission_rate);
-  const now = nowIso();
-  await env.DB.batch([
+  const nowDate = new Date();
+  const now = nowDate.toISOString();
+  const currentMember = await env.DB.prepare(`
+    SELECT absence_check_enabled, absence_check_enabled_at
+    FROM store_members WHERE store_id = ? AND telegram_id = ?
+  `).bind(storeId, telegramId).first();
+  const absenceCheck = normalizeEmployeeAbsenceCheck(body, currentMember, nowDate);
+  const disablingAbsenceCheck = !!currentMember
+    && Number(currentMember.absence_check_enabled) === 1
+    && absenceCheck.absence_check_enabled === 0;
+  const statements = [
     env.DB.prepare(`
       INSERT INTO users (telegram_id, name, username, role, status, cycle_start, created_at, updated_at)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?)
@@ -2018,16 +2027,52 @@ async function handleAdminMembers(request, env, url, storeId, parts, adminId) {
         updated_at = excluded.updated_at
     `).bind(telegramId, String(body.name || ''), String(body.username || ''), role, status, now, now, now),
     env.DB.prepare(`
-      INSERT INTO store_members (store_id, telegram_id, display_name, role, status, commission_rate, cycle_start, joined_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO store_members (
+        store_id, telegram_id, display_name, role, status, commission_rate,
+        cycle_start, joined_at, updated_at, absence_check_enabled, absence_check_enabled_at
+      )
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(store_id, telegram_id) DO UPDATE SET
         display_name = COALESCE(NULLIF(excluded.display_name, ''), store_members.display_name),
         role = excluded.role,
         status = excluded.status,
         commission_rate = excluded.commission_rate,
+        absence_check_enabled = excluded.absence_check_enabled,
+        absence_check_enabled_at = excluded.absence_check_enabled_at,
         updated_at = excluded.updated_at
-    `).bind(storeId, telegramId, String(body.name || ''), role, status, commissionRate, now, now, now)
-  ]);
+    `).bind(
+      storeId, telegramId, String(body.name || ''), role, status, commissionRate,
+      now, now, now, absenceCheck.absence_check_enabled, absenceCheck.absence_check_enabled_at
+    )
+  ];
+  if (disablingAbsenceCheck) {
+    statements.push(
+      env.DB.prepare(`
+        UPDATE absence_fine_requests
+        SET status = 'cancelled', cancellation_reason = 'absence_check_disabled',
+            decided_at = ?, admin_id = ?
+        WHERE store_id = ? AND telegram_id = ? AND status = 'pending'
+      `).bind(now, adminId, storeId, telegramId),
+      env.DB.prepare(`
+        UPDATE absence_fine_notifications
+        SET status = 'cancelled', last_error = 'absence_check_disabled'
+        WHERE status IN ('pending', 'sending')
+          AND request_id IN (
+            SELECT request_id FROM absence_fine_requests
+            WHERE store_id = ? AND telegram_id = ?
+              AND status = 'cancelled'
+              AND cancellation_reason = 'absence_check_disabled'
+          )
+      `).bind(storeId, telegramId)
+    );
+  }
+  await env.DB.batch(statements);
+  await audit(env, storeId, adminId, 'update_member', telegramId, {
+    absence_check: {
+      before: currentMember ? Number(currentMember.absence_check_enabled) : null,
+      after: absenceCheck.absence_check_enabled
+    }
+  });
   return json({ ok: true });
 }
 
@@ -3693,6 +3738,28 @@ export function normalizeAbsenceFineSetting(input, currentStore = {}, now = new 
     absence_fine: absenceFine,
     absence_fine_enabled_at: now.toISOString(),
     absence_last_checked_date: addIsoDays(enabledDate, -1)
+  };
+}
+
+export function normalizeEmployeeAbsenceCheck(input, currentMember, now = new Date()) {
+  const currentEnabled = currentMember
+    ? Number(currentMember.absence_check_enabled) === 1
+    : true;
+  const currentEnabledAt = currentEnabled
+    ? (currentMember ? currentMember.absence_check_enabled_at : now.toISOString())
+    : null;
+  if (!input || !Object.prototype.hasOwnProperty.call(input, 'absence_check_enabled')) {
+    return {
+      absence_check_enabled: currentEnabled ? 1 : 0,
+      absence_check_enabled_at: currentEnabledAt
+    };
+  }
+  if (input.absence_check_enabled !== true) {
+    return { absence_check_enabled: 0, absence_check_enabled_at: null };
+  }
+  return {
+    absence_check_enabled: 1,
+    absence_check_enabled_at: currentEnabled ? currentEnabledAt : now.toISOString()
   };
 }
 

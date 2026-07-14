@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { DatabaseSync } from 'node:sqlite';
 
-import {
+import worker, {
   adminPage,
   adminStoreWhere,
   adminOrderSql,
@@ -29,6 +29,7 @@ import {
   leaveMonthRange,
   leaveRuleParams,
   normalizeAbsenceFineSetting,
+  normalizeEmployeeAbsenceCheck,
   processAbsenceFines,
   deliverAbsenceNotification,
   rejectAbsenceFineRequest,
@@ -128,6 +129,56 @@ function d1TestDatabase(database, beforeFirst) {
       }
     }
   };
+}
+
+function memberAbsenceTestDatabase() {
+  const database = new DatabaseSync(':memory:');
+  database.exec(`
+    CREATE TABLE admin_sessions (
+      token TEXT PRIMARY KEY, telegram_id TEXT NOT NULL, expires_at TEXT NOT NULL, created_at TEXT NOT NULL
+    );
+    CREATE TABLE users (
+      telegram_id TEXT PRIMARY KEY, name TEXT, username TEXT, role TEXT, status TEXT,
+      cycle_start TEXT, created_at TEXT, updated_at TEXT
+    );
+    CREATE TABLE store_members (
+      store_id TEXT NOT NULL, telegram_id TEXT NOT NULL, display_name TEXT, role TEXT, status TEXT,
+      commission_rate REAL, cycle_start TEXT, joined_at TEXT, updated_at TEXT,
+      absence_check_enabled INTEGER NOT NULL DEFAULT 1, absence_check_enabled_at TEXT,
+      PRIMARY KEY (store_id, telegram_id)
+    );
+    CREATE TABLE absence_fine_requests (
+      request_id TEXT PRIMARY KEY, store_id TEXT NOT NULL, telegram_id TEXT NOT NULL,
+      status TEXT NOT NULL, cancellation_reason TEXT, decided_at TEXT, admin_id TEXT
+    );
+    CREATE TABLE absence_fine_notifications (
+      request_id TEXT NOT NULL, admin_id TEXT NOT NULL, status TEXT NOT NULL,
+      last_error TEXT, PRIMARY KEY (request_id, admin_id)
+    );
+    CREATE TABLE income_records (
+      record_id TEXT PRIMARY KEY, request_id TEXT, amount REAL
+    );
+    CREATE TABLE admin_audit_logs (
+      store_id TEXT, admin_id TEXT, action TEXT, target_id TEXT,
+      details_json TEXT, created_at TEXT
+    );
+
+    INSERT INTO admin_sessions VALUES ('session-1', 'ADMIN', '2099-01-01T00:00:00.000Z', '2026-07-15T00:00:00.000Z');
+    INSERT INTO users VALUES ('U1', 'Alice', 'alice', 'employee', 'active', '2026-07-01T00:00:00.000Z', '2026-07-01T00:00:00.000Z', '2026-07-01T00:00:00.000Z');
+    INSERT INTO store_members VALUES ('S1', 'U1', 'Alice', 'employee', 'active', 0.6, '2026-07-01T00:00:00.000Z', '2026-07-01T00:00:00.000Z', '2026-07-01T00:00:00.000Z', 1, '2026-07-01T00:00:00.000Z');
+    INSERT INTO store_members VALUES ('S2', 'U1', 'Alice', 'employee', 'active', 0.6, '2026-07-01T00:00:00.000Z', '2026-07-01T00:00:00.000Z', '2026-07-01T00:00:00.000Z', 1, '2026-07-01T00:00:00.000Z');
+
+    INSERT INTO absence_fine_requests VALUES ('PENDING-S1-U1', 'S1', 'U1', 'pending', NULL, NULL, NULL);
+    INSERT INTO absence_fine_requests VALUES ('APPROVED-S1-U1', 'S1', 'U1', 'approved', NULL, '2026-07-14T00:00:00.000Z', 'ADMIN');
+    INSERT INTO absence_fine_requests VALUES ('PENDING-S2-U1', 'S2', 'U1', 'pending', NULL, NULL, NULL);
+    INSERT INTO absence_fine_requests VALUES ('PENDING-S1-U2', 'S1', 'U2', 'pending', NULL, NULL, NULL);
+    INSERT INTO absence_fine_notifications VALUES ('PENDING-S1-U1', 'A1', 'pending', NULL);
+    INSERT INTO absence_fine_notifications VALUES ('PENDING-S1-U1', 'A2', 'sending', NULL);
+    INSERT INTO absence_fine_notifications VALUES ('APPROVED-S1-U1', 'A1', 'pending', NULL);
+    INSERT INTO absence_fine_notifications VALUES ('PENDING-S2-U1', 'A1', 'pending', NULL);
+    INSERT INTO income_records VALUES ('INCOME-1', 'APPROVED-S1-U1', 1234);
+  `);
+  return database;
 }
 
 function attendanceStatsTestDatabase() {
@@ -507,6 +558,85 @@ test('migrates existing members into daily absence checking', () => {
     absence_check_enabled: 1,
     absence_check_enabled_at: '2026-07-01T00:00:00.000Z'
   });
+});
+
+test('normalizes employee absence check updates without resetting an enabled timestamp', () => {
+  const now = new Date('2026-07-15T03:30:00.000Z');
+  const enabled = {
+    absence_check_enabled: 1,
+    absence_check_enabled_at: '2026-07-01T00:00:00.000Z'
+  };
+
+  assert.deepEqual(normalizeEmployeeAbsenceCheck({}, enabled, now), enabled);
+  assert.deepEqual(normalizeEmployeeAbsenceCheck({ absence_check_enabled: false }, enabled, now), {
+    absence_check_enabled: 0,
+    absence_check_enabled_at: null
+  });
+  assert.deepEqual(normalizeEmployeeAbsenceCheck(
+    { absence_check_enabled: true },
+    { absence_check_enabled: 0, absence_check_enabled_at: null },
+    now
+  ), {
+    absence_check_enabled: 1,
+    absence_check_enabled_at: now.toISOString()
+  });
+});
+
+test('disabling absence checks cancels only matching pending work', async () => {
+  const database = memberAbsenceTestDatabase();
+  const env = {
+    BOT_TOKEN: 'test-token',
+    WEBHOOK_SECRET: 'test-secret',
+    ADMIN_IDS: 'ADMIN',
+    DB: d1TestDatabase(database)
+  };
+  const response = await worker.fetch(new Request('https://example.com/api/admin/stores/S1/members', {
+    method: 'POST',
+    headers: {
+      cookie: 'staffbot_admin_session=session-1',
+      'content-type': 'application/json'
+    },
+    body: JSON.stringify({
+      telegram_id: 'U1', name: 'Alice', username: 'alice', role: 'employee',
+      status: 'active', commission_rate: 0.6, absence_check_enabled: false
+    })
+  }), env, { waitUntil() {} });
+
+  assert.equal(response.status, 200);
+  assert.deepEqual(database.prepare(`
+    SELECT store_id, absence_check_enabled, absence_check_enabled_at
+    FROM store_members WHERE telegram_id = 'U1' ORDER BY store_id
+  `).all().map((row) => ({ ...row })), [
+    { store_id: 'S1', absence_check_enabled: 0, absence_check_enabled_at: null },
+    { store_id: 'S2', absence_check_enabled: 1, absence_check_enabled_at: '2026-07-01T00:00:00.000Z' }
+  ]);
+  assert.deepEqual(database.prepare(`
+    SELECT request_id, status, cancellation_reason
+    FROM absence_fine_requests ORDER BY request_id
+  `).all().map((row) => ({ ...row })), [
+    { request_id: 'APPROVED-S1-U1', status: 'approved', cancellation_reason: null },
+    { request_id: 'PENDING-S1-U1', status: 'cancelled', cancellation_reason: 'absence_check_disabled' },
+    { request_id: 'PENDING-S1-U2', status: 'pending', cancellation_reason: null },
+    { request_id: 'PENDING-S2-U1', status: 'pending', cancellation_reason: null }
+  ]);
+  assert.deepEqual(database.prepare(`
+    SELECT request_id, admin_id, status, last_error
+    FROM absence_fine_notifications ORDER BY request_id, admin_id
+  `).all().map((row) => ({ ...row })), [
+    { request_id: 'APPROVED-S1-U1', admin_id: 'A1', status: 'pending', last_error: null },
+    { request_id: 'PENDING-S1-U1', admin_id: 'A1', status: 'cancelled', last_error: 'absence_check_disabled' },
+    { request_id: 'PENDING-S1-U1', admin_id: 'A2', status: 'cancelled', last_error: 'absence_check_disabled' },
+    { request_id: 'PENDING-S2-U1', admin_id: 'A1', status: 'pending', last_error: null }
+  ]);
+  assert.deepEqual({ ...database.prepare(`SELECT * FROM income_records`).get() }, {
+    record_id: 'INCOME-1', request_id: 'APPROVED-S1-U1', amount: 1234
+  });
+  const auditRow = database.prepare(`
+    SELECT action, target_id, details_json FROM admin_audit_logs ORDER BY rowid DESC LIMIT 1
+  `).get();
+  assert.equal(auditRow.action, 'update_member');
+  assert.equal(auditRow.target_id, 'U1');
+  assert.deepEqual(JSON.parse(auditRow.details_json).absence_check, { before: 1, after: 0 });
 });
 
 test('closes the previous business day at store-local noon', () => {
