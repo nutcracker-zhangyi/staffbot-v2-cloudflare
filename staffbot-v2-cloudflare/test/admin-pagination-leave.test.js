@@ -90,23 +90,26 @@ function absenceTestDatabase() {
   return database;
 }
 
-function d1TestDatabase(database, beforeFirst) {
+function d1TestDatabase(database, afterFirst, hooks = {}) {
   function prepare(sql) {
     let params = [];
     return {
+      _sql: sql,
       bind(...values) {
         params = values;
         return this;
       },
       async first() {
+        if (hooks.beforeFirst) await hooks.beforeFirst(sql, params);
         const row = database.prepare(sql).get(...params) || null;
-        if (beforeFirst) await beforeFirst(sql, row);
+        if (afterFirst) await afterFirst(sql, row);
         return row;
       },
       async all() {
         return { results: database.prepare(sql).all(...params) };
       },
       async run() {
+        if (hooks.beforeRun) await hooks.beforeRun(sql, params);
         return this._run();
       },
       _run() {
@@ -120,7 +123,11 @@ function d1TestDatabase(database, beforeFirst) {
     async batch(statements) {
       database.exec('BEGIN IMMEDIATE');
       try {
-        const results = statements.map((statement) => statement._run());
+        const results = [];
+        for (const statement of statements) {
+          if (hooks.beforeBatchStatement) await hooks.beforeBatchStatement(statement._sql);
+          results.push(statement._run());
+        }
         database.exec('COMMIT');
         return results;
       } catch (error) {
@@ -161,6 +168,10 @@ function memberAbsenceTestDatabase() {
     CREATE TABLE admin_audit_logs (
       store_id TEXT, admin_id TEXT, action TEXT, target_id TEXT,
       details_json TEXT, created_at TEXT
+    );
+    CREATE TABLE bot_logs (
+      store_id TEXT, level TEXT, event TEXT, telegram_id TEXT,
+      message_text TEXT, payload_json TEXT, created_at TEXT
     );
 
     INSERT INTO admin_sessions VALUES ('session-1', 'ADMIN', '2099-01-01T00:00:00.000Z', '2026-07-15T00:00:00.000Z');
@@ -246,7 +257,8 @@ function notificationTestDatabase() {
   const database = new DatabaseSync(':memory:');
   database.exec(`
     CREATE TABLE absence_fine_requests (
-      request_id TEXT PRIMARY KEY, store_id TEXT NOT NULL, status TEXT NOT NULL
+      request_id TEXT PRIMARY KEY, store_id TEXT NOT NULL,
+      telegram_id TEXT NOT NULL, status TEXT NOT NULL
     );
     CREATE TABLE absence_fine_notifications (
       request_id TEXT NOT NULL,
@@ -263,11 +275,67 @@ function notificationTestDatabase() {
       message_text TEXT, payload_json TEXT, created_at TEXT
     );
     CREATE TABLE store_members (
-      store_id TEXT, telegram_id TEXT, status TEXT, role TEXT
+      store_id TEXT, telegram_id TEXT, status TEXT, role TEXT,
+      absence_check_enabled INTEGER NOT NULL DEFAULT 1
     );
-    INSERT INTO absence_fine_requests VALUES ('ABS-1', 'STORE1', 'pending');
-    INSERT INTO store_members VALUES ('STORE1', 'A1', 'active', 'admin');
-    INSERT INTO store_members VALUES ('STORE1', 'A2', 'active', 'admin');
+    INSERT INTO absence_fine_requests VALUES ('ABS-1', 'STORE1', 'U1', 'pending');
+    INSERT INTO store_members VALUES ('STORE1', 'A1', 'active', 'admin', 1);
+    INSERT INTO store_members VALUES ('STORE1', 'A2', 'active', 'admin', 1);
+    INSERT INTO store_members VALUES ('STORE1', 'U1', 'active', 'employee', 1);
+  `);
+  return database;
+}
+
+function absenceCronTestDatabase() {
+  const database = new DatabaseSync(':memory:');
+  database.exec(`
+    CREATE TABLE stores (
+      store_id TEXT PRIMARY KEY, name TEXT, status TEXT, timezone TEXT, currency TEXT,
+      absence_fine REAL, absence_fine_enabled_at TEXT, absence_last_checked_date TEXT,
+      updated_at TEXT
+    );
+    CREATE TABLE users (telegram_id TEXT PRIMARY KEY, name TEXT, username TEXT);
+    CREATE TABLE store_members (
+      store_id TEXT, telegram_id TEXT, display_name TEXT, role TEXT, status TEXT,
+      joined_at TEXT, absence_check_enabled INTEGER NOT NULL DEFAULT 1,
+      absence_check_enabled_at TEXT,
+      PRIMARY KEY (store_id, telegram_id)
+    );
+    CREATE TABLE attendance_records (
+      record_id TEXT PRIMARY KEY, store_id TEXT, telegram_id TEXT,
+      business_date TEXT, type TEXT
+    );
+    CREATE TABLE leave_requests (
+      request_id TEXT PRIMARY KEY, store_id TEXT, telegram_id TEXT,
+      leave_date TEXT, status TEXT
+    );
+    CREATE TABLE absence_fine_requests (
+      request_id TEXT PRIMARY KEY, store_id TEXT, telegram_id TEXT,
+      business_date TEXT, original_fine REAL, fine REAL, status TEXT, created_at TEXT
+    );
+    CREATE UNIQUE INDEX one_absence_request
+      ON absence_fine_requests (store_id, telegram_id, business_date);
+    CREATE TABLE absence_fine_notifications (
+      request_id TEXT, admin_id TEXT, status TEXT NOT NULL DEFAULT 'pending',
+      attempts INTEGER NOT NULL DEFAULT 0, claimed_at TEXT, sent_at TEXT, last_error TEXT,
+      PRIMARY KEY (request_id, admin_id)
+    );
+    CREATE TABLE bot_logs (
+      store_id TEXT, level TEXT, event TEXT, telegram_id TEXT,
+      message_text TEXT, payload_json TEXT, created_at TEXT
+    );
+    INSERT INTO stores VALUES (
+      'STORE1', 'Store', 'active', 'Asia/Tokyo', '$', 1.5,
+      '2026-07-01T00:00:00.000Z', '2026-07-13', NULL
+    );
+    INSERT INTO store_members VALUES (
+      'STORE1', 'U1', 'Alice', 'employee', 'active',
+      '2026-07-01T00:00:00.000Z', 1, '2026-07-01T00:00:00.000Z'
+    );
+    INSERT INTO store_members VALUES (
+      'STORE1', 'A1', 'Admin', 'admin', 'active',
+      '2026-07-01T00:00:00.000Z', 1, '2026-07-01T00:00:00.000Z'
+    );
   `);
   return database;
 }
@@ -641,6 +709,35 @@ test('normalizes employee absence check updates without resetting an enabled tim
   });
 });
 
+test('rejects invalid explicit absence check values without changing member work', async () => {
+  const database = memberAbsenceTestDatabase();
+  const env = {
+    BOT_TOKEN: 'test-token', WEBHOOK_SECRET: 'test-secret', ADMIN_IDS: 'ADMIN',
+    DB: d1TestDatabase(database)
+  };
+  const response = await worker.fetch(new Request('https://example.com/api/admin/stores/S1/members', {
+    method: 'POST',
+    headers: {
+      cookie: 'staffbot_admin_session=session-1',
+      'content-type': 'application/json'
+    },
+    body: JSON.stringify({
+      telegram_id: 'U1', name: 'Alice', role: 'employee', status: 'active',
+      commission_rate: 0.6, absence_check_enabled: 'false'
+    })
+  }), env, { waitUntil() {} });
+
+  assert.equal(response.status, 400);
+  assert.equal(database.prepare(`
+    SELECT absence_check_enabled FROM store_members
+    WHERE store_id = 'S1' AND telegram_id = 'U1'
+  `).get().absence_check_enabled, 1);
+  assert.equal(database.prepare(`
+    SELECT status FROM absence_fine_requests WHERE request_id = 'PENDING-S1-U1'
+  `).get().status, 'pending');
+  assert.equal(database.prepare(`SELECT COUNT(*) AS total FROM admin_audit_logs`).get().total, 0);
+});
+
 test('disabling absence checks cancels only matching pending work', async () => {
   const database = memberAbsenceTestDatabase();
   const env = {
@@ -696,6 +793,41 @@ test('disabling absence checks cancels only matching pending work', async () => 
   assert.equal(auditRow.action, 'update_member');
   assert.equal(auditRow.target_id, 'U1');
   assert.deepEqual(JSON.parse(auditRow.details_json).absence_check, { before: 1, after: 0 });
+});
+
+test('rolls back the employee switch and cancellations when its audit insert fails', async () => {
+  const database = memberAbsenceTestDatabase();
+  const env = {
+    BOT_TOKEN: 'test-token', WEBHOOK_SECRET: 'test-secret', ADMIN_IDS: 'ADMIN',
+    DB: d1TestDatabase(database, null, {
+      beforeBatchStatement(sql) {
+        if (/INSERT INTO admin_audit_logs/.test(sql)) throw new Error('audit failed');
+      }
+    })
+  };
+  await assert.rejects(worker.fetch(new Request('https://example.com/api/admin/stores/S1/members', {
+    method: 'POST',
+    headers: {
+      cookie: 'staffbot_admin_session=session-1',
+      'content-type': 'application/json'
+    },
+    body: JSON.stringify({
+      telegram_id: 'U1', name: 'Alice', role: 'employee', status: 'active',
+      commission_rate: 0.6, absence_check_enabled: false
+    })
+  }), env, { waitUntil() {} }), /audit failed/);
+  assert.equal(database.prepare(`
+    SELECT absence_check_enabled FROM store_members
+    WHERE store_id = 'S1' AND telegram_id = 'U1'
+  `).get().absence_check_enabled, 1);
+  assert.equal(database.prepare(`
+    SELECT status FROM absence_fine_requests WHERE request_id = 'PENDING-S1-U1'
+  `).get().status, 'pending');
+  assert.deepEqual({ ...database.prepare(`
+    SELECT status, last_error FROM absence_fine_notifications
+    WHERE request_id = 'PENDING-S1-U1' AND admin_id = 'A1'
+  `).get() }, { status: 'pending', last_error: null });
+  assert.equal(database.prepare(`SELECT COUNT(*) AS total FROM admin_audit_logs`).get().total, 0);
 });
 
 test('new member defaults to enabled employee absence check when switch is omitted', async () => {
@@ -1019,6 +1151,43 @@ test('atomically claims an absence notification across overlapping Cron runs', a
   assert.equal(sends, 1);
 });
 
+test('does not send when the employee is disabled after claim and before final fetch', async () => {
+  const database = notificationTestDatabase();
+  database.prepare(`INSERT INTO absence_fine_notifications (request_id, admin_id) VALUES ('ABS-1', 'A1')`).run();
+  let adminReads = 0;
+  const env = {
+    BOT_TOKEN: 'test', ADMIN_IDS: '',
+    DB: d1TestDatabase(database, async (sql) => {
+      if (!/role IN \('admin', 'owner'\)/.test(sql)) return;
+      adminReads += 1;
+      if (adminReads === 2) {
+        database.prepare(`
+          UPDATE store_members SET absence_check_enabled = 0
+          WHERE store_id = 'STORE1' AND telegram_id = 'U1'
+        `).run();
+      }
+    })
+  };
+  const originalFetch = globalThis.fetch;
+  let sends = 0;
+  globalThis.fetch = async () => {
+    sends += 1;
+    return new Response(JSON.stringify({ ok: true }), { headers: { 'content-type': 'application/json' } });
+  };
+  try {
+    assert.equal(await deliverAbsenceNotification(
+      env, { name: 'Store', currency: '$' }, notificationRow('A1')
+    ), false);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+
+  assert.equal(sends, 0);
+  assert.deepEqual({ ...database.prepare(`
+    SELECT status, last_error FROM absence_fine_notifications
+  `).get() }, { status: 'cancelled', last_error: 'absence_check_disabled' });
+});
+
 test('cancels a queued absence notification when admin access was revoked', async () => {
   const database = notificationTestDatabase();
   database.prepare(`INSERT INTO absence_fine_notifications (request_id, admin_id) VALUES ('ABS-1', 'A1')`).run();
@@ -1103,6 +1272,58 @@ test('recovers a sending notification lease older than fifteen minutes', async (
   });
 });
 
+test('rechecks employee eligibility when inserting an absence after candidate discovery', async () => {
+  const database = absenceCronTestDatabase();
+  let disabled = false;
+  const env = {
+    BOT_TOKEN: 'test', ADMIN_IDS: '',
+    DB: d1TestDatabase(database, null, {
+      beforeRun(sql) {
+        if (disabled || !/INSERT OR IGNORE INTO absence_fine_requests/.test(sql)) return;
+        disabled = true;
+        database.prepare(`
+          UPDATE store_members SET absence_check_enabled = 0, absence_check_enabled_at = NULL
+          WHERE store_id = 'STORE1' AND telegram_id = 'U1'
+        `).run();
+      }
+    })
+  };
+
+  await processAbsenceFines(env, new Date('2026-07-15T03:10:00.000Z'));
+
+  assert.equal(disabled, true);
+  assert.equal(database.prepare(`SELECT COUNT(*) AS total FROM absence_fine_requests`).get().total, 0);
+});
+
+test('rechecks request and employee state when inserting a notification from a stale snapshot', async () => {
+  const database = absenceCronTestDatabase();
+  database.exec(`
+    UPDATE stores SET absence_last_checked_date = '2026-07-14' WHERE store_id = 'STORE1';
+    INSERT INTO absence_fine_requests VALUES (
+      'ABS-1', 'STORE1', 'U1', '2026-07-14', 1.5, 1.5, 'pending', '2026-07-15T03:00:00.000Z'
+    );
+  `);
+  let disabled = false;
+  const env = {
+    BOT_TOKEN: 'test', ADMIN_IDS: '',
+    DB: d1TestDatabase(database, null, {
+      beforeRun(sql) {
+        if (disabled || !/INSERT OR IGNORE INTO absence_fine_notifications/.test(sql)) return;
+        disabled = true;
+        database.prepare(`
+          UPDATE store_members SET absence_check_enabled = 0, absence_check_enabled_at = NULL
+          WHERE store_id = 'STORE1' AND telegram_id = 'U1'
+        `).run();
+      }
+    })
+  };
+
+  await processAbsenceFines(env, new Date('2026-07-15T03:10:00.000Z'));
+
+  assert.equal(disabled, true);
+  assert.equal(database.prepare(`SELECT COUNT(*) AS total FROM absence_fine_notifications`).get().total, 0);
+});
+
 test('discovers each absence once while excluding an exempt employee and a not-yet re-enabled employee', async () => {
   const store = {
     store_id: 'TOKYO',
@@ -1131,6 +1352,7 @@ test('discovers each absence once while excluding an exempt employee and a not-y
             if (/role IN \('admin', 'owner'\)/.test(sql)) {
               return params[1] === '99' ? { telegram_id: '99' } : null;
             }
+            if (/FROM absence_fine_notifications n/.test(sql)) return { eligible: 1 };
             throw new Error(`Unexpected first SQL: ${sql}`);
           },
           async all() {

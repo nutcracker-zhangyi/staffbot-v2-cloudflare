@@ -2006,6 +2006,10 @@ async function handleAdminMembers(request, env, url, storeId, parts, adminId) {
   const body = await readJson(request);
   const telegramId = String(body.telegram_id || '').trim();
   if (!telegramId) return json({ ok: false, error: 'telegram_id_required' }, 400);
+  if (Object.prototype.hasOwnProperty.call(body, 'absence_check_enabled')
+    && typeof body.absence_check_enabled !== 'boolean') {
+    return json({ ok: false, error: 'invalid_absence_check_enabled' }, 400);
+  }
   const role = ['employee', 'admin', 'owner'].includes(body.role) ? body.role : 'employee';
   const status = ['active', 'pending', 'disabled'].includes(body.status) ? body.status : 'active';
   const commissionRate = normalizeCommissionRate(body.commission_rate);
@@ -2068,13 +2072,13 @@ async function handleAdminMembers(request, env, url, storeId, parts, adminId) {
       `).bind(storeId, telegramId)
     );
   }
-  await env.DB.batch(statements);
-  await audit(env, storeId, adminId, 'update_member', telegramId, {
+  statements.push(auditStatement(env, storeId, adminId, 'update_member', telegramId, {
     absence_check: {
       before: currentMember ? Number(currentMember.absence_check_enabled) : null,
       after: absenceCheck.absence_check_enabled
     }
-  });
+  }, now));
+  await env.DB.batch(statements);
   return json({ ok: true });
 }
 
@@ -2922,10 +2926,14 @@ async function telegram(env, method, payload) {
 }
 
 async function audit(env, storeId, adminId, action, targetId, details) {
-  await env.DB.prepare(`
+  await auditStatement(env, storeId, adminId, action, targetId, details).run();
+}
+
+function auditStatement(env, storeId, adminId, action, targetId, details, createdAt = nowIso()) {
+  return env.DB.prepare(`
     INSERT INTO admin_audit_logs (store_id, admin_id, action, target_id, details_json, created_at)
     VALUES (?, ?, ?, ?, ?, ?)
-  `).bind(storeId || DEFAULT_STORE_ID, adminId, action, targetId || '', JSON.stringify(details || {}), nowIso()).run();
+  `).bind(storeId || DEFAULT_STORE_ID, adminId, action, targetId || '', JSON.stringify(details || {}), createdAt);
 }
 
 async function logEvent(env, level, event, payload) {
@@ -3421,11 +3429,34 @@ export async function processAbsenceFines(env, now = new Date()) {
         if (member.absence_check_enabled_at
           && localDate(new Date(member.absence_check_enabled_at), timezone) > businessDate) continue;
         const fine = attendanceFineAmount(store, store.absence_fine);
+        const nextBusinessDate = zonedMidnightIso(addIsoDays(businessDate, 1), timezone);
         await env.DB.prepare(`
           INSERT OR IGNORE INTO absence_fine_requests
             (request_id, store_id, telegram_id, business_date, original_fine, fine, status, created_at)
-          VALUES (?, ?, ?, ?, ?, ?, 'pending', ?)
-        `).bind(makeId('ABS'), store.store_id, member.telegram_id, businessDate, fine, fine, now.toISOString()).run();
+          SELECT ?, ?, ?, ?, ?, ?, 'pending', ?
+          FROM store_members m
+          WHERE m.store_id = ? AND m.telegram_id = ?
+            AND m.status = 'active' AND m.role = 'employee'
+            AND m.absence_check_enabled = 1
+            AND m.joined_at < ?
+            AND m.absence_check_enabled_at IS NOT NULL
+            AND m.absence_check_enabled_at < ?
+            AND NOT EXISTS (
+              SELECT 1 FROM attendance_records a
+              WHERE a.store_id = m.store_id
+                AND a.telegram_id = m.telegram_id
+                AND a.business_date = ? AND a.type = 'checkin'
+            )
+            AND NOT EXISTS (
+              SELECT 1 FROM leave_requests l
+              WHERE l.store_id = m.store_id
+                AND l.telegram_id = m.telegram_id
+                AND l.leave_date = ? AND l.status = 'approved'
+            )
+        `).bind(
+          makeId('ABS'), store.store_id, member.telegram_id, businessDate, fine, fine, now.toISOString(),
+          store.store_id, member.telegram_id, nextBusinessDate, nextBusinessDate, businessDate, businessDate
+        ).run();
       }
 
       await env.DB.prepare(`
@@ -3453,8 +3484,17 @@ export async function processAbsenceFines(env, now = new Date()) {
       for (const adminId of admins) {
         await env.DB.prepare(`
           INSERT OR IGNORE INTO absence_fine_notifications (request_id, admin_id)
-          VALUES (?, ?)
-        `).bind(request.request_id, adminId).run();
+          SELECT ?, ?
+          WHERE EXISTS (
+            SELECT 1
+            FROM absence_fine_requests r
+            JOIN store_members m
+              ON m.store_id = r.store_id AND m.telegram_id = r.telegram_id
+            WHERE r.request_id = ? AND r.status = 'pending'
+              AND m.status = 'active' AND m.role = 'employee'
+              AND m.absence_check_enabled = 1
+          )
+        `).bind(request.request_id, adminId, request.request_id).run();
       }
     }
 
@@ -3512,6 +3552,37 @@ export async function deliverAbsenceNotification(env, store, notification, now =
     return false;
   }
 
+  const sendable = await env.DB.prepare(`
+    SELECT 1
+    FROM absence_fine_notifications n
+    JOIN absence_fine_requests r ON r.request_id = n.request_id
+    JOIN store_members m ON m.store_id = r.store_id AND m.telegram_id = r.telegram_id
+    WHERE n.request_id = ? AND n.admin_id = ?
+      AND n.status = 'sending' AND n.claimed_at = ?
+      AND r.store_id = ? AND r.status = 'pending'
+      AND m.status = 'active' AND m.role = 'employee'
+      AND m.absence_check_enabled = 1
+  `).bind(
+    notification.request_id, notification.admin_id, claimedAt, notification.store_id
+  ).first();
+  if (!sendable) {
+    await env.DB.prepare(`
+      UPDATE absence_fine_notifications
+      SET status = 'cancelled', claimed_at = NULL,
+          last_error = CASE WHEN EXISTS (
+            SELECT 1 FROM absence_fine_requests r
+            WHERE r.request_id = absence_fine_notifications.request_id
+              AND r.store_id = ? AND r.status = 'pending'
+          ) THEN 'absence_check_disabled' ELSE 'absence_request_not_pending' END
+      WHERE request_id = ? AND admin_id = ?
+        AND status = 'sending' AND claimed_at = ?
+    `).bind(
+      notification.store_id, notification.request_id, notification.admin_id, claimedAt
+    ).run();
+    return false;
+  }
+
+  // State can still change while Telegram is in flight, so this external boundary remains at-least-once.
   let result;
   try {
     result = await sendMessage(env, notification.admin_id, [
