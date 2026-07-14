@@ -50,6 +50,8 @@ CREATE TABLE IF NOT EXISTS store_members (
   commission_rate REAL NOT NULL DEFAULT 0.6,
   cycle_start TEXT NOT NULL,
   joined_at TEXT NOT NULL,
+  absence_check_enabled INTEGER NOT NULL DEFAULT 1,
+  absence_check_enabled_at TEXT,
   updated_at TEXT NOT NULL,
   PRIMARY KEY (store_id, telegram_id)
 );

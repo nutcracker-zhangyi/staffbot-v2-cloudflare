@@ -496,6 +496,19 @@ test('migrates absence cancellation audit and per-admin notification outbox', ()
   );
 });
 
+test('migrates existing members into daily absence checking', () => {
+  const database = new DatabaseSync(':memory:');
+  database.exec(`CREATE TABLE store_members (store_id TEXT, telegram_id TEXT, joined_at TEXT);`);
+  database.exec(`INSERT INTO store_members VALUES ('S1', 'U1', '2026-07-01T00:00:00.000Z');`);
+  database.exec(readFileSync('db/migrations/018_employee_absence_check.sql', 'utf8'));
+  assert.deepEqual({ ...database.prepare(
+    `SELECT absence_check_enabled, absence_check_enabled_at FROM store_members`
+  ).get() }, {
+    absence_check_enabled: 1,
+    absence_check_enabled_at: '2026-07-01T00:00:00.000Z'
+  });
+});
+
 test('closes the previous business day at store-local noon', () => {
   assert.equal(completedAttendanceDate(new Date('2026-07-15T02:59:00.000Z'), 'Asia/Tokyo'), '2026-07-13');
   assert.equal(completedAttendanceDate(new Date('2026-07-15T03:00:00.000Z'), 'Asia/Tokyo'), '2026-07-14');
