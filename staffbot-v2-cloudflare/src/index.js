@@ -2249,6 +2249,7 @@ async function handleAdminAttendance(request, env, url, storeId, parts, adminId)
   if (parts.length === 5 && request.method === 'GET') {
     const filters = await adminFilters(env, url, storeId, adminId);
     if (!filters.ok) return json({ ok: false, error: filters.error }, filters.status);
+    const employeeStats = await attendanceEmployeeStats(env, filters);
     const pendingWhere = [
       `p.store_id IN (${placeholders(filters.storeIds.length)})`,
       `p.status = 'pending'`
@@ -2306,6 +2307,8 @@ async function handleAdminAttendance(request, env, url, storeId, parts, adminId)
       pending: pending.pending,
       approved: approved.approved,
       rejected: rejected.rejected,
+      employee_stats: employeeStats,
+      summary: sumAttendanceEmployeeStats(employeeStats),
       filters,
       pagination: { pending: pending.pagination, approved: approved.pagination, rejected: rejected.pagination }
     });
@@ -2335,6 +2338,155 @@ async function handleAdminAttendance(request, env, url, storeId, parts, adminId)
     }
   }
   return json({ ok: false, error: 'not_found' }, 404);
+}
+
+export function sumAttendanceEmployeeStats(rows) {
+  return (rows || []).reduce((total, row) => ({
+    work_days: total.work_days + Number(row.work_days || 0),
+    late_days: total.late_days + Number(row.late_days || 0),
+    absence_days: total.absence_days + Number(row.absence_days || 0),
+    leave_days: total.leave_days + Number(row.leave_days || 0),
+    fine_total: total.fine_total + Number(row.fine_total || 0)
+  }), { work_days: 0, late_days: 0, absence_days: 0, leave_days: 0, fine_total: 0 });
+}
+
+export async function attendanceEmployeeStats(env, filters, now = new Date()) {
+  const stores = await env.DB.prepare(`
+    SELECT store_id, name, timezone
+    FROM stores
+    WHERE store_id IN (${placeholders(filters.storeIds.length)})
+  `).bind(...filters.storeIds).all();
+  const storesById = new Map((stores.results || []).map((store) => [store.store_id, store]));
+  const employeeStats = [];
+
+  for (const storeId of filters.storeIds) {
+    const store = storesById.get(storeId);
+    if (!store) continue;
+    const timezone = store.timezone || 'Asia/Tokyo';
+    const completedDate = completedAttendanceDate(now, timezone);
+    const selectedEnd = filters.monthDateEnd ? addIsoDays(filters.monthDateEnd, -1) : completedDate;
+    const endDate = selectedEnd < completedDate ? selectedEnd : completedDate;
+    const queryStart = filters.monthDateStart || '0000-01-01';
+    const memberWhere = [`m.store_id = (SELECT store_id FROM target)`, `m.status = 'active'`];
+    const params = [storeId, queryStart, endDate];
+    if (filters.employeeId) {
+      memberWhere.push(`m.telegram_id = ?`);
+      params.push(filters.employeeId);
+    }
+    const rows = await env.DB.prepare(`
+      WITH target AS (
+        SELECT ? AS store_id, ? AS start_date, ? AS end_date
+      ), attendance_events AS (
+        SELECT a.store_id, a.telegram_id, a.business_date, 'work' AS event_kind, 0 AS fine
+        FROM attendance_records a, target t
+        WHERE a.store_id = t.store_id AND a.business_date BETWEEN t.start_date AND t.end_date
+          AND a.type = 'checkin'
+        UNION ALL
+        SELECT a.store_id, a.telegram_id, a.business_date, 'late' AS event_kind, 0 AS fine
+        FROM attendance_records a, target t
+        WHERE a.store_id = t.store_id AND a.business_date BETWEEN t.start_date AND t.end_date
+          AND a.type = 'checkin' AND a.late = 1
+      ), leave_events AS (
+        SELECT l.store_id, l.telegram_id, l.leave_date AS business_date, 'leave' AS event_kind, 0 AS fine
+        FROM leave_requests l, target t
+        WHERE l.store_id = t.store_id AND l.leave_date BETWEEN t.start_date AND t.end_date
+          AND l.status = 'approved'
+      ), attendance_fines AS (
+        SELECT i.store_id, i.telegram_id, a.business_date, 'fine' AS event_kind, i.fine
+        FROM income_records i
+        JOIN target t ON t.store_id = i.store_id
+        JOIN attendance_records a
+          ON a.store_id = i.store_id
+         AND a.telegram_id = i.telegram_id
+         AND a.record_id = i.request_id
+         AND a.business_date BETWEEN t.start_date AND t.end_date
+         AND ((i.source = 'attendance_late' AND a.type = 'checkin')
+           OR (i.source = 'attendance_early' AND a.type = 'checkout'))
+      ), absence_fines AS (
+        SELECT i.store_id, i.telegram_id, r.business_date, 'fine' AS event_kind, i.fine
+        FROM income_records i
+        JOIN target t ON t.store_id = i.store_id
+        JOIN absence_fine_requests r
+          ON r.store_id = i.store_id
+         AND r.telegram_id = i.telegram_id
+         AND r.request_id = i.request_id
+         AND r.business_date BETWEEN t.start_date AND t.end_date
+        WHERE i.source = 'attendance_absence'
+      ), events AS (
+        SELECT * FROM attendance_events
+        UNION ALL SELECT * FROM leave_events
+        UNION ALL SELECT * FROM attendance_fines
+        UNION ALL SELECT * FROM absence_fines
+      )
+      SELECT
+        m.store_id,
+        s.name AS store_name,
+        m.telegram_id,
+        COALESCE(NULLIF(m.display_name, ''), NULLIF(u.name, ''), NULLIF(u.username, ''), m.telegram_id) AS display_name,
+        m.joined_at,
+        e.business_date,
+        e.event_kind,
+        e.fine
+      FROM store_members m
+      JOIN stores s ON s.store_id = m.store_id
+      LEFT JOIN users u ON u.telegram_id = m.telegram_id
+      LEFT JOIN events e
+        ON e.store_id = m.store_id
+       AND e.telegram_id = m.telegram_id
+      WHERE ${memberWhere.join(' AND ')}
+      ORDER BY display_name, m.telegram_id, e.business_date
+    `).bind(...params).all();
+
+    const members = new Map();
+    for (const row of rows.results || []) {
+      let member = members.get(row.telegram_id);
+      if (!member) {
+        const joinedDate = localDate(new Date(row.joined_at), timezone);
+        const startDate = filters.monthDateStart && filters.monthDateStart > joinedDate
+          ? filters.monthDateStart
+          : joinedDate;
+        member = {
+          row: {
+            store_id: row.store_id,
+            store_name: row.store_name,
+            telegram_id: row.telegram_id,
+            display_name: row.display_name,
+            work_days: 0,
+            late_days: 0,
+            absence_days: 0,
+            leave_days: 0,
+            fine_total: 0
+          },
+          startDate,
+          workDates: new Set(),
+          lateDates: new Set(),
+          leaveDates: new Set()
+        };
+        members.set(row.telegram_id, member);
+      }
+      if (!row.business_date || row.business_date < member.startDate || row.business_date > endDate) continue;
+      if (row.event_kind === 'work') member.workDates.add(row.business_date);
+      if (row.event_kind === 'late') member.lateDates.add(row.business_date);
+      if (row.event_kind === 'leave') member.leaveDates.add(row.business_date);
+      if (row.event_kind === 'fine') member.row.fine_total += Number(row.fine || 0);
+    }
+
+    for (const member of members.values()) {
+      if (member.startDate <= endDate) {
+        const attendedOrLeave = new Set([...member.workDates, ...member.leaveDates]);
+        const eligibleDays = Math.floor(
+          (Date.parse(`${endDate}T00:00:00Z`) - Date.parse(`${member.startDate}T00:00:00Z`)) / 86400000
+        ) + 1;
+        member.row.work_days = member.workDates.size;
+        member.row.late_days = member.lateDates.size;
+        member.row.leave_days = member.leaveDates.size;
+        member.row.absence_days = eligibleDays - attendedOrLeave.size;
+      }
+      employeeStats.push(member.row);
+    }
+  }
+
+  return employeeStats;
 }
 
 async function handleAdminLeave(request, env, url, storeId, parts, adminId) {

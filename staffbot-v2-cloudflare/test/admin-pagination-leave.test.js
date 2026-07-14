@@ -7,6 +7,7 @@ import {
   adminPage,
   adminStoreWhere,
   adminOrderSql,
+  attendanceEmployeeStats,
   attendanceActionReplyMarkup,
   attendanceAdminActions,
   attendanceFineDecision,
@@ -29,6 +30,7 @@ import {
   normalizeAbsenceFineSetting,
   processAbsenceFines,
   rejectAbsenceFineRequest,
+  sumAttendanceEmployeeStats,
   validateLeaveDate,
   visibleAdminStores
 } from '../src/index.js';
@@ -124,6 +126,57 @@ function d1TestDatabase(database, beforeFirst) {
   };
 }
 
+function attendanceStatsTestDatabase() {
+  const database = new DatabaseSync(':memory:');
+  database.exec(`
+    CREATE TABLE stores (store_id TEXT PRIMARY KEY, name TEXT, timezone TEXT);
+    CREATE TABLE users (telegram_id TEXT PRIMARY KEY, name TEXT, username TEXT);
+    CREATE TABLE store_members (
+      store_id TEXT, telegram_id TEXT, display_name TEXT, status TEXT, joined_at TEXT
+    );
+    CREATE TABLE attendance_records (
+      record_id TEXT PRIMARY KEY, store_id TEXT, telegram_id TEXT,
+      business_date TEXT, type TEXT, late INTEGER
+    );
+    CREATE TABLE leave_requests (
+      request_id TEXT PRIMARY KEY, store_id TEXT, telegram_id TEXT,
+      leave_date TEXT, status TEXT
+    );
+    CREATE TABLE income_records (
+      record_id TEXT PRIMARY KEY, store_id TEXT, telegram_id TEXT,
+      fine REAL, source TEXT, request_id TEXT
+    );
+    CREATE TABLE absence_fine_requests (
+      request_id TEXT PRIMARY KEY, store_id TEXT, telegram_id TEXT, business_date TEXT
+    );
+
+    INSERT INTO stores VALUES ('TOKYO', 'Tokyo Club', 'Asia/Tokyo');
+    INSERT INTO users VALUES ('U1', 'Telegram Alice', 'alice');
+    INSERT INTO users VALUES ('U2', 'Bob', 'bob');
+    INSERT INTO store_members VALUES ('TOKYO', 'U1', 'Alice', 'active', '2026-07-09T16:00:00.000Z');
+    INSERT INTO store_members VALUES ('TOKYO', 'U2', '', 'active', '2026-07-14T02:00:00.000Z');
+    INSERT INTO store_members VALUES ('TOKYO', 'U3', 'Disabled', 'disabled', '2026-07-01T00:00:00.000Z');
+
+    INSERT INTO attendance_records VALUES ('IN-10', 'TOKYO', 'U1', '2026-07-10', 'checkin', 1);
+    INSERT INTO attendance_records VALUES ('IN-11', 'TOKYO', 'U1', '2026-07-11', 'checkin', 0);
+    INSERT INTO attendance_records VALUES ('OUT-11', 'TOKYO', 'U1', '2026-07-11', 'checkout', 0);
+    INSERT INTO attendance_records VALUES ('IN-12A', 'TOKYO', 'U1', '2026-07-12', 'checkin', 0);
+    INSERT INTO attendance_records VALUES ('IN-12B', 'TOKYO', 'U1', '2026-07-12', 'checkin', 0);
+    INSERT INTO attendance_records VALUES ('IN-15', 'TOKYO', 'U1', '2026-07-15', 'checkin', 1);
+    INSERT INTO leave_requests VALUES ('LEAVE-12', 'TOKYO', 'U1', '2026-07-12', 'approved');
+    INSERT INTO leave_requests VALUES ('LEAVE-13A', 'TOKYO', 'U1', '2026-07-13', 'approved');
+    INSERT INTO leave_requests VALUES ('LEAVE-13B', 'TOKYO', 'U1', '2026-07-13', 'approved');
+    INSERT INTO leave_requests VALUES ('LEAVE-14', 'TOKYO', 'U1', '2026-07-14', 'rejected');
+    INSERT INTO absence_fine_requests VALUES ('ABS-14', 'TOKYO', 'U1', '2026-07-14');
+    INSERT INTO income_records VALUES ('F-LATE', 'TOKYO', 'U1', 500000, 'attendance_late', 'IN-10');
+    INSERT INTO income_records VALUES ('F-EARLY', 'TOKYO', 'U1', 700000, 'attendance_early', 'OUT-11');
+    INSERT INTO income_records VALUES ('F-ABS', 'TOKYO', 'U1', 1500000, 'attendance_absence', 'ABS-14');
+    INSERT INTO income_records VALUES ('F-MANUAL', 'TOKYO', 'U1', 9000000, 'manual', NULL);
+    INSERT INTO income_records VALUES ('F-FUTURE', 'TOKYO', 'U1', 100000, 'attendance_late', 'IN-15');
+  `);
+  return database;
+}
+
 test('normalizes admin pagination to 100 rows per page', () => {
   assert.deepEqual(adminPage('1', 250), {
     page: 1,
@@ -137,6 +190,45 @@ test('normalizes admin pagination to 100 rows per page', () => {
   });
   assert.equal(adminPage('2', 250).offset, 100);
   assert.equal(adminPage('bad', 250).page, 1);
+});
+
+test('sums person-day attendance rows without using pagination', () => {
+  assert.deepEqual(sumAttendanceEmployeeStats([
+    { work_days: 2, late_days: 1, absence_days: 0, leave_days: 1, fine_total: 500000 },
+    { work_days: 1, late_days: 0, absence_days: 2, leave_days: 0, fine_total: 1500000 }
+  ]), {
+    work_days: 3,
+    late_days: 1,
+    absence_days: 2,
+    leave_days: 1,
+    fine_total: 2000000
+  });
+});
+
+test('attendance API returns summary and employee statistics', () => {
+  assert.match(source, /employee_stats/);
+  assert.match(source, /summary: sumAttendanceEmployeeStats/);
+});
+
+test('returns one full-range attendance statistics row per active employee', async () => {
+  const database = attendanceStatsTestDatabase();
+  const rows = await attendanceEmployeeStats({ DB: d1TestDatabase(database) }, {
+    storeIds: ['TOKYO'],
+    employeeId: '',
+    monthDateStart: '2026-07-09',
+    monthDateEnd: '2026-07-21'
+  }, new Date('2026-07-15T03:00:00.000Z'));
+
+  assert.deepEqual(rows, [
+    {
+      store_id: 'TOKYO', store_name: 'Tokyo Club', telegram_id: 'U1', display_name: 'Alice',
+      work_days: 3, late_days: 1, absence_days: 1, leave_days: 2, fine_total: 2700000
+    },
+    {
+      store_id: 'TOKYO', store_name: 'Tokyo Club', telegram_id: 'U2', display_name: 'Bob',
+      work_days: 0, late_days: 0, absence_days: 1, leave_days: 0, fine_total: 0
+    }
+  ]);
 });
 
 test('hides disabled stores from admin store choices', () => {
