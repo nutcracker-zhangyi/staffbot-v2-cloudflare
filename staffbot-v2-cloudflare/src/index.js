@@ -241,6 +241,10 @@ export default {
     }
 
     return json({ ok: false, error: 'not_found' }, 404);
+  },
+
+  async scheduled(controller, env, ctx) {
+    ctx.waitUntil(processAbsenceFines(env, new Date(controller.scheduledTime)));
   }
 };
 
@@ -1025,6 +1029,13 @@ export function checkoutApprovalKeyboard(storeId, requestId, fine) {
   return [[
     { text: t('zh', 'btn_approve'), callback_data: `att:approve:${storeId}:${requestId}` },
     { text: t('zh', 'btn_reject'), callback_data: `att:reject:${storeId}:${requestId}` }
+  ]];
+}
+
+export function absenceApprovalKeyboard(requestId) {
+  return [[
+    { text: '批准罚款', callback_data: compactCallbackData('abs', 'a', requestId) },
+    { text: '驳回', callback_data: compactCallbackData('abs', 'r', requestId) }
   ]];
 }
 
@@ -2627,6 +2638,7 @@ function commandMatches(text, commands, labels) {
 }
 
 export function compactCallbackData(prefix, action, storeId, requestId) {
+  if (requestId === undefined) return `${prefix}:${action}:${storeId}`;
   return `${prefix}:${action}:${storeId}:${requestId}`;
 }
 
@@ -2969,6 +2981,99 @@ function localTime(date, tz) {
 function localDate(date, tz) {
   const p = localParts(date, tz);
   return `${p.year}-${p.month}-${p.day}`;
+}
+
+export function completedAttendanceDate(now = new Date(), timezone = 'Asia/Tokyo') {
+  const today = localDate(now, timezone);
+  const hour = Number(localParts(now, timezone).hour);
+  return addIsoDays(today, hour >= 12 ? -1 : -2);
+}
+
+export function absenceScanDates(store, now = new Date()) {
+  if (!store || !store.absence_fine_enabled_at) return [];
+  const timezone = store.timezone || 'Asia/Tokyo';
+  const enabledDate = localDate(new Date(store.absence_fine_enabled_at), timezone);
+  const firstDate = store.absence_last_checked_date
+    ? addIsoDays(store.absence_last_checked_date, 1)
+    : enabledDate;
+  const finalDate = completedAttendanceDate(now, timezone);
+  const dates = [];
+  for (let date = firstDate; date <= finalDate; date = addIsoDays(date, 1)) dates.push(date);
+  return dates;
+}
+
+export async function processAbsenceFines(env, now = new Date()) {
+  const stores = await env.DB.prepare(`
+    SELECT * FROM stores
+    WHERE status = 'active' AND absence_fine_enabled_at IS NOT NULL
+  `).all();
+
+  for (const store of stores.results || []) {
+    const timezone = store.timezone || 'Asia/Tokyo';
+    for (const businessDate of absenceScanDates(store, now)) {
+      const candidates = await env.DB.prepare(`
+        SELECT m.telegram_id,
+               m.joined_at,
+               COALESCE(NULLIF(m.display_name, ''), NULLIF(u.name, ''), NULLIF(u.username, ''), m.telegram_id) AS display_name
+        FROM store_members m
+        LEFT JOIN users u ON u.telegram_id = m.telegram_id
+        WHERE m.store_id = ?
+          AND m.status = 'active'
+          AND NOT EXISTS (
+            SELECT 1 FROM attendance_records a
+            WHERE a.store_id = m.store_id
+              AND a.telegram_id = m.telegram_id
+              AND a.business_date = ?
+              AND a.type = 'checkin'
+          )
+          AND NOT EXISTS (
+            SELECT 1 FROM leave_requests l
+            WHERE l.store_id = m.store_id
+              AND l.telegram_id = m.telegram_id
+              AND l.leave_date = ?
+              AND l.status = 'approved'
+          )
+      `).bind(store.store_id, businessDate, businessDate).all();
+
+      for (const member of candidates.results || []) {
+        if (localDate(new Date(member.joined_at), timezone) > businessDate) continue;
+        const fine = attendanceFineAmount(store, store.absence_fine);
+        await env.DB.prepare(`
+          INSERT OR IGNORE INTO absence_fine_requests
+            (request_id, store_id, telegram_id, business_date, original_fine, fine, status, created_at)
+          VALUES (?, ?, ?, ?, ?, ?, 'pending', ?)
+        `).bind(makeId('ABS'), store.store_id, member.telegram_id, businessDate, fine, fine, now.toISOString()).run();
+      }
+
+      await env.DB.prepare(`
+        UPDATE stores SET absence_last_checked_date = ?, updated_at = ? WHERE store_id = ?
+      `).bind(businessDate, now.toISOString(), store.store_id).run();
+      store.absence_last_checked_date = businessDate;
+    }
+
+    const pending = await env.DB.prepare(`
+      SELECT r.*,
+             COALESCE(NULLIF(m.display_name, ''), NULLIF(u.name, ''), NULLIF(u.username, ''), r.telegram_id) AS display_name
+      FROM absence_fine_requests r
+      LEFT JOIN store_members m ON m.store_id = r.store_id AND m.telegram_id = r.telegram_id
+      LEFT JOIN users u ON u.telegram_id = r.telegram_id
+      WHERE r.store_id = ? AND r.status = 'pending' AND r.notified_at IS NULL
+      ORDER BY r.business_date, r.created_at
+    `).bind(store.store_id).all();
+
+    for (const request of pending.results || []) {
+      await notifyStoreAdmins(env, store.store_id, [
+        '缺勤罚款待审核',
+        `店铺：${store.name}`,
+        `员工：${request.display_name} (${request.telegram_id})`,
+        `日期：${request.business_date}`,
+        `建议罚款：${formatMoney(store, request.fine)}`
+      ].join('\n'), { inline_keyboard: absenceApprovalKeyboard(request.request_id) });
+      await env.DB.prepare(`
+        UPDATE absence_fine_requests SET notified_at = ? WHERE request_id = ? AND notified_at IS NULL
+      `).bind(now.toISOString(), request.request_id).run();
+    }
+  }
 }
 
 function getBusinessDate(date, tz) {

@@ -9,6 +9,9 @@ import {
   attendanceActionReplyMarkup,
   attendanceAdminActions,
   attendanceFineDecision,
+  absenceApprovalKeyboard,
+  absenceScanDates,
+  completedAttendanceDate,
   currentAdminStoreId,
   dateRange,
   checkoutApprovalKeyboard,
@@ -21,11 +24,13 @@ import {
   leaveMonthRange,
   leaveRuleParams,
   normalizeAbsenceFineSetting,
+  processAbsenceFines,
   validateLeaveDate,
   visibleAdminStores
 } from '../src/index.js';
 
 const source = readFileSync(new URL('../src/index.js', import.meta.url), 'utf8');
+const wrangler = readFileSync(new URL('../wrangler.toml', import.meta.url), 'utf8');
 
 test('normalizes admin pagination to 100 rows per page', () => {
   assert.deepEqual(adminPage('1', 250), {
@@ -193,6 +198,125 @@ test('admin store form exposes absence fine controls', () => {
   assert.match(source, /storeAbsenceFineEnabledInput/);
   assert.match(source, /storeAbsenceFineInput/);
   assert.match(source, /absence_fine_enabled/);
+});
+
+test('closes the previous business day at store-local noon', () => {
+  assert.equal(completedAttendanceDate(new Date('2026-07-15T02:59:00.000Z'), 'Asia/Tokyo'), '2026-07-13');
+  assert.equal(completedAttendanceDate(new Date('2026-07-15T03:00:00.000Z'), 'Asia/Tokyo'), '2026-07-14');
+  assert.equal(completedAttendanceDate(new Date('2026-07-15T05:00:00.000Z'), 'Asia/Ho_Chi_Minh'), '2026-07-14');
+});
+
+test('returns every unprocessed enabled date through the completed date', () => {
+  const store = {
+    timezone: 'Asia/Tokyo',
+    absence_fine_enabled_at: '2026-07-12T03:00:00.000Z',
+    absence_last_checked_date: '2026-07-12'
+  };
+  assert.deepEqual(absenceScanDates(store, new Date('2026-07-15T03:10:00.000Z')), [
+    '2026-07-13',
+    '2026-07-14'
+  ]);
+  assert.deepEqual(absenceScanDates({ ...store, absence_fine_enabled_at: null }, new Date('2026-07-15T03:10:00.000Z')), []);
+});
+
+test('keeps absence approval callbacks below Telegram limit', () => {
+  const requestId = 'ABS-01f21cc1-dcff-4f1a-9bf8-2008d650d46e';
+  const buttons = absenceApprovalKeyboard(requestId).flat();
+  assert.deepEqual(buttons.map((button) => button.callback_data), [
+    `abs:a:${requestId}`,
+    `abs:r:${requestId}`
+  ]);
+  assert.ok(buttons.every((button) => Buffer.byteLength(button.callback_data, 'utf8') <= 64));
+});
+
+test('discovers and notifies each completed-day absence once', async () => {
+  const store = {
+    store_id: 'TOKYO',
+    name: 'Tokyo Club',
+    timezone: 'Asia/Tokyo',
+    currency: '$',
+    absence_fine: 1.5,
+    absence_fine_enabled_at: '2026-07-14T03:00:00.000Z',
+    absence_last_checked_date: '2026-07-13'
+  };
+  const requests = [];
+  const notifications = [];
+  const env = {
+    BOT_TOKEN: 'test-token',
+    ADMIN_IDS: '',
+    DB: {
+      prepare(sql) {
+        let params = [];
+        return {
+          bind(...values) {
+            params = values;
+            return this;
+          },
+          async all() {
+            if (/FROM stores/.test(sql)) return { results: [store] };
+            if (/FROM store_members m/.test(sql)) return { results: [
+              { telegram_id: '10', joined_at: '2026-07-01T00:00:00.000Z', display_name: 'Alice' },
+              { telegram_id: '11', joined_at: '2026-07-15T00:00:00.000Z', display_name: 'Bob' }
+            ] };
+            if (/FROM absence_fine_requests/.test(sql)) {
+              return { results: requests.filter((row) => row.store_id === params[0] && !row.notified_at) };
+            }
+            if (/role IN \('admin', 'owner'\)/.test(sql)) return { results: [{ telegram_id: '99' }] };
+            throw new Error(`Unexpected all SQL: ${sql}`);
+          },
+          async run() {
+            if (/INSERT OR IGNORE INTO absence_fine_requests/.test(sql)) {
+              const [request_id, store_id, telegram_id, business_date, original_fine, fine, created_at] = params;
+              if (!requests.some((row) => row.store_id === store_id && row.telegram_id === telegram_id && row.business_date === business_date)) {
+                requests.push({ request_id, store_id, telegram_id, business_date, original_fine, fine, created_at, display_name: 'Alice' });
+              }
+              return { success: true };
+            }
+            if (/UPDATE stores SET absence_last_checked_date/.test(sql)) {
+              store.absence_last_checked_date = params[0];
+              return { success: true };
+            }
+            if (/UPDATE absence_fine_requests SET notified_at/.test(sql)) {
+              requests.find((row) => row.request_id === params[1]).notified_at = params[0];
+              return { success: true };
+            }
+            throw new Error(`Unexpected run SQL: ${sql}`);
+          }
+        };
+      }
+    }
+  };
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (_url, options) => {
+    notifications.push(JSON.parse(options.body));
+    return new Response(JSON.stringify({ ok: true }), { headers: { 'content-type': 'application/json' } });
+  };
+  try {
+    const now = new Date('2026-07-15T03:10:00.000Z');
+    await processAbsenceFines(env, now);
+    await processAbsenceFines(env, now);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+
+  assert.equal(requests.length, 1);
+  assert.equal(requests[0].telegram_id, '10');
+  assert.equal(requests[0].business_date, '2026-07-14');
+  assert.equal(requests[0].fine, 1.5);
+  assert.equal(store.absence_last_checked_date, '2026-07-14');
+  assert.equal(notifications.length, 1);
+  assert.match(notifications[0].text, /Tokyo Club/);
+  assert.match(notifications[0].text, /Alice/);
+  assert.match(notifications[0].text, /2026-07-14/);
+  assert.match(notifications[0].text, /\$1\.50/);
+  assert.deepEqual(notifications[0].reply_markup.inline_keyboard, absenceApprovalKeyboard(requests[0].request_id));
+  assert.ok(requests[0].notified_at);
+});
+
+test('registers the absence scan as an hourly Worker Cron', () => {
+  assert.match(source, /async scheduled\(controller, env, ctx\)/);
+  assert.match(source, /ctx\.waitUntil\(processAbsenceFines\(env, new Date\(controller\.scheduledTime\)\)\)/);
+  assert.match(wrangler, /\[triggers\]\s+crons = \["10 \* \* \* \*"\]/);
 });
 
 test('returns leave month boundaries for counting monthly leave days', () => {

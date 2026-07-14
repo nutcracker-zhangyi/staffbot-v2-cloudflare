@@ -8,6 +8,9 @@ database_name = "staffbot_v2"
 database_id = "1eab53b1-b18a-4078-b511-5550c2b9e068"
 migrations_dir = "db/migrations"
 
+[triggers]
+crons = ["10 * * * *"]
+
 [vars]
 CURRENCY = "$"
 # Put non-secret local defaults here only.
