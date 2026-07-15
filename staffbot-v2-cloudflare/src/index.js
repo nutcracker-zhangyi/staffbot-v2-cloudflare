@@ -2822,10 +2822,13 @@ async function handleAdminAbsence(request, env, url, storeId, parts, adminId) {
     }
     if (parts[6] === 'reject') {
       const body = await readJson(request);
-      if (typeof body.reason !== 'string' || !body.reason.trim()) {
+      const reason = body && typeof body === 'object' && !Array.isArray(body) && typeof body.reason === 'string'
+        ? body.reason.trim()
+        : '';
+      if (!reason) {
         return json({ ok: false, error: 'rejection_reason_required' }, 400);
       }
-      const result = await rejectAbsenceFineRequest(env, requestId, adminId, body.reason.trim(), storeId);
+      const result = await rejectAbsenceFineRequest(env, requestId, adminId, reason, storeId);
       return json(result, result.ok ? 200 : 409);
     }
   }

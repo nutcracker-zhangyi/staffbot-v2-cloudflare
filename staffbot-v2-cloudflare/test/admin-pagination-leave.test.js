@@ -1095,7 +1095,7 @@ test('admin absence action routes return 200, 404, and 409 for decision outcomes
 });
 
 test('requires absence rejection reason before changing a pending request', async () => {
-  for (const body of [{ reason: '   ' }, '{not valid json']) {
+  for (const body of [null, [], '"reason"', 123, {}, { reason: '   ' }, '{not valid json']) {
     const database = absenceTestDatabase();
     const env = absenceAdminApiEnv(database);
     const response = await worker.fetch(adminAbsenceRequest(
@@ -1105,6 +1105,21 @@ test('requires absence rejection reason before changing a pending request', asyn
     assert.equal(response.status, 400);
     assert.equal(database.prepare(`SELECT status FROM absence_fine_requests`).get().status, 'pending');
   }
+
+  const database = absenceTestDatabase();
+  const env = absenceAdminApiEnv(database);
+  const response = await worker.fetch(adminAbsenceRequest(
+    '/api/admin/stores/STORE1/absence/ABS-1/reject',
+    { reason: '  Employee had approved exception  ' }
+  ), env, { waitUntil() {} });
+
+  assert.equal(response.status, 200);
+  assert.deepEqual({ ...database.prepare(`
+    SELECT status, reject_reason FROM absence_fine_requests WHERE request_id = 'ABS-1'
+  `).get() }, {
+    status: 'rejected',
+    reject_reason: 'Employee had approved exception'
+  });
 });
 
 test('admin absence query separates pending and history while preserving summary across pagination', async () => {
