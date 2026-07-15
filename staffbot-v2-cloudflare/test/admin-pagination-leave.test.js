@@ -4,9 +4,12 @@ import { readFileSync } from 'node:fs';
 import { DatabaseSync } from 'node:sqlite';
 
 import worker, {
+  ABSENCE_HISTORY_COLUMNS,
+  ABSENCE_PENDING_COLUMNS,
   adminPage,
   adminStoreWhere,
   adminOrderSql,
+  absenceAdminSortColumns,
   attendanceEmployeeStats,
   attendanceActionReplyMarkup,
   attendanceAdminActions,
@@ -31,6 +34,7 @@ import worker, {
   normalizeAbsenceFineSetting,
   normalizeEmployeeAbsenceCheck,
   processAbsenceFines,
+  resetAdminSortPages,
   deliverAbsenceNotification,
   rejectAbsenceFineRequest,
   sumAttendanceEmployeeStats,
@@ -552,8 +556,8 @@ test('absence page renders full-range summary, localized notifications, and inde
   assert.match(source, /function absenceSummaryPanel\(data\)/);
   assert.match(source, /data\.summary\.fine_totals/);
   assert.match(source, /formatCurrencyAmount\(item\.currency, item\.amount\)/);
-  assert.match(source, /\['store_id','display_name','business_date','fine','created_at','notification_status','notification_delivery','action'\]/);
-  assert.match(source, /\['store_id','display_name','business_date','status','original_fine','actual_fine','admin_id','decided_at','decision_reason','income_record_id'\]/);
+  assert.match(source, /table\(pending, \$\{JSON\.stringify\(ABSENCE_PENDING_COLUMNS\)\}/);
+  assert.match(source, /table\(history, \$\{JSON\.stringify\(ABSENCE_HISTORY_COLUMNS\)\}/);
   assert.match(source, /pager\('absence', 'absence_pending_page'/);
   assert.match(source, /pager\('absence', 'absence_history_page'/);
   assert.match(source, /notificationStatusLabel/);
@@ -671,6 +675,42 @@ test('builds admin sort SQL only from allowed fields', () => {
   assert.equal(adminOrderSql(new URL('https://x.test/?records_sort=amount&records_dir=desc'), 'records_page', allowed, 'ORDER BY approved_at DESC'), 'ORDER BY amount DESC');
   assert.equal(adminOrderSql(new URL('https://x.test/?records_sort=1;DROP&records_dir=asc'), 'records_page', allowed, 'ORDER BY approved_at DESC'), 'ORDER BY approved_at DESC');
   assert.equal(adminOrderSql(new URL('https://x.test/?records_sort=amount&records_dir=bad'), 'records_page', allowed, 'ORDER BY approved_at DESC'), 'ORDER BY approved_at DESC');
+});
+
+test('maps every visible sortable absence column to server ordering', () => {
+  const allowed = absenceAdminSortColumns();
+  const groups = {
+    pending: ABSENCE_PENDING_COLUMNS,
+    history: ABSENCE_HISTORY_COLUMNS
+  };
+  for (const [group, columns] of Object.entries(groups)) {
+    for (const column of columns.filter((item) => item !== 'action')) {
+      const url = new URL(`https://x.test/?${group}_sort=${column}&${group}_dir=asc`);
+      assert.notEqual(
+        adminOrderSql(url, `${group}_page`, allowed, 'ORDER BY default_sort'),
+        'ORDER BY default_sort',
+        `${group}.${column} must not render as a no-op sort`
+      );
+    }
+  }
+});
+
+test('resets only the sorted absence pager while preserving existing tab behavior', () => {
+  assert.match(source, /resetAdminSortPages\(pages, currentTab, group\)/);
+  const pages = {
+    absence: { absence_pending_page: 7, absence_history_page: 5 },
+    income: { pending_page: 4, records_page: 3, rejected_page: 2 }
+  };
+
+  resetAdminSortPages(pages, 'absence', 'pending');
+  assert.deepEqual(pages.absence, { absence_pending_page: 1, absence_history_page: 5 });
+
+  pages.absence.absence_pending_page = 7;
+  resetAdminSortPages(pages, 'absence', 'history');
+  assert.deepEqual(pages.absence, { absence_pending_page: 7, absence_history_page: 1 });
+
+  resetAdminSortPages(pages, 'income', 'records');
+  assert.deepEqual(pages.income, { pending_page: 1, records_page: 1, rejected_page: 1 });
 });
 
 test('formats admin money with comma separators', () => {
@@ -1205,6 +1245,26 @@ test('admin absence query separates pending and history while preserving summary
   assert.equal(filtered.result.pending.length, 0);
   assert.deepEqual(filtered.result.history.map((row) => row.request_id), ['APP-VND']);
   assert.deepEqual(filtered.result.summary.status_counts, { approved: 1 });
+});
+
+test('admin absence runtime applies delivery and history-only sort expressions', async () => {
+  const database = absenceAdminQueryDatabase();
+  const env = {
+    BOT_TOKEN: 'test-token', WEBHOOK_SECRET: 'test-secret', ADMIN_IDS: 'ADMIN1',
+    DB: d1TestDatabase(database)
+  };
+
+  const delivery = await getAdminAbsence(env, '?pending_sort=notification_delivery&pending_dir=desc');
+  assert.deepEqual(delivery.result.pending.slice(0, 2).map((row) => row.request_id), ['P-001', 'P-003']);
+
+  const reason = await getAdminAbsence(env, '?history_sort=decision_reason&history_dir=asc');
+  assert.deepEqual(reason.result.history.slice(-2).map((row) => row.request_id), ['REJ-VND', 'CAN-VND']);
+
+  const incomeRecord = await getAdminAbsence(
+    env,
+    '?stores=STORE1%2CSTORE2&history_sort=income_record_id&history_dir=desc'
+  );
+  assert.deepEqual(incomeRecord.result.history.slice(0, 2).map((row) => row.request_id), ['APP-VND', 'APP-USD']);
 });
 
 test('absence notification summary distinguishes sent, not_queued, and retrying', async () => {

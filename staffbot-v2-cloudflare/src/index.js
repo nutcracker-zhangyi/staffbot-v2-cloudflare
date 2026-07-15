@@ -11,6 +11,14 @@ const DEFAULT_STORE_ID = 'DEFAULT';
 const SESSION_COOKIE = 'staffbot_admin_session';
 const LANGS = ['zh', 'en', 'vi', 'ru'];
 const ADMIN_PAGE_SIZE = 100;
+export const ABSENCE_PENDING_COLUMNS = Object.freeze([
+  'store_id', 'display_name', 'business_date', 'fine', 'created_at',
+  'notification_status', 'notification_delivery', 'action'
+]);
+export const ABSENCE_HISTORY_COLUMNS = Object.freeze([
+  'store_id', 'display_name', 'business_date', 'status', 'original_fine',
+  'actual_fine', 'admin_id', 'decided_at', 'decision_reason', 'income_record_id'
+]);
 const MAX_LOGIN_FAILURES = 5;
 const LOGIN_LOCK_MS = 10 * 60 * 1000;
 
@@ -2729,18 +2737,7 @@ async function handleAdminAbsence(request, env, url, storeId, parts, adminId) {
       LEFT JOIN notification n ON n.request_id = r.request_id
       WHERE ${where.join(' AND ')}
     `;
-    const absenceSort = {
-      ...adminSortColumns([
-        'request_id','store_id','telegram_id','business_date','original_fine','fine','status',
-        'created_at','notified_at','decided_at','admin_id','reject_reason','cancellation_reason'
-      ], 'r'),
-      display_name: 'display_name',
-      username: 'u.username',
-      store_name: 's.name',
-      currency: 's.currency',
-      actual_fine: 'actual_fine',
-      notification_status: 'notification_status'
-    };
+    const absenceSort = absenceAdminSortColumns();
     const pending = await listPagedRows(
       env, url, 'pending_page', 'pending', selectSql(pendingWhere),
       `SELECT COUNT(*) AS total FROM absence_fine_requests r WHERE ${pendingWhere.join(' AND ')}`,
@@ -3848,6 +3845,39 @@ export function adminOrderSql(url, pageParam, allowedColumns, defaultOrderSql) {
   return `ORDER BY ${allowedColumns[sort]} ${dir.toUpperCase()}`;
 }
 
+export function absenceAdminSortColumns() {
+  return {
+    ...adminSortColumns([
+      'request_id', 'store_id', 'telegram_id', 'business_date', 'original_fine', 'fine', 'status',
+      'created_at', 'notified_at', 'decided_at', 'admin_id', 'reject_reason', 'cancellation_reason',
+      'income_record_id'
+    ], 'r'),
+    display_name: 'display_name',
+    username: 'u.username',
+    store_name: 's.name',
+    currency: 's.currency',
+    actual_fine: 'actual_fine',
+    notification_status: 'notification_status',
+    notification_delivery: `CASE
+      WHEN n.request_id IS NULL THEN 0
+      WHEN n.sent_total > 0 THEN 2000000000 + COALESCE(n.notification_total, 0)
+      ELSE 1000000000 + COALESCE(n.notification_attempts, 0)
+    END`,
+    decision_reason: `COALESCE(NULLIF(r.reject_reason, ''), r.cancellation_reason, '')`
+  };
+}
+
+export function resetAdminSortPages(pageState, tab, group) {
+  const tabPages = pageState[tab] || {};
+  const absencePageKey = tab === 'absence'
+    ? { pending: 'absence_pending_page', history: 'absence_history_page' }[group]
+    : '';
+  const keys = absencePageKey ? [absencePageKey] : Object.keys(tabPages);
+  for (const key of keys) {
+    if (Object.prototype.hasOwnProperty.call(tabPages, key)) tabPages[key] = 1;
+  }
+}
+
 export function validateLeaveDate(store, value, now = new Date()) {
   const date = String(value || '').trim();
   if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return { ok: false, error: 'invalid_format' };
@@ -4193,6 +4223,7 @@ function adminHtml() {
     </section>
   </main>
   <script>
+    ${resetAdminSortPages.toString()}
     const $ = (id) => document.getElementById(id);
     let stores = [];
     let currentTab = 'stores';
@@ -4708,10 +4739,10 @@ function adminHtml() {
       $('tab-absence').innerHTML = await filterPanel(true, true) +
         absenceSummaryPanel(data) +
         sectionTitle('pending_absence') +
-        table(pending, ['store_id','display_name','business_date','fine','created_at','notification_status','notification_delivery','action'], true, 'pending') +
+        table(pending, ${JSON.stringify(ABSENCE_PENDING_COLUMNS)}, true, 'pending') +
         pager('absence', 'absence_pending_page', data.pagination && data.pagination.pending) +
         sectionTitle('absence_history') +
-        table(history, ['store_id','display_name','business_date','status','original_fine','actual_fine','admin_id','decided_at','decision_reason','income_record_id'], false, 'history') +
+        table(history, ${JSON.stringify(ABSENCE_HISTORY_COLUMNS)}, false, 'history') +
         pager('absence', 'absence_history_page', data.pagination && data.pagination.history);
       bindFilterControls();
       bindAbsenceActions();
@@ -5162,7 +5193,7 @@ function adminHtml() {
             state.sort = col;
             state.dir = 'asc';
           }
-          resetPages(currentTab);
+          resetAdminSortPages(pages, currentTab, group);
           updateExportLinks();
           if (currentTab === 'stores') await loadStores();
           else await loadTab();
