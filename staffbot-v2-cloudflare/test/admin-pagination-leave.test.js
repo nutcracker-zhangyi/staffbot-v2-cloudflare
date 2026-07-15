@@ -521,6 +521,61 @@ test('attendance page renders five metrics and a multi-employee drill-down table
   assert.match(source, /data-status-tone/);
 });
 
+test('admin page exposes standalone absence approvals in all four languages', () => {
+  assert.match(source, /data-tab="absence"/);
+  assert.match(source, /id="tab-absence"/);
+  assert.match(source, /renderAbsence/);
+  assert.match(source, /absence_pending_page/);
+  assert.match(source, /absence_history_page/);
+  assert.match(source, /data-absence-status/);
+  assert.match(source, /const queryKey = tab === 'absence' \? key\.replace\('absence_', ''\) : key/);
+
+  for (const key of [
+    'absence_approvals',
+    'pending_absence',
+    'absence_history',
+    'notification_sent',
+    'notification_not_queued',
+    'notification_retrying',
+    'btn_approve_absence_fine',
+    'rejection_reason_required'
+  ]) {
+    assert.equal(
+      (source.match(new RegExp(`${key}:'[^']+'`, 'g')) || []).length,
+      4,
+      `${key} should be translated in all four admin languages`
+    );
+  }
+});
+
+test('absence page renders full-range summary, localized notifications, and independent tables', () => {
+  assert.match(source, /function absenceSummaryPanel\(data\)/);
+  assert.match(source, /data\.summary\.fine_totals/);
+  assert.match(source, /formatCurrencyAmount\(item\.currency, item\.amount\)/);
+  assert.match(source, /\['store_id','display_name','business_date','fine','created_at','notification_status','notification_delivery','action'\]/);
+  assert.match(source, /\['store_id','display_name','business_date','status','original_fine','actual_fine','admin_id','decided_at','decision_reason','income_record_id'\]/);
+  assert.match(source, /pager\('absence', 'absence_pending_page'/);
+  assert.match(source, /pager\('absence', 'absence_history_page'/);
+  assert.match(source, /notificationStatusLabel/);
+  assert.match(source, /notificationDeliveryLabel/);
+});
+
+test('absence action buttons preserve row stores and guard approval and rejection requests', () => {
+  assert.match(source, /data-absence-action="approve"[^>]+data-store="' \+ esc\(row\.store_id\)/);
+  assert.match(source, /data-absence-action="reject"[^>]+data-store="' \+ esc\(row\.store_id\)/);
+
+  const start = source.indexOf('function bindAbsenceActions()');
+  const end = source.indexOf('\n    async function renderLeave', start + 1);
+  const handler = source.slice(start, end);
+  assert.ok(start >= 0, 'absence action handler should exist');
+  assert.match(handler, /if \(!confirm\(L\('confirm_approve_absence_fine'\)\)\) return;[\s\S]*'\/absence\/' \+ encodeURIComponent\(btn\.dataset\.id\) \+ '\/' \+ btn\.dataset\.absenceAction/);
+  assert.match(handler, /const reasonInput = prompt\(L\('reject_reason'\)\);[\s\S]*if \(reasonInput === null\) return;/);
+  assert.match(handler, /const reason = reasonInput\.trim\(\);[\s\S]*if \(!reason\) \{[\s\S]*alert\(L\('rejection_reason_required'\)\);[\s\S]*return;/);
+  assert.match(handler, /body = \{ reason \};[\s\S]*body: JSON\.stringify\(body\)/);
+  assert.match(handler, /await renderAbsence\(\)/);
+  assert.doesNotMatch(handler, /await loadTab\(\)/);
+});
+
 test('returns one full-range attendance statistics row per active employee', async () => {
   const database = attendanceStatsTestDatabase();
   const rows = await attendanceEmployeeStats({ DB: d1TestDatabase(database) }, {

@@ -4177,6 +4177,7 @@ function adminHtml() {
         <button data-tab="salary" data-i18n="salary">工资</button>
         <button data-tab="advances" data-i18n="advances">预支薪资</button>
         <button data-tab="attendance" data-i18n="attendance">考勤</button>
+        <button data-tab="absence" data-i18n="absence_approvals">缺勤审批</button>
         <button data-tab="leave" data-i18n="leave">请假</button>
         <button data-tab="logs" data-i18n="logs">日志</button>
       </nav>
@@ -4186,6 +4187,7 @@ function adminHtml() {
       <section id="tab-salary" class="panel hidden"></section>
       <section id="tab-advances" class="panel hidden"></section>
       <section id="tab-attendance" class="panel hidden"></section>
+      <section id="tab-absence" class="panel hidden"></section>
       <section id="tab-leave" class="panel hidden"></section>
       <section id="tab-logs" class="panel hidden"></section>
     </section>
@@ -4199,6 +4201,7 @@ function adminHtml() {
       dateFrom: '',
       dateTo: '',
       employee: 'all',
+      absenceStatus: 'all',
       stores: []
     };
     const pages = {
@@ -4208,6 +4211,7 @@ function adminHtml() {
       salary: { requests_page: 1, records_page: 1, rejected_page: 1 },
       advances: { pending_page: 1, approved_page: 1, rejected_page: 1 },
       attendance: { pending_page: 1, approved_page: 1, rejected_page: 1 },
+      absence: { absence_pending_page: 1, absence_history_page: 1 },
       leave: { pending_page: 1, approved_page: 1, rejected_page: 1 },
       logs: { logs_page: 1 }
     };
@@ -4218,6 +4222,7 @@ function adminHtml() {
       salary: { requests: {}, records: {}, rejected: {} },
       advances: { pending: {}, approved: {}, rejected: {} },
       attendance: { summary: {}, pending: {}, approved: {}, rejected: {} },
+      absence: { pending: {}, history: {} },
       leave: { pending: {}, approved: {}, rejected: {} },
       logs: { logs: {} }
     };
@@ -4229,7 +4234,7 @@ function adminHtml() {
       zh: {
         logout:'退出', login:'登录', telegram_id:'Telegram ID', code:'验证码', send_code:'发送验证码', verify_login:'验证登录',
         refresh:'刷新', members_csv:'员工 CSV', income_csv:'收入 CSV', salary_csv:'工资 CSV', advances_csv:'预支薪资 CSV', attendance_csv:'考勤 CSV', leave_csv:'请假 CSV',
-        stores:'店铺', members:'员工', income:'收入', salary:'工资', advances:'预支薪资', attendance:'考勤', leave:'请假', logs:'日志',
+        stores:'店铺', members:'员工', income:'收入', salary:'工资', advances:'预支薪资', attendance:'考勤', absence_approvals:'缺勤审批', leave:'请假', logs:'日志',
         store_id:'店铺 ID', name:'名称', timezone:'时区', currency:'货币', checkin_time:'签到时间', checkout_time:'签退时间',
         late_fine:'迟到罚款', early_leave_fine:'早退罚款', absence_fine_enabled:'缺勤罚款', absence_fine:'缺勤罚款金额', leave_min_notice_days:'最早提前天数', leave_max_notice_days:'最晚提前天数', leave_monthly_limit:'每月请假上限', leave_daily_limit:'同日请假人数上限', leave_same_day_cutoff_hour:'当天请假截止小时', status:'状态', save_store:'保存店铺', clear:'清空', edit:'编辑',
         disable:'禁用', enable:'启用', delete:'删除', action:'操作', new_store:'新建店铺', employee_name:'姓名',
@@ -4242,6 +4247,7 @@ function adminHtml() {
         pending_income:'待审批收入', income_records:'收入记录', rejected_income:'拒绝记录', salary_requests:'待审批工资', salary_records:'工资记录', rejected_salary:'拒绝记录', pending_advances:'待审批预支', approved_advances:'已批准预支', rejected_advances:'已拒绝预支', pending_leave:'待审批请假', approved_leave:'已批准请假', rejected_leave:'已拒绝请假', pending_attendance:'待审批签退', approved_attendance:'已批准考勤', rejected_attendance:'已驳回签退',
         summary:'合计', work_days:'出勤天数', late_days:'迟到天数', absence_days:'缺勤天数', leave_days:'请假天数', attendance_fine_total:'考勤罚款合计', employee_attendance_summary:'员工考勤汇总', view_details:'查看明细', pending_total:'待审批合计', approved_total:'已批准合计', rejected_total:'已拒绝合计', pending_days:'待审批天数', approved_days:'已批准天数', rejected_days:'已拒绝天数', income_total:'收入合计', commission_income_total:'提成收入合计', fine_total:'罚款合计', net_total:'净额合计',
         btn_approve:'批准', btn_approve_fine:'批准并罚款', btn_approve_no_fine:'批准不罚款', btn_reject:'驳回',
+        pending_absence:'待审批缺勤', absence_history:'审批历史', pending_absence_total:'待审批', approved_absence_total:'已批准', rejected_absence_total:'已拒绝', cancelled_absence_total:'已取消', approved_absence_fine_total:'已批准罚款总额', notification_status:'通知状态', notification_delivery:'通知送达', notification_sent:'已发送', notification_not_queued:'未入队', notification_retrying:'待重试', notification_recipients:'{count} 位管理员', notification_attempts:'最多尝试 {count} 次', btn_approve_absence_fine:'批准罚款', confirm_approve_absence_fine:'确定批准这笔缺勤罚款吗？', rejection_reason_required:'必须填写拒绝原因', all_statuses:'全部状态', status_pending:'待审批', status_approved:'已批准', status_rejected:'已拒绝', status_cancelled:'已取消', decision_reason:'决定原因', income_record_id:'罚款记录 ID', actual_fine:'实际罚款',
         filter:'筛选', month:'月份', date_from:'开始日期', date_to:'结束日期', employee:'员工', all_employees:'全部员工', stores_filter:'店铺（可多选）', search:'查询', prev_page:'上一页', next_page:'下一页', page_status:'第 {page} / {total_pages} 页，共 {total} 条',
         sent_code:'验证码已发送到 Telegram。', sending:'发送中...', reject_reason:'驳回原因', no_data:'暂无数据',
         confirm_delete_member:'确定删除这个员工吗？', confirm_delete_store:'确定停用这个店铺吗？历史记录会保留。', default_store_cannot_be_deleted:'默认店铺不能删除。', confirm_delete_income:'确定删除这条收入记录吗？删除已批准收入会影响总收入和工资。', edit_fine:'修改罚款', prompt_fine:'请输入新的罚款金额'
@@ -4249,7 +4255,7 @@ function adminHtml() {
       en: {
         logout:'Log out', login:'Login', telegram_id:'Telegram ID', code:'Code', send_code:'Send code', verify_login:'Verify login',
         refresh:'Refresh', members_csv:'Members CSV', income_csv:'Income CSV', salary_csv:'Salary CSV', advances_csv:'Salary advances CSV', attendance_csv:'Attendance CSV', leave_csv:'Leave CSV',
-        stores:'Stores', members:'Members', income:'Income', salary:'Salary', advances:'Salary advances', attendance:'Attendance', leave:'Leave', logs:'Logs',
+        stores:'Stores', members:'Members', income:'Income', salary:'Salary', advances:'Salary advances', attendance:'Attendance', absence_approvals:'Absence approvals', leave:'Leave', logs:'Logs',
         store_id:'Store ID', name:'Name', timezone:'Timezone', currency:'Currency', checkin_time:'Check-in time', checkout_time:'Check-out time',
         late_fine:'Late fine', early_leave_fine:'Early leave fine', absence_fine_enabled:'Absence fine', absence_fine:'Absence fine amount', leave_min_notice_days:'Earliest leave days', leave_max_notice_days:'Latest leave days', leave_monthly_limit:'Monthly leave limit', leave_daily_limit:'Daily leave limit', leave_same_day_cutoff_hour:'Same-day leave cutoff hour', status:'Status', save_store:'Save store', clear:'Clear', edit:'Edit',
         disable:'Disable', enable:'Enable', delete:'Delete', action:'Action', new_store:'New store', employee_name:'Employee name',
@@ -4262,6 +4268,7 @@ function adminHtml() {
         pending_income:'Pending income', income_records:'Income records', rejected_income:'Rejected records', salary_requests:'Pending salary', salary_records:'Salary records', rejected_salary:'Rejected records', pending_advances:'Pending advances', approved_advances:'Approved advances', rejected_advances:'Rejected advances', pending_leave:'Pending leave', approved_leave:'Approved leave', rejected_leave:'Rejected leave', pending_attendance:'Pending checkout', approved_attendance:'Approved attendance', rejected_attendance:'Rejected checkout',
         summary:'Summary', work_days:'Work days', late_days:'Late days', absence_days:'Absence days', leave_days:'Leave days', attendance_fine_total:'Attendance fines', employee_attendance_summary:'Employee attendance summary', view_details:'View details', pending_total:'Pending total', approved_total:'Approved total', rejected_total:'Rejected total', pending_days:'Pending days', approved_days:'Approved days', rejected_days:'Rejected days', income_total:'Income total', commission_income_total:'Commission income total', fine_total:'Fine total', net_total:'Net total',
         btn_approve:'Approve', btn_approve_fine:'Approve with fine', btn_approve_no_fine:'Approve no fine', btn_reject:'Reject',
+        pending_absence:'Pending absences', absence_history:'Approval history', pending_absence_total:'Pending', approved_absence_total:'Approved', rejected_absence_total:'Rejected', cancelled_absence_total:'Cancelled', approved_absence_fine_total:'Approved fine total', notification_status:'Notification status', notification_delivery:'Notification delivery', notification_sent:'Sent', notification_not_queued:'Not queued', notification_retrying:'Retry pending', notification_recipients:'{count} admins', notification_attempts:'Up to {count} attempts', btn_approve_absence_fine:'Approve fine', confirm_approve_absence_fine:'Approve this absence fine?', rejection_reason_required:'Rejection reason is required', all_statuses:'All statuses', status_pending:'Pending', status_approved:'Approved', status_rejected:'Rejected', status_cancelled:'Cancelled', decision_reason:'Decision reason', income_record_id:'Fine record ID', actual_fine:'Actual fine',
         filter:'Filter', month:'Month', date_from:'From date', date_to:'To date', employee:'Employee', all_employees:'All employees', stores_filter:'Stores (multi-select)', search:'Search', prev_page:'Previous', next_page:'Next', page_status:'Page {page} / {total_pages}, {total} rows',
         sent_code:'Code sent to Telegram.', sending:'Sending...', reject_reason:'Reject reason', no_data:'No data',
         confirm_delete_member:'Delete this member?', confirm_delete_store:'Disable this store? History will be kept.', default_store_cannot_be_deleted:'The default store cannot be deleted.', confirm_delete_income:'Delete this income record? Deleting approved income changes totals and salary.', edit_fine:'Edit fine', prompt_fine:'Enter the new fine amount'
@@ -4269,7 +4276,7 @@ function adminHtml() {
       vi: {
         logout:'Đăng xuất', login:'Đăng nhập', telegram_id:'Telegram ID', code:'Mã', send_code:'Gửi mã', verify_login:'Xác minh',
         refresh:'Làm mới', members_csv:'Nhân viên CSV', income_csv:'Thu nhập CSV', salary_csv:'Lương CSV', advances_csv:'Ứng lương CSV', attendance_csv:'Chấm công CSV',
-        stores:'Cửa hàng', members:'Nhân viên', income:'Thu nhập', salary:'Lương', advances:'Ứng lương', attendance:'Chấm công', logs:'Nhật ký',
+        stores:'Cửa hàng', members:'Nhân viên', income:'Thu nhập', salary:'Lương', advances:'Ứng lương', attendance:'Chấm công', absence_approvals:'Duyệt vắng mặt', logs:'Nhật ký',
         store_id:'ID cửa hàng', name:'Tên', timezone:'Múi giờ', currency:'Tiền tệ', checkin_time:'Giờ vào ca', checkout_time:'Giờ ra ca',
         late_fine:'Phạt đi muộn', early_leave_fine:'Phạt về sớm', absence_fine_enabled:'Phạt vắng mặt', absence_fine:'Mức phạt vắng mặt', status:'Trạng thái', save_store:'Lưu cửa hàng', clear:'Xóa form', edit:'Sửa',
         disable:'Tắt', enable:'Bật', delete:'Xóa', action:'Thao tác', new_store:'Cửa hàng mới', employee_name:'Tên nhân viên',
@@ -4282,6 +4289,7 @@ function adminHtml() {
         pending_income:'Thu nhập chờ duyệt', income_records:'Bản ghi thu nhập', rejected_income:'Bản ghi từ chối', salary_requests:'Lương chờ duyệt', salary_records:'Bản ghi lương', rejected_salary:'Bản ghi từ chối', pending_advances:'Ứng lương chờ duyệt', approved_advances:'Ứng lương đã duyệt', rejected_advances:'Ứng lương bị từ chối', pending_attendance:'Ra ca chờ duyệt', approved_attendance:'Chấm công đã duyệt', rejected_attendance:'Ra ca bị từ chối',
         summary:'Tổng cộng', work_days:'Ngày làm việc', late_days:'Ngày đi muộn', absence_days:'Ngày vắng mặt', leave_days:'Ngày nghỉ phép', attendance_fine_total:'Tổng phạt chấm công', employee_attendance_summary:'Tổng hợp chấm công nhân viên', view_details:'Xem chi tiết', pending_total:'Tổng chờ duyệt', approved_total:'Tổng đã duyệt', rejected_total:'Tổng từ chối', income_total:'Tổng thu nhập', commission_income_total:'Tổng thu nhập hoa hồng', fine_total:'Tổng phạt', net_total:'Tổng ròng',
         btn_approve:'Duyệt', btn_approve_fine:'Duyệt kèm phạt', btn_approve_no_fine:'Duyệt không phạt', btn_reject:'Từ chối',
+        pending_absence:'Vắng mặt chờ duyệt', absence_history:'Lịch sử duyệt', pending_absence_total:'Chờ duyệt', approved_absence_total:'Đã duyệt', rejected_absence_total:'Đã từ chối', cancelled_absence_total:'Đã hủy', approved_absence_fine_total:'Tổng phạt đã duyệt', notification_status:'Trạng thái thông báo', notification_delivery:'Gửi thông báo', notification_sent:'Đã gửi', notification_not_queued:'Chưa xếp hàng', notification_retrying:'Đang chờ thử lại', notification_recipients:'{count} quản trị viên', notification_attempts:'Tối đa {count} lần thử', btn_approve_absence_fine:'Duyệt tiền phạt', confirm_approve_absence_fine:'Duyệt khoản phạt vắng mặt này?', rejection_reason_required:'Bắt buộc nhập lý do từ chối', all_statuses:'Tất cả trạng thái', status_pending:'Chờ duyệt', status_approved:'Đã duyệt', status_rejected:'Đã từ chối', status_cancelled:'Đã hủy', decision_reason:'Lý do quyết định', income_record_id:'ID bản ghi phạt', actual_fine:'Mức phạt thực tế',
         filter:'Lọc', month:'Tháng', date_from:'Từ ngày', date_to:'Đến ngày', employee:'Nhân viên', all_employees:'Tất cả nhân viên', stores_filter:'Cửa hàng (chọn nhiều)', search:'Tìm',
         sent_code:'Đã gửi mã đến Telegram.', sending:'Đang gửi...', reject_reason:'Lý do từ chối', no_data:'Không có dữ liệu',
         confirm_delete_member:'Xóa nhân viên này?', confirm_delete_store:'Tắt cửa hàng này? Lịch sử sẽ được giữ lại.', default_store_cannot_be_deleted:'Không thể xóa cửa hàng mặc định.', confirm_delete_income:'Xóa bản ghi thu nhập này? Xóa thu nhập đã duyệt sẽ ảnh hưởng tổng và lương.', edit_fine:'Sửa phạt', prompt_fine:'Nhập số tiền phạt mới'
@@ -4289,7 +4297,7 @@ function adminHtml() {
       ru: {
         logout:'Выйти', login:'Вход', telegram_id:'Telegram ID', code:'Код', send_code:'Отправить код', verify_login:'Проверить вход',
         refresh:'Обновить', members_csv:'Сотрудники CSV', income_csv:'Доход CSV', salary_csv:'Зарплата CSV', advances_csv:'Авансы CSV', attendance_csv:'Посещаемость CSV',
-        stores:'Магазины', members:'Сотрудники', income:'Доход', salary:'Зарплата', advances:'Авансы зарплаты', attendance:'Посещаемость', logs:'Журналы',
+        stores:'Магазины', members:'Сотрудники', income:'Доход', salary:'Зарплата', advances:'Авансы зарплаты', attendance:'Посещаемость', absence_approvals:'Проверка отсутствий', logs:'Журналы',
         store_id:'ID магазина', name:'Название', timezone:'Часовой пояс', currency:'Валюта', checkin_time:'Начало смены', checkout_time:'Конец смены',
         late_fine:'Штраф за опоздание', early_leave_fine:'Штраф за ранний уход', absence_fine_enabled:'Штраф за отсутствие', absence_fine:'Размер штрафа за отсутствие', status:'Статус', save_store:'Сохранить магазин', clear:'Очистить', edit:'Редактировать',
         disable:'Отключить', enable:'Включить', delete:'Удалить', action:'Действие', new_store:'Новый магазин', employee_name:'Имя сотрудника',
@@ -4302,6 +4310,7 @@ function adminHtml() {
         pending_income:'Доход на проверке', income_records:'Записи дохода', rejected_income:'Отклоненные записи', salary_requests:'Зарплата на проверке', salary_records:'Записи зарплаты', rejected_salary:'Отклоненные записи', pending_advances:'Авансы на проверке', approved_advances:'Одобренные авансы', rejected_advances:'Отклоненные авансы', pending_attendance:'Завершение смены на проверке', approved_attendance:'Одобренная посещаемость', rejected_attendance:'Отклоненное завершение смены',
         summary:'Итого', work_days:'Рабочие дни', late_days:'Дни опозданий', absence_days:'Дни отсутствия', leave_days:'Дни отпуска', attendance_fine_total:'Штрафы за посещаемость', employee_attendance_summary:'Сводка посещаемости сотрудников', view_details:'Подробнее', pending_total:'Ожидает итого', approved_total:'Одобрено итого', rejected_total:'Отклонено итого', income_total:'Доход итого', commission_income_total:'Комиссионный доход итого', fine_total:'Штраф итого', net_total:'Чистый итог',
         btn_approve:'Одобрить', btn_approve_fine:'Одобрить со штрафом', btn_approve_no_fine:'Одобрить без штрафа', btn_reject:'Отклонить',
+        pending_absence:'Ожидающие отсутствия', absence_history:'История решений', pending_absence_total:'Ожидают', approved_absence_total:'Одобрено', rejected_absence_total:'Отклонено', cancelled_absence_total:'Отменено', approved_absence_fine_total:'Одобренные штрафы', notification_status:'Статус уведомления', notification_delivery:'Доставка уведомления', notification_sent:'Отправлено', notification_not_queued:'Не поставлено в очередь', notification_retrying:'Ожидает повтора', notification_recipients:'Администраторов: {count}', notification_attempts:'До {count} попыток', btn_approve_absence_fine:'Одобрить штраф', confirm_approve_absence_fine:'Одобрить этот штраф за отсутствие?', rejection_reason_required:'Укажите причину отклонения', all_statuses:'Все статусы', status_pending:'Ожидает', status_approved:'Одобрено', status_rejected:'Отклонено', status_cancelled:'Отменено', decision_reason:'Причина решения', income_record_id:'ID записи штрафа', actual_fine:'Фактический штраф',
         filter:'Фильтр', month:'Месяц', date_from:'С даты', date_to:'По дату', employee:'Сотрудник', all_employees:'Все сотрудники', stores_filter:'Магазины (можно несколько)', search:'Поиск',
         sent_code:'Код отправлен в Telegram.', sending:'Отправка...', reject_reason:'Причина отклонения', no_data:'Нет данных',
         confirm_delete_member:'Удалить этого сотрудника?', confirm_delete_store:'Отключить этот магазин? История сохранится.', default_store_cannot_be_deleted:'Магазин по умолчанию нельзя удалить.', confirm_delete_income:'Удалить эту запись дохода? Удаление одобренного дохода изменит итоги и зарплату.', edit_fine:'Изменить штраф', prompt_fine:'Введите новый штраф'
@@ -4390,9 +4399,11 @@ function adminHtml() {
       const dateFrom = root && root.querySelector('[data-filter-date-from]');
       const dateTo = root && root.querySelector('[data-filter-date-to]');
       const employee = root && root.querySelector('[data-filter-employee]');
+      const absenceStatus = root && root.querySelector('[data-absence-status]');
       if (dateFrom) filters.dateFrom = dateFrom.value;
       if (dateTo) filters.dateTo = dateTo.value;
       if (employee) filters.employee = employee.value || 'all';
+      if (absenceStatus) filters.absenceStatus = absenceStatus.value || 'all';
       if (root && root.querySelector('[data-filter-stores]')) filters.stores = selectedFilterStores(root);
     }
     function pageQuery(tab) {
@@ -4403,7 +4414,11 @@ function adminHtml() {
     }
     function queryWithPages(tab) {
       const params = new URLSearchParams(filterQuery());
-      for (const [key, value] of Object.entries(pages[tab] || {})) params.set(key, String(value || 1));
+      for (const [key, value] of Object.entries(pages[tab] || {})) {
+        const queryKey = tab === 'absence' ? key.replace('absence_', '') : key;
+        params.set(queryKey, String(value || 1));
+      }
+      if (tab === 'absence' && filters.absenceStatus !== 'all') params.set('status', filters.absenceStatus);
       appendSortParams(params, tab);
       return params.toString();
     }
@@ -4445,6 +4460,7 @@ function adminHtml() {
       if (currentTab === 'salary') return renderSalary();
       if (currentTab === 'advances') return renderSalaryAdvances();
       if (currentTab === 'attendance') return renderAttendance();
+      if (currentTab === 'absence') return renderAbsence();
       if (currentTab === 'leave') return renderLeave();
       if (currentTab === 'logs') return renderRows('logs', '/api/admin/stores/' + encodeURIComponent(storeId()) + '/logs');
     }
@@ -4672,6 +4688,61 @@ function adminHtml() {
       bindPagers();
     }
 
+    async function renderAbsence() {
+      const data = await api('/api/admin/stores/' + encodeURIComponent(storeId()) + '/absence?' + queryWithPages('absence'));
+      const pending = (data.pending || []).map((row) => ({
+        ...row,
+        fine: formatCurrencyAmount(row.currency, row.fine),
+        notification_status: notificationStatusLabel(row.notification_status),
+        notification_delivery: notificationDeliveryLabel(row),
+        action: '<button data-absence-action="approve" data-store="' + esc(row.store_id) + '" data-id="' + esc(row.request_id) + '">' + L('btn_approve_absence_fine') + '</button> ' +
+          '<button class="danger" data-absence-action="reject" data-store="' + esc(row.store_id) + '" data-id="' + esc(row.request_id) + '">' + L('btn_reject') + '</button>'
+      }));
+      const history = (data.history || []).map((row) => ({
+        ...row,
+        status: absenceStatusLabel(row.status),
+        original_fine: formatCurrencyAmount(row.currency, row.original_fine),
+        actual_fine: row.actual_fine === null || row.actual_fine === undefined ? '' : formatCurrencyAmount(row.currency, row.actual_fine),
+        decision_reason: row.reject_reason || row.cancellation_reason || ''
+      }));
+      $('tab-absence').innerHTML = await filterPanel(true, true) +
+        absenceSummaryPanel(data) +
+        sectionTitle('pending_absence') +
+        table(pending, ['store_id','display_name','business_date','fine','created_at','notification_status','notification_delivery','action'], true, 'pending') +
+        pager('absence', 'absence_pending_page', data.pagination && data.pagination.pending) +
+        sectionTitle('absence_history') +
+        table(history, ['store_id','display_name','business_date','status','original_fine','actual_fine','admin_id','decided_at','decision_reason','income_record_id'], false, 'history') +
+        pager('absence', 'absence_history_page', data.pagination && data.pagination.history);
+      bindFilterControls();
+      bindAbsenceActions();
+      bindPagers();
+    }
+
+    function bindAbsenceActions() {
+      document.querySelectorAll('[data-absence-action]').forEach((btn) => {
+        btn.onclick = () => withBusy(btn, async () => {
+          let body = {};
+          if (btn.dataset.absenceAction === 'approve') {
+            if (!confirm(L('confirm_approve_absence_fine'))) return;
+          } else {
+            const reasonInput = prompt(L('reject_reason'));
+            if (reasonInput === null) return;
+            const reason = reasonInput.trim();
+            if (!reason) {
+              alert(L('rejection_reason_required'));
+              return;
+            }
+            body = { reason };
+          }
+          await api('/api/admin/stores/' + encodeURIComponent(btn.dataset.store) + '/absence/' + encodeURIComponent(btn.dataset.id) + '/' + btn.dataset.absenceAction, {
+            method:'POST',
+            body: JSON.stringify(body)
+          });
+          await renderAbsence();
+        });
+      });
+    }
+
     async function renderLeave() {
       const data = await api('/api/admin/stores/' + encodeURIComponent(storeId()) + '/leave?' + queryWithPages('leave'));
       $('tab-leave').innerHTML = await filterPanel() +
@@ -4720,6 +4791,36 @@ function adminHtml() {
         { label: L('approved_days'), value: String((data.pagination && data.pagination.approved && data.pagination.approved.total) || 0) },
         { label: L('rejected_days'), value: String((data.pagination && data.pagination.rejected && data.pagination.rejected.total) || 0) }
       ]);
+    }
+
+    function absenceSummaryPanel(data) {
+      const statusCounts = (data.summary && data.summary.status_counts) || {};
+      const fineTotals = ((data.summary && data.summary.fine_totals) || [])
+        .map((item) => formatCurrencyAmount(item.currency, item.amount))
+        .join(' · ') || '0';
+      return summaryPanel([
+        { label: L('pending_absence_total'), value: String(statusCounts.pending || 0) },
+        { label: L('approved_absence_total'), value: String(statusCounts.approved || 0) },
+        { label: L('rejected_absence_total'), value: String(statusCounts.rejected || 0) },
+        { label: L('cancelled_absence_total'), value: String(statusCounts.cancelled || 0) },
+        { label: L('approved_absence_fine_total'), value: fineTotals }
+      ]);
+    }
+
+    function absenceStatusLabel(status) {
+      return L('status_' + status);
+    }
+
+    function notificationStatusLabel(status) {
+      return L('notification_' + status);
+    }
+
+    function notificationDeliveryLabel(row) {
+      if (row.notification_status === 'not_queued') return L('notification_not_queued');
+      if (row.notification_status === 'retrying') {
+        return L('notification_attempts').replace('{count}', String(row.notification_attempts || 0));
+      }
+      return L('notification_recipients').replace('{count}', String(row.notification_total || 0));
     }
 
     function attendanceSummaryPanel(data) {
@@ -4790,7 +4891,7 @@ function adminHtml() {
       return formatAdminMoneyForUi(Number(value || 0).toFixed(2));
     }
 
-    async function filterPanel(includeEmployeeFilters = true) {
+    async function filterPanel(includeEmployeeFilters = true, includeAbsenceStatus = false) {
       const selectedStores = new Set(activeFilterStores());
       const members = includeEmployeeFilters ? await loadFilterMembers(Array.from(selectedStores)) : [];
       return '<div class="filter-panel">' +
@@ -4799,10 +4900,18 @@ function adminHtml() {
         (includeEmployeeFilters ? '<label>' + L('date_from') + '<input data-filter-date-from type="date" value="' + esc(filters.dateFrom) + '"></label>' +
         '<label>' + L('date_to') + '<input data-filter-date-to type="date" value="' + esc(filters.dateTo) + '"></label>' +
         '<label>' + L('employee') + '<select data-filter-employee><option value="all">' + L('all_employees') + '</option>' + members.map((member) => '<option value="' + esc(member.telegram_id) + '"' + (filters.employee === member.telegram_id ? ' selected' : '') + '>' + esc(member.display_name + ' (' + member.telegram_id + ')') + '</option>').join('') + '</select></label>' : '') +
+        (includeAbsenceStatus ? '<label>' + L('status') + '<select data-absence-status>' + absenceStatusOptions() + '</select></label>' : '') +
         '<label>' + L('stores_filter') + '<select data-filter-stores multiple size="' + Math.min(Math.max(stores.length, 2), 6) + '">' + stores.map((store) => '<option value="' + esc(store.store_id) + '"' + (selectedStores.has(store.store_id) ? ' selected' : '') + '>' + esc(store.name) + '</option>').join('') + '</select></label>' +
         '</div>' +
         '<div class="row" style="margin-top:10px"><button data-apply-filters>' + L('search') + '</button></div>' +
         '</div>';
+    }
+
+    function absenceStatusOptions() {
+      return ['all','pending','approved','rejected','cancelled'].map((value) => {
+        const key = value === 'all' ? 'all_statuses' : 'status_' + value;
+        return '<option value="' + value + '"' + (filters.absenceStatus === value ? ' selected' : '') + '>' + esc(L(key)) + '</option>';
+      }).join('');
     }
 
     function memberFilterPanel() {
