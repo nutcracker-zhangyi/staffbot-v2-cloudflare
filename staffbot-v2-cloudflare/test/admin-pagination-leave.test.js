@@ -193,7 +193,9 @@ function absenceAdminQueryDatabase() {
     INSERT INTO absence_fine_notifications VALUES
       ('P-001', 'ADMIN1', 'sent', 1, NULL, '2026-07-15T03:10:00.000Z', NULL),
       ('P-003', 'ADMIN1', 'pending', 2, NULL, NULL, 'temporary failure'),
-      ('P-003', 'ADMIN2', 'failed', 3, NULL, NULL, 'permanent failure');
+      ('P-003', 'ADMIN2', 'failed', 3, NULL, NULL, 'permanent failure'),
+      ('P-004', 'ADMIN1', 'sent', 1, NULL, '2026-07-15T03:10:00.000Z', NULL),
+      ('P-004', 'ADMIN2', 'pending', 2, NULL, NULL, 'temporary failure');
   `);
   return database;
 }
@@ -534,21 +536,31 @@ test('admin page exposes standalone absence approvals in all four languages', ()
   assert.match(source, /data-absence-status/);
   assert.match(source, /const queryKey = tab === 'absence' \? key\.replace\('absence_', ''\) : key/);
 
-  for (const key of [
-    'absence_approvals',
-    'pending_absence',
-    'absence_history',
-    'notification_sent',
-    'notification_not_queued',
-    'notification_retrying',
-    'btn_approve_absence_fine',
-    'rejection_reason_required'
-  ]) {
+  const visibleAbsenceKeys = new Set([
+    ...ABSENCE_PENDING_COLUMNS,
+    ...ABSENCE_HISTORY_COLUMNS,
+    'absence_approvals', 'pending_absence', 'absence_history',
+    'pending_absence_total', 'approved_absence_total', 'rejected_absence_total',
+    'cancelled_absence_total', 'approved_absence_fine_total',
+    'notification_sent', 'notification_not_queued', 'notification_retrying',
+    'notification_recipients', 'notification_attempts', 'notification_sent_total',
+    'btn_approve_absence_fine', 'btn_reject', 'confirm_approve_absence_fine',
+    'reject_reason', 'rejection_reason_required', 'absence_already_processed',
+    'absence_action_failed', 'filter', 'date_from', 'date_to', 'employee',
+    'all_employees', 'stores_filter', 'search', 'status', 'all_statuses',
+    'status_pending', 'status_approved', 'status_rejected', 'status_cancelled',
+    'prev_page', 'next_page', 'page_status'
+  ]);
+  visibleAbsenceKeys.delete('action');
+  for (const key of visibleAbsenceKeys) {
     assert.equal(
-      (source.match(new RegExp(`${key}:'[^']+'`, 'g')) || []).length,
+      (source.match(new RegExp(`\\b${key}:'[^']+'`, 'g')) || []).length,
       4,
       `${key} should be translated in all four admin languages`
     );
+    for (const match of source.matchAll(new RegExp(`\\b${key}:'([^']+)'`, 'g'))) {
+      assert.notEqual(match[1], key, `${key} must render a label instead of its translation key`);
+    }
   }
 });
 
@@ -562,6 +574,7 @@ test('absence page renders full-range summary, localized notifications, and inde
   assert.match(source, /pager\('absence', 'absence_history_page'/);
   assert.match(source, /notificationStatusLabel/);
   assert.match(source, /notificationDeliveryLabel/);
+  assert.match(source, /L\('notification_sent_total'\)[\s\S]*replace\('\{sent\}', String\(row\.notification_sent_total \|\| 0\)\)[\s\S]*replace\('\{total\}', String\(row\.notification_total \|\| 0\)\)/);
 });
 
 test('absence action buttons preserve row stores and guard approval and rejection requests', () => {
@@ -578,6 +591,49 @@ test('absence action buttons preserve row stores and guard approval and rejectio
   assert.match(handler, /body = \{ reason \};[\s\S]*body: JSON\.stringify\(body\)/);
   assert.match(handler, /await renderAbsence\(\)/);
   assert.doesNotMatch(handler, /await loadTab\(\)/);
+});
+
+function executableAbsenceAction(options = {}) {
+  const start = source.indexOf('function bindAbsenceActions()');
+  const end = source.indexOf('\n    async function renderLeave', start + 1);
+  const handler = source.slice(start, end);
+  const button = {
+    dataset: { absenceAction: 'approve', store: 'STORE1', id: 'ABS-1' },
+    disabled: false,
+    setAttribute() {},
+    removeAttribute() {}
+  };
+  const alerts = [];
+  let renders = 0;
+  const bind = new Function(
+    'document', 'withBusy', 'confirm', 'prompt', 'alert', 'L', 'api', 'renderAbsence',
+    `${handler}; return bindAbsenceActions;`
+  )(
+    { querySelectorAll: () => [button] },
+    async (_button, task) => task(),
+    () => true,
+    () => null,
+    (message) => alerts.push(message),
+    (key) => key,
+    options.api || (async () => ({})),
+    async () => { renders += 1; }
+  );
+  bind();
+  return { button, alerts, renders: () => renders };
+}
+
+test('absence action catches already-decided API failures without reloading', async () => {
+  const action = executableAbsenceAction({ api: async () => { throw new Error('already_decided'); } });
+  await action.button.onclick();
+  assert.deepEqual(action.alerts, ['absence_already_processed']);
+  assert.equal(action.renders(), 0);
+});
+
+test('absence action catches generic API failures without reloading', async () => {
+  const action = executableAbsenceAction({ api: async () => { throw new Error('request_failed'); } });
+  await action.button.onclick();
+  assert.deepEqual(action.alerts, ['absence_action_failed']);
+  assert.equal(action.renders(), 0);
 });
 
 test('returns one full-range attendance statistics row per active employee', async () => {
@@ -675,6 +731,7 @@ test('builds admin sort SQL only from allowed fields', () => {
   assert.equal(adminOrderSql(new URL('https://x.test/?records_sort=amount&records_dir=desc'), 'records_page', allowed, 'ORDER BY approved_at DESC'), 'ORDER BY amount DESC');
   assert.equal(adminOrderSql(new URL('https://x.test/?records_sort=1;DROP&records_dir=asc'), 'records_page', allowed, 'ORDER BY approved_at DESC'), 'ORDER BY approved_at DESC');
   assert.equal(adminOrderSql(new URL('https://x.test/?records_sort=amount&records_dir=bad'), 'records_page', allowed, 'ORDER BY approved_at DESC'), 'ORDER BY approved_at DESC');
+  assert.equal(adminOrderSql(new URL('https://x.test/?records_sort=amount&records_dir=asc'), 'records_page', allowed, 'ORDER BY approved_at DESC', 'request_id DESC'), 'ORDER BY amount ASC, request_id DESC');
 });
 
 test('maps every visible sortable absence column to server ordering', () => {
@@ -693,6 +750,13 @@ test('maps every visible sortable absence column to server ordering', () => {
       );
     }
   }
+});
+
+test('absence pagination uses request id as the stable default and custom-sort tiebreaker', () => {
+  assert.match(source, /ORDER BY r\.business_date DESC, r\.created_at DESC, r\.request_id DESC/);
+  assert.match(source, /ORDER BY COALESCE\(r\.decided_at, r\.created_at\) DESC, r\.request_id DESC/);
+  assert.match(source, /baseParams, `ORDER BY r\.business_date DESC, r\.created_at DESC, r\.request_id DESC`, absenceSort, `r\.request_id DESC`/);
+  assert.match(source, /baseParams, `ORDER BY COALESCE\(r\.decided_at, r\.created_at\) DESC, r\.request_id DESC`, absenceSort, `r\.request_id DESC`/);
 });
 
 test('resets only the sorted absence pager while preserving existing tab behavior', () => {
@@ -1275,17 +1339,35 @@ test('absence notification summary distinguishes sent, not_queued, and retrying'
   };
   const { result } = await getAdminAbsence(env, '?pending_sort=request_id&pending_dir=asc');
   const states = Object.fromEntries(
-    result.pending.slice(0, 3).map((row) => [row.request_id, row.notification_status])
+    result.pending.slice(0, 4).map((row) => [row.request_id, row.notification_status])
   );
 
   assert.deepEqual(states, {
     'P-001': 'sent',
     'P-002': 'not_queued',
-    'P-003': 'retrying'
+    'P-003': 'retrying',
+    'P-004': 'retrying'
   });
+  assert.deepEqual(
+    Object.fromEntries(result.pending.slice(0, 4).map((row) => [row.request_id, [row.notification_sent_total, row.notification_total]])),
+    { 'P-001': [1, 1], 'P-002': [0, 0], 'P-003': [0, 2], 'P-004': [1, 2] }
+  );
   assert.deepEqual(result.summary.notification_counts, {
-    sent: 1, not_queued: 99, retrying: 1
+    sent: 1, not_queued: 98, retrying: 2
   });
+});
+
+test('admin absence rows expose their own store timezone for date rendering', async () => {
+  const database = absenceAdminQueryDatabase();
+  const env = {
+    BOT_TOKEN: 'test-token', WEBHOOK_SECRET: 'test-secret', ADMIN_IDS: 'ADMIN1',
+    DB: d1TestDatabase(database)
+  };
+  const { result } = await getAdminAbsence(env, '?stores=STORE1%2CSTORE2');
+  assert.equal(result.history.find((row) => row.request_id === 'APP-VND').timezone, 'Asia/Ho_Chi_Minh');
+  assert.equal(result.history.find((row) => row.request_id === 'APP-USD').timezone, 'America/New_York');
+  assert.match(source, /formatDisplayValue\(key, row\[key\], row\)/);
+  assert.match(source, /row\.timezone \|\| currentStore\(\)\.timezone/);
 });
 
 test('absence totals by currency use actual approved fine records', async () => {
