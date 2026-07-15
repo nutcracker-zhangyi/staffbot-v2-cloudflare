@@ -90,6 +90,118 @@ function absenceTestDatabase() {
   return database;
 }
 
+function absenceAdminApiEnv(database, hooks = {}) {
+  database.exec(`
+    CREATE TABLE admin_sessions (
+      token TEXT PRIMARY KEY, telegram_id TEXT NOT NULL, expires_at TEXT NOT NULL, created_at TEXT NOT NULL
+    );
+    INSERT INTO admin_sessions VALUES (
+      'absence-session', 'ADMIN1', '2099-01-01T00:00:00.000Z', '2026-07-15T00:00:00.000Z'
+    );
+  `);
+  return {
+    BOT_TOKEN: 'test-token',
+    WEBHOOK_SECRET: 'test-secret',
+    ADMIN_IDS: 'ADMIN1',
+    DB: d1TestDatabase(database, null, hooks)
+  };
+}
+
+function adminAbsenceRequest(path, body) {
+  return new Request(`https://example.com${path}`, {
+    method: 'POST',
+    headers: {
+      cookie: 'staffbot_admin_session=absence-session',
+      'content-type': 'application/json'
+    },
+    body: typeof body === 'string' ? body : JSON.stringify(body)
+  });
+}
+
+function absenceAdminQueryDatabase() {
+  const database = new DatabaseSync(':memory:');
+  database.exec(`
+    CREATE TABLE admin_sessions (
+      token TEXT PRIMARY KEY, telegram_id TEXT NOT NULL, expires_at TEXT NOT NULL, created_at TEXT NOT NULL
+    );
+    CREATE TABLE stores (
+      store_id TEXT PRIMARY KEY, name TEXT, status TEXT, timezone TEXT, currency TEXT
+    );
+    CREATE TABLE users (telegram_id TEXT PRIMARY KEY, name TEXT, username TEXT);
+    CREATE TABLE store_members (
+      store_id TEXT NOT NULL, telegram_id TEXT NOT NULL, display_name TEXT,
+      PRIMARY KEY (store_id, telegram_id)
+    );
+    CREATE TABLE absence_fine_requests (
+      request_id TEXT PRIMARY KEY, store_id TEXT NOT NULL, telegram_id TEXT NOT NULL,
+      business_date TEXT NOT NULL, original_fine REAL NOT NULL, fine REAL NOT NULL,
+      status TEXT NOT NULL, created_at TEXT NOT NULL, notified_at TEXT, decided_at TEXT,
+      admin_id TEXT, reject_reason TEXT, cancellation_reason TEXT, income_record_id TEXT
+    );
+    CREATE TABLE income_records (
+      record_id TEXT PRIMARY KEY, store_id TEXT NOT NULL, telegram_id TEXT NOT NULL,
+      fine REAL NOT NULL, source TEXT NOT NULL, request_id TEXT, approved_at TEXT NOT NULL
+    );
+    CREATE TABLE absence_fine_notifications (
+      request_id TEXT NOT NULL, admin_id TEXT NOT NULL, status TEXT NOT NULL,
+      attempts INTEGER NOT NULL DEFAULT 0, claimed_at TEXT, sent_at TEXT, last_error TEXT,
+      PRIMARY KEY (request_id, admin_id)
+    );
+
+    INSERT INTO admin_sessions VALUES (
+      'absence-query-session', 'ADMIN1', '2099-01-01T00:00:00.000Z', '2026-07-15T00:00:00.000Z'
+    );
+    INSERT INTO stores VALUES ('STORE1', 'HCM', 'active', 'Asia/Ho_Chi_Minh', '₫');
+    INSERT INTO stores VALUES ('STORE2', 'New York', 'active', 'America/New_York', '$');
+    INSERT INTO users VALUES ('U1', 'Alice Telegram', 'alice');
+    INSERT INTO users VALUES ('U2', 'Bob Telegram', 'bob');
+    INSERT INTO users VALUES ('U3', 'Carol Telegram', 'carol');
+    INSERT INTO store_members VALUES ('STORE1', 'U1', 'Alice');
+    INSERT INTO store_members VALUES ('STORE1', 'U2', 'Bob');
+    INSERT INTO store_members VALUES ('STORE2', 'U3', 'Carol');
+
+    INSERT INTO absence_fine_requests VALUES
+      ('APP-VND', 'STORE1', 'U1', '2026-07-10', 1500000, 1500000, 'approved',
+       '2026-07-11T00:00:00.000Z', NULL, '2026-07-11T01:00:00.000Z', 'ADMIN1', NULL, NULL, 'IR-VND'),
+      ('APP-USD', 'STORE2', 'U3', '2026-07-11', 15, 15, 'approved',
+       '2026-07-12T00:00:00.000Z', NULL, '2026-07-12T01:00:00.000Z', 'ADMIN1', NULL, NULL, 'IR-USD'),
+      ('REJ-VND', 'STORE1', 'U2', '2026-07-12', 1500000, 1500000, 'rejected',
+       '2026-07-13T00:00:00.000Z', NULL, '2026-07-13T01:00:00.000Z', 'ADMIN1', 'Approved exception', NULL, NULL),
+      ('CAN-VND', 'STORE1', 'U1', '2026-07-13', 1500000, 1500000, 'cancelled',
+       '2026-07-14T00:00:00.000Z', NULL, NULL, NULL, NULL, 'Approved leave', NULL);
+    INSERT INTO income_records VALUES
+      ('IR-VND', 'STORE1', 'U1', 3000000, 'attendance_absence', 'APP-VND', '2026-07-11T01:00:00.000Z'),
+      ('IR-USD', 'STORE2', 'U3', 20, 'attendance_absence', 'APP-USD', '2026-07-12T01:00:00.000Z');
+  `);
+
+  const insert = database.prepare(`
+    INSERT INTO absence_fine_requests
+      (request_id, store_id, telegram_id, business_date, original_fine, fine, status, created_at)
+    VALUES (?, 'STORE1', ?, ?, 1500000, 1500000, 'pending', ?)
+  `);
+  for (let index = 1; index <= 101; index += 1) {
+    const requestId = `P-${String(index).padStart(3, '0')}`;
+    const employeeId = index % 2 ? 'U1' : 'U2';
+    const businessDate = index % 2 ? '2026-07-14' : '2026-07-15';
+    insert.run(requestId, employeeId, businessDate, `2026-07-15T${String(index % 24).padStart(2, '0')}:00:00.000Z`);
+  }
+  database.exec(`
+    INSERT INTO absence_fine_notifications VALUES
+      ('P-001', 'ADMIN1', 'sent', 1, NULL, '2026-07-15T03:10:00.000Z', NULL),
+      ('P-003', 'ADMIN1', 'pending', 2, NULL, NULL, 'temporary failure'),
+      ('P-003', 'ADMIN2', 'failed', 3, NULL, NULL, 'permanent failure');
+  `);
+  return database;
+}
+
+async function getAdminAbsence(env, query = '') {
+  const response = await worker.fetch(new Request(
+    `https://example.com/api/admin/stores/STORE1/absence${query}`,
+    { headers: { cookie: 'staffbot_admin_session=absence-query-session' } }
+  ), env, { waitUntil() {} });
+  return { response, result: await response.json() };
+}
+
 function d1TestDatabase(database, afterFirst, hooks = {}) {
   function prepare(sql) {
     let params = [];
@@ -913,6 +1025,155 @@ test('approves an absence fine exactly once across replayed requests', async () 
   assert.equal(database.prepare(`SELECT COUNT(*) AS total FROM income_records`).get().total, 1);
   assert.equal(database.prepare(`SELECT status FROM absence_fine_requests WHERE request_id = 'ABS-1'`).get().status, 'approved');
   assert.equal(database.prepare(`SELECT COUNT(*) AS total FROM admin_audit_logs WHERE action = 'approve_absence_fine'`).get().total, 1);
+});
+
+test('store-scoped absence decisions reject mismatches and preserve rejection reasons', async () => {
+  const database = absenceTestDatabase();
+  database.exec(`
+    INSERT INTO absence_fine_requests
+      (request_id, store_id, telegram_id, business_date, original_fine, fine, status, created_at)
+    VALUES
+      ('ABS-2', 'STORE1', 'U2', '2026-07-14', 20, 20, 'pending', '2026-07-15T03:00:00.000Z'),
+      ('ABS-3', 'STORE1', 'U3', '2026-07-14', 30, 30, 'pending', '2026-07-15T03:00:00.000Z');
+  `);
+  const env = { DB: d1TestDatabase(database) };
+
+  const approved = await approveAbsenceFineRequest(env, 'ABS-1', 'ADMIN1', 'STORE1');
+  assert.equal(approved.ok, true);
+  assert.equal(database.prepare(
+    `SELECT COUNT(*) AS total FROM income_records WHERE source = 'attendance_absence'`
+  ).get().total, 1);
+
+  const wrongStore = await approveAbsenceFineRequest(env, 'ABS-2', 'ADMIN1', 'STORE2');
+  assert.equal(wrongStore.ok, false);
+
+  const rejected = await rejectAbsenceFineRequest(
+    env, 'ABS-3', 'ADMIN1', 'Employee had approved exception', 'STORE1'
+  );
+  assert.equal(rejected.ok, true);
+  assert.equal(database.prepare(
+    `SELECT reject_reason FROM absence_fine_requests WHERE request_id = 'ABS-3'`
+  ).get().reject_reason, 'Employee had approved exception');
+});
+
+test('admin absence action routes return 200, 404, and 409 for decision outcomes', async () => {
+  const database = absenceTestDatabase();
+  const env = absenceAdminApiEnv(database);
+  const ctx = { waitUntil() {} };
+
+  const approved = await worker.fetch(adminAbsenceRequest(
+    '/api/admin/stores/STORE1/absence/ABS-1/approve', {}
+  ), env, ctx);
+  assert.equal(approved.status, 200);
+
+  const mismatch = await worker.fetch(adminAbsenceRequest(
+    '/api/admin/stores/STORE2/absence/ABS-1/approve', {}
+  ), env, ctx);
+  assert.equal(mismatch.status, 404);
+
+  const alreadyDecided = await worker.fetch(adminAbsenceRequest(
+    '/api/admin/stores/STORE1/absence/ABS-1/approve', {}
+  ), env, ctx);
+  assert.equal(alreadyDecided.status, 409);
+
+  const concurrentDatabase = absenceTestDatabase();
+  let stoleDecision = false;
+  const concurrentEnv = absenceAdminApiEnv(concurrentDatabase, {
+    beforeBatchStatement(sql) {
+      if (stoleDecision || !/INSERT INTO income_records/.test(sql)) return;
+      stoleDecision = true;
+      concurrentDatabase.prepare(`
+        UPDATE absence_fine_requests SET status = 'rejected' WHERE request_id = 'ABS-1'
+      `).run();
+    }
+  });
+  const concurrent = await worker.fetch(adminAbsenceRequest(
+    '/api/admin/stores/STORE1/absence/ABS-1/approve', {}
+  ), concurrentEnv, ctx);
+  assert.equal(concurrent.status, 409);
+  assert.equal(concurrentDatabase.prepare(`SELECT COUNT(*) AS total FROM income_records`).get().total, 0);
+});
+
+test('requires absence rejection reason before changing a pending request', async () => {
+  for (const body of [{ reason: '   ' }, '{not valid json']) {
+    const database = absenceTestDatabase();
+    const env = absenceAdminApiEnv(database);
+    const response = await worker.fetch(adminAbsenceRequest(
+      '/api/admin/stores/STORE1/absence/ABS-1/reject', body
+    ), env, { waitUntil() {} });
+
+    assert.equal(response.status, 400);
+    assert.equal(database.prepare(`SELECT status FROM absence_fine_requests`).get().status, 'pending');
+  }
+});
+
+test('admin absence query separates pending and history while preserving summary across pagination', async () => {
+  const database = absenceAdminQueryDatabase();
+  const env = {
+    BOT_TOKEN: 'test-token', WEBHOOK_SECRET: 'test-secret', ADMIN_IDS: 'ADMIN1',
+    DB: d1TestDatabase(database)
+  };
+  const query = '?stores=STORE1%2CSTORE2&date_from=2026-07-01&date_to=2026-07-31';
+  const first = await getAdminAbsence(env, query);
+  const second = await getAdminAbsence(env, `${query}&pending_page=2`);
+
+  assert.equal(first.response.status, 200);
+  assert.equal(first.result.pending.length, 100);
+  assert.deepEqual(first.result.history.map((row) => row.status).sort(), [
+    'approved', 'approved', 'cancelled', 'rejected'
+  ]);
+  assert.equal(second.result.pending.length, 1);
+  assert.deepEqual(second.result.summary, first.result.summary);
+  assert.deepEqual(first.result.summary.status_counts, {
+    pending: 101, approved: 2, rejected: 1, cancelled: 1
+  });
+
+  const filtered = await getAdminAbsence(
+    env,
+    '?stores=STORE1%2CSTORE2&employee=U1&date_from=2026-07-10&date_to=2026-07-10&status=approved'
+  );
+  assert.equal(filtered.result.pending.length, 0);
+  assert.deepEqual(filtered.result.history.map((row) => row.request_id), ['APP-VND']);
+  assert.deepEqual(filtered.result.summary.status_counts, { approved: 1 });
+});
+
+test('absence notification summary distinguishes sent, not_queued, and retrying', async () => {
+  const database = absenceAdminQueryDatabase();
+  const env = {
+    BOT_TOKEN: 'test-token', WEBHOOK_SECRET: 'test-secret', ADMIN_IDS: 'ADMIN1',
+    DB: d1TestDatabase(database)
+  };
+  const { result } = await getAdminAbsence(env, '?pending_sort=request_id&pending_dir=asc');
+  const states = Object.fromEntries(
+    result.pending.slice(0, 3).map((row) => [row.request_id, row.notification_status])
+  );
+
+  assert.deepEqual(states, {
+    'P-001': 'sent',
+    'P-002': 'not_queued',
+    'P-003': 'retrying'
+  });
+  assert.deepEqual(result.summary.notification_counts, {
+    sent: 1, not_queued: 99, retrying: 1
+  });
+});
+
+test('absence totals by currency use actual approved fine records', async () => {
+  const database = absenceAdminQueryDatabase();
+  const env = {
+    BOT_TOKEN: 'test-token', WEBHOOK_SECRET: 'test-secret', ADMIN_IDS: 'ADMIN1',
+    DB: d1TestDatabase(database)
+  };
+  const { result } = await getAdminAbsence(env, '?stores=STORE1%2CSTORE2');
+
+  assert.deepEqual(result.summary.fine_totals, [
+    { currency: '$', amount: 20 },
+    { currency: '₫', amount: 3000000 }
+  ]);
+  assert.deepEqual(
+    result.history.filter((row) => row.status === 'approved').map((row) => row.actual_fine).sort((a, b) => a - b),
+    [20, 3000000]
+  );
 });
 
 test('reports only the winning concurrent absence decision as successful', async () => {

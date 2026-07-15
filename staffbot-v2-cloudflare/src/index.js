@@ -1113,10 +1113,12 @@ function mutationCount(result) {
   return Number(result && result.meta ? result.meta.changes : 0);
 }
 
-export async function approveAbsenceFineRequest(env, requestId, adminId) {
+export async function approveAbsenceFineRequest(env, requestId, adminId, expectedStoreId = '') {
+  const storeSql = expectedStoreId ? ` AND store_id = ?` : '';
+  const requestParams = expectedStoreId ? [requestId, expectedStoreId] : [requestId];
   const found = await env.DB.prepare(`
-    SELECT * FROM absence_fine_requests WHERE request_id = ? AND status = 'pending'
-  `).bind(requestId).first();
+    SELECT * FROM absence_fine_requests WHERE request_id = ? AND status = 'pending'${storeSql}
+  `).bind(...requestParams).first();
   if (!found) return { ok: false };
 
   const decidedAt = nowIso();
@@ -1127,35 +1129,36 @@ export async function approveAbsenceFineRequest(env, requestId, adminId) {
       INSERT INTO income_records
         (record_id, store_id, telegram_id, income, commission_rate, commission_income, original_fine, fine, type, source, request_id, approved_at, admin_id)
       SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
-      FROM absence_fine_requests WHERE request_id = ? AND status = 'pending'
+      FROM absence_fine_requests WHERE request_id = ? AND status = 'pending'${storeSql}
     `).bind(
       draft.record_id, draft.store_id, draft.telegram_id, draft.income, draft.commission_rate,
       draft.commission_income, draft.original_fine, draft.fine, draft.type, draft.source, draft.request_id,
-      draft.approved_at, draft.admin_id, requestId
+      draft.approved_at, draft.admin_id, ...requestParams
     ),
     env.DB.prepare(`
       UPDATE absence_fine_requests
       SET status = 'approved', decided_at = ?, admin_id = ?, income_record_id = ?
-      WHERE request_id = ? AND status = 'pending'
-    `).bind(decidedAt, adminId, recordId, requestId)
+      WHERE request_id = ? AND status = 'pending'${storeSql}
+    `).bind(decidedAt, adminId, recordId, ...requestParams)
   ]);
   if (mutationCount(results[1]) !== 1) return { ok: false };
   await audit(env, found.store_id, adminId, 'approve_absence_fine', requestId, found);
   return { ok: true, row: found, recordId };
 }
 
-export async function rejectAbsenceFineRequest(env, requestId, adminId) {
+export async function rejectAbsenceFineRequest(env, requestId, adminId, reason = 'Rejected by admin', expectedStoreId = '') {
+  const storeSql = expectedStoreId ? ` AND store_id = ?` : '';
+  const requestParams = expectedStoreId ? [requestId, expectedStoreId] : [requestId];
   const found = await env.DB.prepare(`
-    SELECT * FROM absence_fine_requests WHERE request_id = ? AND status = 'pending'
-  `).bind(requestId).first();
+    SELECT * FROM absence_fine_requests WHERE request_id = ? AND status = 'pending'${storeSql}
+  `).bind(...requestParams).first();
   if (!found) return { ok: false };
 
-  const reason = 'Rejected by admin';
   const result = await env.DB.prepare(`
     UPDATE absence_fine_requests
     SET status = 'rejected', decided_at = ?, admin_id = ?, reject_reason = ?
-    WHERE request_id = ? AND status = 'pending'
-  `).bind(nowIso(), adminId, reason, requestId).run();
+    WHERE request_id = ? AND status = 'pending'${storeSql}
+  `).bind(nowIso(), adminId, reason, ...requestParams).run();
   if (mutationCount(result) !== 1) return { ok: false };
   await audit(env, found.store_id, adminId, 'reject_absence_fine', requestId, { reason, ...found });
   return { ok: true, row: found, reason };
@@ -1754,6 +1757,7 @@ async function handleAdminApi(request, env, url, ctx) {
     if (parts[4] === 'salary') return handleAdminSalary(request, env, url, storeId, parts, session.telegram_id);
     if (parts[4] === 'advances') return handleAdminSalaryAdvances(request, env, url, storeId, parts, session.telegram_id);
     if (parts[4] === 'attendance') return handleAdminAttendance(request, env, url, storeId, parts, session.telegram_id);
+    if (parts[4] === 'absence') return handleAdminAbsence(request, env, url, storeId, parts, session.telegram_id);
     if (parts[4] === 'leave') return handleAdminLeave(request, env, url, storeId, parts, session.telegram_id);
     if (parts[4] === 'logs' && request.method === 'GET') {
       const result = await listPagedRows(
@@ -2662,6 +2666,167 @@ async function handleAdminLeave(request, env, url, storeId, parts, adminId) {
         await sendMessage(env, result.row.telegram_id, render(empLang, 'leave_rejected', { date: result.row.leave_date, reason: result.reason }));
       }
       return json(result);
+    }
+  }
+  return json({ ok: false, error: 'not_found' }, 404);
+}
+
+async function handleAdminAbsence(request, env, url, storeId, parts, adminId) {
+  if (parts.length === 5 && request.method === 'GET') {
+    const filters = await adminFilters(env, url, storeId, adminId);
+    if (!filters.ok) return json({ ok: false, error: filters.error }, filters.status);
+
+    const storeWhere = adminStoreWhere('r', filters.storeIds);
+    const baseWhere = [storeWhere.sql];
+    const baseParams = [...storeWhere.params];
+    if (filters.employeeId) {
+      baseWhere.push(`r.telegram_id = ?`);
+      baseParams.push(filters.employeeId);
+    }
+    addRangeFilter(baseWhere, baseParams, 'r.business_date', filters.monthDateStart, filters.monthDateEnd);
+    const status = String(url.searchParams.get('status') || '').trim();
+    if (['pending', 'approved', 'rejected', 'cancelled'].includes(status)) {
+      baseWhere.push(`r.status = ?`);
+      baseParams.push(status);
+    }
+
+    const pendingWhere = [...baseWhere, `r.status = 'pending'`];
+    const historyWhere = [...baseWhere, `r.status <> 'pending'`];
+    const selectSql = (where) => `
+      WITH notification AS (
+        SELECT
+          request_id,
+          COUNT(*) AS notification_total,
+          SUM(CASE WHEN status = 'sent' THEN 1 ELSE 0 END) AS sent_total,
+          MAX(attempts) AS notification_attempts,
+          MAX(last_error) AS notification_last_error
+        FROM absence_fine_notifications
+        GROUP BY request_id
+      )
+      SELECT
+        r.*,
+        s.name AS store_name,
+        s.currency,
+        COALESCE(NULLIF(m.display_name, ''), NULLIF(u.name, ''), NULLIF(u.username, ''), r.telegram_id) AS display_name,
+        u.username,
+        i.fine AS actual_fine,
+        COALESCE(i.fine, r.fine) AS current_fine,
+        CASE
+          WHEN n.request_id IS NULL THEN 'not_queued'
+          WHEN n.sent_total > 0 THEN 'sent'
+          ELSE 'retrying'
+        END AS notification_status,
+        COALESCE(n.notification_total, 0) AS notification_total,
+        COALESCE(n.notification_attempts, 0) AS notification_attempts,
+        n.notification_last_error
+      FROM absence_fine_requests r
+      JOIN stores s ON s.store_id = r.store_id
+      LEFT JOIN users u ON u.telegram_id = r.telegram_id
+      LEFT JOIN store_members m ON m.store_id = r.store_id AND m.telegram_id = r.telegram_id
+      LEFT JOIN income_records i
+        ON i.record_id = r.income_record_id
+       AND i.source = 'attendance_absence'
+      LEFT JOIN notification n ON n.request_id = r.request_id
+      WHERE ${where.join(' AND ')}
+    `;
+    const absenceSort = {
+      ...adminSortColumns([
+        'request_id','store_id','telegram_id','business_date','original_fine','fine','status',
+        'created_at','notified_at','decided_at','admin_id','reject_reason','cancellation_reason'
+      ], 'r'),
+      display_name: 'display_name',
+      username: 'u.username',
+      store_name: 's.name',
+      currency: 's.currency',
+      actual_fine: 'actual_fine',
+      notification_status: 'notification_status'
+    };
+    const pending = await listPagedRows(
+      env, url, 'pending_page', 'pending', selectSql(pendingWhere),
+      `SELECT COUNT(*) AS total FROM absence_fine_requests r WHERE ${pendingWhere.join(' AND ')}`,
+      baseParams, `ORDER BY r.business_date DESC, r.created_at DESC`, absenceSort
+    );
+    const history = await listPagedRows(
+      env, url, 'history_page', 'history', selectSql(historyWhere),
+      `SELECT COUNT(*) AS total FROM absence_fine_requests r WHERE ${historyWhere.join(' AND ')}`,
+      baseParams, `ORDER BY COALESCE(r.decided_at, r.created_at) DESC`, absenceSort
+    );
+    const statusRows = await env.DB.prepare(`
+      SELECT r.status, COUNT(*) AS total
+      FROM absence_fine_requests r
+      WHERE ${baseWhere.join(' AND ')}
+      GROUP BY r.status
+    `).bind(...baseParams).all();
+    const fineRows = await env.DB.prepare(`
+      SELECT s.currency, SUM(i.fine) AS amount
+      FROM absence_fine_requests r
+      JOIN stores s ON s.store_id = r.store_id
+      JOIN income_records i
+        ON i.record_id = r.income_record_id
+       AND i.source = 'attendance_absence'
+      WHERE ${baseWhere.join(' AND ')} AND r.status = 'approved'
+      GROUP BY s.currency
+      ORDER BY s.currency
+    `).bind(...baseParams).all();
+    const notificationRows = await env.DB.prepare(`
+      WITH notification AS (
+        SELECT request_id, SUM(CASE WHEN status = 'sent' THEN 1 ELSE 0 END) AS sent_total
+        FROM absence_fine_notifications
+        GROUP BY request_id
+      )
+      SELECT
+        CASE
+          WHEN n.request_id IS NULL THEN 'not_queued'
+          WHEN n.sent_total > 0 THEN 'sent'
+          ELSE 'retrying'
+        END AS status,
+        COUNT(*) AS total
+      FROM absence_fine_requests r
+      LEFT JOIN notification n ON n.request_id = r.request_id
+      WHERE ${pendingWhere.join(' AND ')}
+      GROUP BY 1
+    `).bind(...baseParams).all();
+    const statusCounts = Object.fromEntries(
+      (statusRows.results || []).map((row) => [row.status, Number(row.total)])
+    );
+    const notificationCounts = Object.fromEntries(
+      (notificationRows.results || []).map((row) => [row.status, Number(row.total)])
+    );
+    return json({
+      ok: true,
+      pending: pending.pending,
+      history: history.history,
+      summary: {
+        status_counts: statusCounts,
+        fine_totals: (fineRows.results || []).map((row) => ({
+          currency: row.currency,
+          amount: Number(row.amount || 0)
+        })),
+        notification_counts: notificationCounts
+      },
+      filters: { ...filters, status },
+      pagination: { pending: pending.pagination, history: history.pagination }
+    });
+  }
+  if (parts.length === 7 && request.method === 'POST') {
+    const requestId = decodeURIComponent(parts[5]);
+    const found = await env.DB.prepare(`
+      SELECT status FROM absence_fine_requests WHERE request_id = ? AND store_id = ?
+    `).bind(requestId, storeId).first();
+    if (!found) return json({ ok: false, error: 'not_found' }, 404);
+    if (found.status !== 'pending') return json({ ok: false, error: 'already_decided' }, 409);
+
+    if (parts[6] === 'approve') {
+      const result = await approveAbsenceFineRequest(env, requestId, adminId, storeId);
+      return json(result, result.ok ? 200 : 409);
+    }
+    if (parts[6] === 'reject') {
+      const body = await readJson(request);
+      if (typeof body.reason !== 'string' || !body.reason.trim()) {
+        return json({ ok: false, error: 'rejection_reason_required' }, 400);
+      }
+      const result = await rejectAbsenceFineRequest(env, requestId, adminId, body.reason.trim(), storeId);
+      return json(result, result.ok ? 200 : 409);
     }
   }
   return json({ ok: false, error: 'not_found' }, 404);
