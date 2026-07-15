@@ -1250,7 +1250,29 @@ test('admin absence action routes return 200, 404, and 409 for decision outcomes
     '/api/admin/stores/STORE1/absence/ABS-1/approve', {}
   ), concurrentEnv, ctx);
   assert.equal(concurrent.status, 409);
+  assert.deepEqual(await concurrent.json(), { ok: false, error: 'already_decided' });
   assert.equal(concurrentDatabase.prepare(`SELECT COUNT(*) AS total FROM income_records`).get().total, 0);
+
+  const rejectRaceDatabase = absenceTestDatabase();
+  let stoleRejectDecision = false;
+  const rejectRaceEnv = absenceAdminApiEnv(rejectRaceDatabase, {
+    beforeRun(sql) {
+      if (stoleRejectDecision || !/UPDATE absence_fine_requests[\s\S]*status = 'rejected'/.test(sql)) return;
+      stoleRejectDecision = true;
+      rejectRaceDatabase.prepare(`
+        UPDATE absence_fine_requests SET status = 'approved' WHERE request_id = 'ABS-1'
+      `).run();
+    }
+  });
+  const rejectRace = await worker.fetch(adminAbsenceRequest(
+    '/api/admin/stores/STORE1/absence/ABS-1/reject', { reason: 'Not excused' }
+  ), rejectRaceEnv, ctx);
+  assert.equal(rejectRace.status, 409);
+  assert.deepEqual(await rejectRace.json(), { ok: false, error: 'already_decided' });
+  assert.equal(rejectRaceDatabase.prepare(`SELECT status FROM absence_fine_requests`).get().status, 'approved');
+
+  assert.match(source, /throw new Error\(data\.error \|\| 'request_failed'\)/);
+  assert.match(source, /error\.message === 'already_decided' \? 'absence_already_processed'/);
 });
 
 test('requires absence rejection reason before changing a pending request', async () => {

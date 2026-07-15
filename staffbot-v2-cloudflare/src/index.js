@@ -2818,7 +2818,9 @@ async function handleAdminAbsence(request, env, url, storeId, parts, adminId) {
 
     if (parts[6] === 'approve') {
       const result = await approveAbsenceFineRequest(env, requestId, adminId, storeId);
-      return json(result, result.ok ? 200 : 409);
+      return result.ok
+        ? json(result)
+        : json({ ...result, error: 'already_decided' }, 409);
     }
     if (parts[6] === 'reject') {
       const body = await readJson(request);
@@ -2829,7 +2831,9 @@ async function handleAdminAbsence(request, env, url, storeId, parts, adminId) {
         return json({ ok: false, error: 'rejection_reason_required' }, 400);
       }
       const result = await rejectAbsenceFineRequest(env, requestId, adminId, reason, storeId);
-      return json(result, result.ok ? 200 : 409);
+      return result.ok
+        ? json(result)
+        : json({ ...result, error: 'already_decided' }, 409);
     }
   }
   return json({ ok: false, error: 'not_found' }, 404);
