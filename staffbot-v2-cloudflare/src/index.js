@@ -3086,7 +3086,19 @@ async function editCallbackMessage(env, callback, text) {
   });
 }
 
-async function telegram(env, method, payload) {
+export async function telegram(env, method, payload) {
+  if (!isTelegramRecipientAllowed(env, payload)) {
+    await logEvent(env, 'warn', 'staging_telegram_recipient_blocked', {
+      telegram_id: String(payload.chat_id),
+      method
+    });
+    return {
+      ok: false,
+      error_code: 403,
+      description: 'staging_recipient_blocked'
+    };
+  }
+
   const response = await fetch(`https://api.telegram.org/bot${env.BOT_TOKEN}/${method}`, {
     method: 'POST',
     headers: JSON_HEADERS,
@@ -3498,6 +3510,30 @@ function safeJson(text) {
   } catch {
     return {};
   }
+}
+
+export function serviceEnvironment(env) {
+  const value = String(env && env.ENVIRONMENT || '').trim().toLowerCase();
+  if (value === 'production' || value === 'staging') return value;
+  return 'unknown';
+}
+
+export function parseTelegramAllowlist(value) {
+  return new Set(
+    String(value || '')
+      .split(',')
+      .map((id) => id.trim())
+      .filter(Boolean)
+  );
+}
+
+export function isTelegramRecipientAllowed(env, payload) {
+  const environment = serviceEnvironment(env);
+  if (environment === 'production') return true;
+  if (environment !== 'staging') return false;
+  if (!payload || payload.chat_id === undefined || payload.chat_id === null) return true;
+  if (String(env.TELEGRAM_RECIPIENT_MODE || '').toLowerCase() !== 'allowlist') return false;
+  return parseTelegramAllowlist(env.STAGING_ALLOWED_TELEGRAM_IDS).has(String(payload.chat_id));
 }
 
 export function isWebhookConfigReady(env) {

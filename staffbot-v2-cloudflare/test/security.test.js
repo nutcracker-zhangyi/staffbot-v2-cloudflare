@@ -3,12 +3,127 @@ import assert from 'node:assert/strict';
 
 import {
   csvCell,
+  isTelegramRecipientAllowed,
   isWebhookConfigReady,
   nextLoginFailureState,
+  parseTelegramAllowlist,
   sanitizeLogPayload,
   securityHeaders,
+  serviceEnvironment,
+  telegram,
   webhookSecretMatches
 } from '../src/index.js';
+
+test('requires an explicit service environment', () => {
+  assert.equal(serviceEnvironment({}), 'unknown');
+  assert.equal(serviceEnvironment({ ENVIRONMENT: 'production' }), 'production');
+  assert.equal(serviceEnvironment({ ENVIRONMENT: 'staging' }), 'staging');
+  assert.equal(serviceEnvironment({ ENVIRONMENT: 'typo' }), 'unknown');
+});
+
+test('parses a normalized Telegram recipient allowlist', () => {
+  assert.deepEqual(
+    [...parseTelegramAllowlist(' 1001,1002,1001 ,, ')],
+    ['1001', '1002']
+  );
+  assert.deepEqual([...parseTelegramAllowlist('')], []);
+});
+
+test('blocks non-allowlisted staging Telegram chat recipients', () => {
+  const env = {
+    ENVIRONMENT: 'staging',
+    TELEGRAM_RECIPIENT_MODE: 'allowlist',
+    STAGING_ALLOWED_TELEGRAM_IDS: '1001,1002'
+  };
+  assert.equal(isTelegramRecipientAllowed(env, { chat_id: '1001' }), true);
+  assert.equal(isTelegramRecipientAllowed(env, { chat_id: 1002 }), true);
+  assert.equal(isTelegramRecipientAllowed(env, { chat_id: '9999' }), false);
+  assert.equal(
+    isTelegramRecipientAllowed(
+      {
+        ENVIRONMENT: 'staging',
+        STAGING_ALLOWED_TELEGRAM_IDS: '1001'
+      },
+      { chat_id: '1001' }
+    ),
+    false
+  );
+});
+
+test('keeps production and callback-only Telegram calls available', () => {
+  assert.equal(
+    isTelegramRecipientAllowed(
+      { ENVIRONMENT: 'production' },
+      { chat_id: '9999' }
+    ),
+    true
+  );
+  assert.equal(
+    isTelegramRecipientAllowed(
+      {
+        ENVIRONMENT: 'staging',
+        TELEGRAM_RECIPIENT_MODE: 'allowlist',
+        STAGING_ALLOWED_TELEGRAM_IDS: '1001'
+      },
+      { callback_query_id: 'callback-1' }
+    ),
+    true
+  );
+  assert.equal(
+    isTelegramRecipientAllowed(
+      { ENVIRONMENT: 'unknown' },
+      { callback_query_id: 'callback-2' }
+    ),
+    false
+  );
+});
+
+test('does not call Telegram API for a blocked staging recipient', async () => {
+  const originalFetch = globalThis.fetch;
+  let fetchCalls = 0;
+  globalThis.fetch = async () => {
+    fetchCalls += 1;
+    return { json: async () => ({ ok: true }) };
+  };
+
+  const logged = [];
+  const env = {
+    ENVIRONMENT: 'staging',
+    TELEGRAM_RECIPIENT_MODE: 'allowlist',
+    STAGING_ALLOWED_TELEGRAM_IDS: '1001',
+    BOT_TOKEN: 'test-token',
+    DB: {
+      prepare() {
+        return {
+          bind(...params) {
+            return {
+              async run() {
+                logged.push(params);
+                return { success: true };
+              }
+            };
+          }
+        };
+      }
+    }
+  };
+
+  try {
+    const result = await telegram(env, 'sendMessage', {
+      chat_id: '9999',
+      text: 'must not leave staging'
+    });
+    assert.equal(fetchCalls, 0);
+    assert.deepEqual(result, {
+      ok: false,
+      error_code: 403,
+      description: 'staging_recipient_blocked'
+    });
+    assert.equal(logged.length, 1);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
 
 test('prefixes CSV cells that spreadsheet apps would treat as formulas', () => {
   assert.equal(csvCell('=IMPORTXML("https://example.com")'), '"\'=IMPORTXML(""https://example.com"")"');

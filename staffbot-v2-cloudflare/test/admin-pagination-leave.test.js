@@ -104,6 +104,7 @@ function absenceAdminApiEnv(database, hooks = {}) {
     );
   `);
   return {
+    ENVIRONMENT: 'production',
     BOT_TOKEN: 'test-token',
     WEBHOOK_SECRET: 'test-secret',
     ADMIN_IDS: 'ADMIN1',
@@ -983,6 +984,7 @@ test('normalizes employee absence check updates without resetting an enabled tim
 test('rejects invalid explicit absence check values without changing member work', async () => {
   const database = memberAbsenceTestDatabase();
   const env = {
+    ENVIRONMENT: 'production',
     BOT_TOKEN: 'test-token', WEBHOOK_SECRET: 'test-secret', ADMIN_IDS: 'ADMIN',
     DB: d1TestDatabase(database)
   };
@@ -1012,6 +1014,7 @@ test('rejects invalid explicit absence check values without changing member work
 test('disabling absence checks cancels only matching pending work', async () => {
   const database = memberAbsenceTestDatabase();
   const env = {
+    ENVIRONMENT: 'production',
     BOT_TOKEN: 'test-token',
     WEBHOOK_SECRET: 'test-secret',
     ADMIN_IDS: 'ADMIN',
@@ -1069,6 +1072,7 @@ test('disabling absence checks cancels only matching pending work', async () => 
 test('rolls back the employee switch and cancellations when its audit insert fails', async () => {
   const database = memberAbsenceTestDatabase();
   const env = {
+    ENVIRONMENT: 'production',
     BOT_TOKEN: 'test-token', WEBHOOK_SECRET: 'test-secret', ADMIN_IDS: 'ADMIN',
     DB: d1TestDatabase(database, null, {
       beforeBatchStatement(sql) {
@@ -1104,6 +1108,7 @@ test('rolls back the employee switch and cancellations when its audit insert fai
 test('new member defaults to enabled employee absence check when switch is omitted', async () => {
   const database = memberAbsenceTestDatabase();
   const env = {
+    ENVIRONMENT: 'production',
     BOT_TOKEN: 'test-token',
     WEBHOOK_SECRET: 'test-secret',
     ADMIN_IDS: 'ADMIN',
@@ -1306,6 +1311,7 @@ test('requires absence rejection reason before changing a pending request', asyn
 test('admin absence query separates pending and history while preserving summary across pagination', async () => {
   const database = absenceAdminQueryDatabase();
   const env = {
+    ENVIRONMENT: 'production',
     BOT_TOKEN: 'test-token', WEBHOOK_SECRET: 'test-secret', ADMIN_IDS: 'ADMIN1',
     DB: d1TestDatabase(database)
   };
@@ -1336,6 +1342,7 @@ test('admin absence query separates pending and history while preserving summary
 test('admin absence runtime applies delivery and history-only sort expressions', async () => {
   const database = absenceAdminQueryDatabase();
   const env = {
+    ENVIRONMENT: 'production',
     BOT_TOKEN: 'test-token', WEBHOOK_SECRET: 'test-secret', ADMIN_IDS: 'ADMIN1',
     DB: d1TestDatabase(database)
   };
@@ -1356,6 +1363,7 @@ test('admin absence runtime applies delivery and history-only sort expressions',
 test('absence notification summary distinguishes sent, not_queued, and retrying', async () => {
   const database = absenceAdminQueryDatabase();
   const env = {
+    ENVIRONMENT: 'production',
     BOT_TOKEN: 'test-token', WEBHOOK_SECRET: 'test-secret', ADMIN_IDS: 'ADMIN1',
     DB: d1TestDatabase(database)
   };
@@ -1382,6 +1390,7 @@ test('absence notification summary distinguishes sent, not_queued, and retrying'
 test('admin absence rows expose their own store timezone for date rendering', async () => {
   const database = absenceAdminQueryDatabase();
   const env = {
+    ENVIRONMENT: 'production',
     BOT_TOKEN: 'test-token', WEBHOOK_SECRET: 'test-secret', ADMIN_IDS: 'ADMIN1',
     DB: d1TestDatabase(database)
   };
@@ -1395,6 +1404,7 @@ test('admin absence rows expose their own store timezone for date rendering', as
 test('absence totals by currency use actual approved fine records', async () => {
   const database = absenceAdminQueryDatabase();
   const env = {
+    ENVIRONMENT: 'production',
     BOT_TOKEN: 'test-token', WEBHOOK_SECRET: 'test-secret', ADMIN_IDS: 'ADMIN1',
     DB: d1TestDatabase(database)
   };
@@ -1577,7 +1587,7 @@ test('reconciles an already-approved leave with its uncancelled absence', async 
 test('keeps failed Telegram absence notifications pending and retries them', async () => {
   const database = notificationTestDatabase();
   database.prepare(`INSERT INTO absence_fine_notifications (request_id, admin_id) VALUES ('ABS-1', 'A1')`).run();
-  const env = { BOT_TOKEN: 'test', DB: d1TestDatabase(database) };
+  const env = { ENVIRONMENT: 'production', BOT_TOKEN: 'test', DB: d1TestDatabase(database) };
   const originalFetch = globalThis.fetch;
   const results = [{ ok: false, description: 'blocked' }, { ok: true, result: { message_id: 1 } }];
   globalThis.fetch = async () => new Response(JSON.stringify(results.shift()), {
@@ -1601,7 +1611,7 @@ test('tracks partial multi-admin notification success independently', async () =
     INSERT INTO absence_fine_notifications (request_id, admin_id) VALUES ('ABS-1', 'A1');
     INSERT INTO absence_fine_notifications (request_id, admin_id) VALUES ('ABS-1', 'A2');
   `);
-  const env = { BOT_TOKEN: 'test', DB: d1TestDatabase(database) };
+  const env = { ENVIRONMENT: 'production', BOT_TOKEN: 'test', DB: d1TestDatabase(database) };
   const originalFetch = globalThis.fetch;
   globalThis.fetch = async (_url, options) => {
     const adminId = JSON.parse(options.body).chat_id;
@@ -1626,7 +1636,7 @@ test('tracks partial multi-admin notification success independently', async () =
 test('atomically claims an absence notification across overlapping Cron runs', async () => {
   const database = notificationTestDatabase();
   database.prepare(`INSERT INTO absence_fine_notifications (request_id, admin_id) VALUES ('ABS-1', 'A1')`).run();
-  const env = { BOT_TOKEN: 'test', DB: d1TestDatabase(database) };
+  const env = { ENVIRONMENT: 'production', BOT_TOKEN: 'test', DB: d1TestDatabase(database) };
   const originalFetch = globalThis.fetch;
   let sends = 0;
   globalThis.fetch = async () => {
@@ -1651,6 +1661,7 @@ test('does not send when the employee is disabled after claim and before final f
   database.prepare(`INSERT INTO absence_fine_notifications (request_id, admin_id) VALUES ('ABS-1', 'A1')`).run();
   let adminReads = 0;
   const env = {
+    ENVIRONMENT: 'production',
     BOT_TOKEN: 'test', ADMIN_IDS: '',
     DB: d1TestDatabase(database, async (sql) => {
       if (!/role IN \('admin', 'owner'\)/.test(sql)) return;
@@ -1687,7 +1698,7 @@ test('cancels a queued absence notification when admin access was revoked', asyn
   const database = notificationTestDatabase();
   database.prepare(`INSERT INTO absence_fine_notifications (request_id, admin_id) VALUES ('ABS-1', 'A1')`).run();
   database.prepare(`UPDATE store_members SET status = 'disabled' WHERE telegram_id = 'A1'`).run();
-  const env = { BOT_TOKEN: 'test', ADMIN_IDS: '', DB: d1TestDatabase(database) };
+  const env = { ENVIRONMENT: 'production', BOT_TOKEN: 'test', ADMIN_IDS: '', DB: d1TestDatabase(database) };
   const originalFetch = globalThis.fetch;
   let sends = 0;
   globalThis.fetch = async () => { sends += 1; return new Response(JSON.stringify({ ok: true })); };
@@ -1706,7 +1717,7 @@ test('cancels a queued notification when its absence request was already decided
   const database = notificationTestDatabase();
   database.prepare(`INSERT INTO absence_fine_notifications (request_id, admin_id) VALUES ('ABS-1', 'A1')`).run();
   database.prepare(`UPDATE absence_fine_requests SET status = 'approved' WHERE request_id = 'ABS-1'`).run();
-  const env = { BOT_TOKEN: 'test', ADMIN_IDS: '', DB: d1TestDatabase(database) };
+  const env = { ENVIRONMENT: 'production', BOT_TOKEN: 'test', ADMIN_IDS: '', DB: d1TestDatabase(database) };
   const originalFetch = globalThis.fetch;
   let sends = 0;
   globalThis.fetch = async () => { sends += 1; return new Response(JSON.stringify({ ok: true })); };
@@ -1727,7 +1738,7 @@ test('does not steal a fresh sending notification lease', async () => {
     INSERT INTO absence_fine_notifications (request_id, admin_id, status, claimed_at)
     VALUES ('ABS-1', 'A1', 'sending', '2026-07-15T03:05:00.000Z')
   `).run();
-  const env = { BOT_TOKEN: 'test', ADMIN_IDS: '', DB: d1TestDatabase(database) };
+  const env = { ENVIRONMENT: 'production', BOT_TOKEN: 'test', ADMIN_IDS: '', DB: d1TestDatabase(database) };
   const originalFetch = globalThis.fetch;
   let sends = 0;
   globalThis.fetch = async () => { sends += 1; return new Response(JSON.stringify({ ok: true })); };
@@ -1750,7 +1761,7 @@ test('recovers a sending notification lease older than fifteen minutes', async (
     INSERT INTO absence_fine_notifications (request_id, admin_id, status, claimed_at)
     VALUES ('ABS-1', 'A1', 'sending', '2026-07-15T02:54:59.000Z')
   `).run();
-  const env = { BOT_TOKEN: 'test', ADMIN_IDS: '', DB: d1TestDatabase(database) };
+  const env = { ENVIRONMENT: 'production', BOT_TOKEN: 'test', ADMIN_IDS: '', DB: d1TestDatabase(database) };
   const originalFetch = globalThis.fetch;
   let sends = 0;
   globalThis.fetch = async () => { sends += 1; return new Response(JSON.stringify({ ok: true }), { headers: { 'content-type': 'application/json' } }); };
@@ -1771,6 +1782,7 @@ test('rechecks employee eligibility when inserting an absence after candidate di
   const database = absenceCronTestDatabase();
   let disabled = false;
   const env = {
+    ENVIRONMENT: 'production',
     BOT_TOKEN: 'test', ADMIN_IDS: '',
     DB: d1TestDatabase(database, null, {
       beforeRun(sql) {
@@ -1800,6 +1812,7 @@ test('rechecks request and employee state when inserting a notification from a s
   `);
   let disabled = false;
   const env = {
+    ENVIRONMENT: 'production',
     BOT_TOKEN: 'test', ADMIN_IDS: '',
     DB: d1TestDatabase(database, null, {
       beforeRun(sql) {
@@ -1833,6 +1846,7 @@ test('discovers each absence once while excluding an exempt employee and a not-y
   const notifications = [];
   const outbox = [];
   const env = {
+    ENVIRONMENT: 'production',
     BOT_TOKEN: 'test-token',
     ADMIN_IDS: '',
     DB: {
