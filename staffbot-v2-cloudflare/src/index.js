@@ -220,11 +220,16 @@ export default {
     const url = new URL(request.url);
 
     if (request.method === 'GET' && url.pathname === '/') {
-      return json({ ok: true, service: 'staffbot-v2', admin: '/admin' });
+      return json({
+        ok: true,
+        service: 'staffbot-v2',
+        environment: serviceEnvironment(env),
+        admin: '/admin'
+      });
     }
 
     if (request.method === 'GET' && url.pathname === '/admin') {
-      return html(adminHtml());
+      return html(adminHtml(env));
     }
 
     if (url.pathname.startsWith('/api/admin/')) {
@@ -252,6 +257,7 @@ export default {
   },
 
   async scheduled(controller, env, ctx) {
+    if (!scheduledTasksEnabled(env)) return;
     ctx.waitUntil(processAbsenceFines(env, new Date(controller.scheduledTime)));
   }
 };
@@ -3536,6 +3542,11 @@ export function isTelegramRecipientAllowed(env, payload) {
   return parseTelegramAllowlist(env.STAGING_ALLOWED_TELEGRAM_IDS).has(String(payload.chat_id));
 }
 
+export function scheduledTasksEnabled(env) {
+  return !!(env && (env.SCHEDULED_TASKS_ENABLED === true
+    || String(env.SCHEDULED_TASKS_ENABLED || '').toLowerCase() === 'true'));
+}
+
 export function isWebhookConfigReady(env) {
   return !!(env && env.BOT_TOKEN && env.WEBHOOK_SECRET);
 }
@@ -4122,7 +4133,10 @@ export function csvCell(value) {
   return safe;
 }
 
-function adminHtml() {
+function adminHtml(env) {
+  const stagingBanner = serviceEnvironment(env) === 'staging'
+    ? '<div class="staging-banner" role="status">STAGING 测试环境</div>'
+    : '';
   return `<!doctype html>
 <html lang="zh-CN">
 <head>
@@ -4201,10 +4215,12 @@ function adminHtml() {
     .summary-detail { margin-top:4px; font-size:12px; line-height:1.45; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
     .employee-name-cell { min-width:160px; font-weight:600; }
     .metric-cell { text-align:right; font-variant-numeric:tabular-nums; }
+    .staging-banner { padding:10px 24px; background:#7f1d1d; color:#fff; font-weight:700; text-align:center; letter-spacing:.04em; }
     @media (max-width: 720px) { main { padding:12px; } table { min-width:820px; } header { align-items:flex-start; flex-direction:column; padding:14px 12px; } .toolbar, .member-filter { align-items:stretch; } .member-filter > * { width:100%; } input, select, button { min-height:44px; } nav button { min-height:40px; } }
   </style>
 </head>
 <body>
+  ${stagingBanner}
   <header>
     <h1>StaffBot Admin</h1>
     <div class="row">

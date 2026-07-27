@@ -1,13 +1,14 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import {
+import worker, {
   csvCell,
   isTelegramRecipientAllowed,
   isWebhookConfigReady,
   nextLoginFailureState,
   parseTelegramAllowlist,
   sanitizeLogPayload,
+  scheduledTasksEnabled,
   securityHeaders,
   serviceEnvironment,
   telegram,
@@ -123,6 +124,59 @@ test('does not call Telegram API for a blocked staging recipient', async () => {
   } finally {
     globalThis.fetch = originalFetch;
   }
+});
+
+test('only runs scheduled tasks when explicitly enabled', () => {
+  assert.equal(scheduledTasksEnabled(undefined), false);
+  assert.equal(scheduledTasksEnabled({}), false);
+  assert.equal(scheduledTasksEnabled({ SCHEDULED_TASKS_ENABLED: 'false' }), false);
+  assert.equal(scheduledTasksEnabled({ SCHEDULED_TASKS_ENABLED: 'true' }), true);
+  assert.equal(scheduledTasksEnabled({ SCHEDULED_TASKS_ENABLED: true }), true);
+});
+
+test('does not queue scheduled work when automation is disabled', async () => {
+  let waitUntilCalls = 0;
+  await worker.scheduled(
+    { scheduledTime: Date.parse('2026-07-28T03:10:00.000Z') },
+    { SCHEDULED_TASKS_ENABLED: 'false' },
+    {
+      waitUntil(promise) {
+        waitUntilCalls += 1;
+        Promise.resolve(promise).catch(() => {});
+      }
+    }
+  );
+  assert.equal(waitUntilCalls, 0);
+});
+
+test('identifies staging in health and admin responses', async () => {
+  const context = { waitUntil() {} };
+  const stagingEnv = { ENVIRONMENT: 'staging' };
+  const health = await worker.fetch(
+    new Request('https://staffbot.example/'),
+    stagingEnv,
+    context
+  );
+  assert.deepEqual(await health.json(), {
+    ok: true,
+    service: 'staffbot-v2',
+    environment: 'staging',
+    admin: '/admin'
+  });
+
+  const stagingAdmin = await worker.fetch(
+    new Request('https://staffbot.example/admin'),
+    stagingEnv,
+    context
+  );
+  assert.match(await stagingAdmin.text(), /STAGING 测试环境/);
+
+  const productionAdmin = await worker.fetch(
+    new Request('https://staffbot.example/admin'),
+    { ENVIRONMENT: 'production' },
+    context
+  );
+  assert.doesNotMatch(await productionAdmin.text(), /STAGING 测试环境/);
 });
 
 test('prefixes CSV cells that spreadsheet apps would treat as formulas', () => {
