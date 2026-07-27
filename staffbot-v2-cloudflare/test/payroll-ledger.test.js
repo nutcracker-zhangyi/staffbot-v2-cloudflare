@@ -18,6 +18,14 @@ const payrollLedgerMigration = readFileSync(
   new URL('../db/migrations/019_payroll_entries.sql', import.meta.url),
   'utf8'
 );
+const payrollLedgerPreflight = readFileSync(
+  new URL('../db/audits/019_payroll_ledger_preflight.sql', import.meta.url),
+  'utf8'
+);
+const payrollLedgerBackfill = readFileSync(
+  new URL('../db/migrations/020_backfill_payroll_entries.sql', import.meta.url),
+  'utf8'
+);
 
 function ledgerFixture() {
   const database = new DatabaseSync(':memory:');
@@ -37,6 +45,50 @@ function insertLedgerEntry(database, entry) {
       :reverses_entry_id, :metadata_json
     )
   `).run(entry);
+}
+
+function legacyMigrationFixture() {
+  const database = ledgerFixture();
+  database.exec(`
+    INSERT INTO stores (
+      store_id, name, status, timezone, currency, created_at, updated_at
+    ) VALUES (
+      'STORE-1', 'Store One', 'active', 'Asia/Tokyo', '₫',
+      '2026-07-01T00:00:00.000Z', '2026-07-01T00:00:00.000Z'
+    );
+    INSERT INTO store_members (
+      store_id, telegram_id, display_name, role, status, commission_rate,
+      cycle_start, joined_at, updated_at
+    ) VALUES (
+      'STORE-1', 'EMP-1', 'Employee One', 'employee', 'active', 0.6,
+      '2026-07-01T00:00:00.000Z', '2026-07-01T00:00:00.000Z',
+      '2026-07-01T00:00:00.000Z'
+    );
+  `);
+  return database;
+}
+
+function insertLegacyRecord(database, record) {
+  database.prepare(`
+    INSERT INTO income_records (
+      record_id, store_id, telegram_id, income, commission_rate,
+      commission_income, original_fine, fine, type, source,
+      request_id, approved_at, admin_id
+    ) VALUES (
+      :record_id, 'STORE-1', 'EMP-1', :income, 0.6,
+      :commission_income, :original_fine, :fine, :type, :source,
+      :request_id, :approved_at, 'ADMIN-1'
+    )
+  `).run({
+    income: 0,
+    commission_income: 0,
+    original_fine: 0,
+    fine: 0,
+    source: 'manual',
+    request_id: null,
+    approved_at: '2026-07-15T03:10:00.000Z',
+    ...record
+  });
 }
 
 test('converts store currency amounts to six-decimal integer micros', () => {
@@ -354,5 +406,137 @@ test('ledger schema prevents duplicate sources and duplicate reversals', () => {
       entry_id: 'PAY-REVERSAL-2'
     }),
     /UNIQUE constraint failed/
+  );
+});
+
+test('preflight reports unknown and zero-effect legacy rows separately', () => {
+  const database = legacyMigrationFixture();
+  insertLegacyRecord(database, {
+    record_id: 'REC-INCOME',
+    type: 'income',
+    income: 100,
+    commission_income: 60,
+    request_id: 'INC-1'
+  });
+  insertLegacyRecord(database, {
+    record_id: 'REC-ZERO-FINE',
+    type: 'fine',
+    original_fine: 1.5,
+    fine: 0,
+    source: 'attendance_late',
+    request_id: 'ATT-1'
+  });
+  insertLegacyRecord(database, {
+    record_id: 'REC-UNKNOWN',
+    type: 'mystery',
+    request_id: 'UNKNOWN-1'
+  });
+
+  assert.deepEqual({ ...database.prepare(payrollLedgerPreflight).get() }, {
+    unknown_type_rows: 1,
+    missing_required_rows: 0,
+    sub_micro_precision_rows: 0,
+    unsafe_integer_rows: 0,
+    missing_store_rows: 0,
+    missing_member_rows: 0,
+    duplicate_identity_rows: 0,
+    zero_effect_rows: 1
+  });
+});
+
+test('backfill stops before inserting when a legacy type is unknown', () => {
+  const database = legacyMigrationFixture();
+  insertLegacyRecord(database, {
+    record_id: 'REC-INCOME',
+    type: 'income',
+    income: 100,
+    commission_income: 60,
+    request_id: 'INC-1'
+  });
+  insertLegacyRecord(database, {
+    record_id: 'REC-UNKNOWN',
+    type: 'mystery',
+    request_id: 'UNKNOWN-1'
+  });
+
+  assert.throws(
+    () => database.exec(payrollLedgerBackfill),
+    /CHECK constraint failed/
+  );
+  assert.equal(
+    database.prepare(`SELECT COUNT(*) AS total FROM payroll_entries`).get().total,
+    0
+  );
+});
+
+test('backfill maps supported non-zero rows exactly and is idempotent', () => {
+  const database = legacyMigrationFixture();
+  insertLegacyRecord(database, {
+    record_id: 'REC-INCOME',
+    type: 'income',
+    income: 100,
+    commission_income: 60,
+    request_id: 'INC-1'
+  });
+  insertLegacyRecord(database, {
+    record_id: 'REC-FINE',
+    type: 'fine',
+    original_fine: 5,
+    fine: 5,
+    source: 'manual_fine',
+    request_id: 'FINE-1'
+  });
+  insertLegacyRecord(database, {
+    record_id: 'REC-ADVANCE',
+    type: 'advance',
+    original_fine: 20,
+    fine: 20,
+    source: 'salary_advance',
+    request_id: 'ADV-1'
+  });
+  insertLegacyRecord(database, {
+    record_id: 'REC-ZERO-FINE',
+    type: 'fine',
+    original_fine: 1.5,
+    fine: 0,
+    source: 'attendance_late',
+    request_id: 'ATT-1'
+  });
+
+  database.exec(payrollLedgerBackfill);
+  database.exec(payrollLedgerBackfill);
+
+  assert.deepEqual(
+    database.prepare(`
+      SELECT entry_id, type, amount_micros, currency, source, source_id
+      FROM payroll_entries
+      ORDER BY entry_id
+    `).all().map((row) => ({ ...row })),
+    [
+      {
+        entry_id: 'PAY-MIG-REC-ADVANCE',
+        type: 'advance',
+        amount_micros: -20_000_000,
+        currency: '₫',
+        source: 'salary_advance',
+        source_id: 'REC-ADVANCE'
+      },
+      {
+        entry_id: 'PAY-MIG-REC-FINE',
+        type: 'fine',
+        amount_micros: -5_000_000,
+        currency: '₫',
+        source: 'manual_fine',
+        source_id: 'REC-FINE'
+      },
+      {
+        entry_id: 'PAY-MIG-REC-INCOME',
+        type: 'income',
+        amount_micros: 60_000_000,
+        currency: '₫',
+        source: 'manual',
+        source_id: 'REC-INCOME'
+      }
+    ]
   );
 });
