@@ -13,5 +13,30 @@ crons = ["10 * * * *"]
 
 [vars]
 CURRENCY = "$"
+ENVIRONMENT = "production"
+SCHEDULED_TASKS_ENABLED = "true"
+TELEGRAM_RECIPIENT_MODE = "all"
 # Put non-secret local defaults here only.
 # Use `wrangler secret put BOT_TOKEN`, `WEBHOOK_SECRET`, and `ADMIN_IDS`.
+
+[env.staging]
+workers_dev = true
+
+[[env.staging.d1_databases]]
+binding = "DB"
+database_name = "staffbot_v2_staging"
+database_id = "b4330cfc-55af-4466-ba12-1ab9d0eaa352"
+migrations_dir = "db/migrations"
+
+[[env.staging.r2_buckets]]
+binding = "PAYROLL_PROOFS"
+bucket_name = "staffbot-v2-payroll-proofs-staging"
+
+[env.staging.vars]
+CURRENCY = "$"
+ENVIRONMENT = "staging"
+SCHEDULED_TASKS_ENABLED = "false"
+TELEGRAM_RECIPIENT_MODE = "allowlist"
+
+[env.staging.triggers]
+crons = []
