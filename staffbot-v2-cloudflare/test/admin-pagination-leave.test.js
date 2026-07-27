@@ -48,8 +48,9 @@ import {
   processAbsenceFines
 } from '../src/absence.js';
 
-const source = readFileSync(new URL('../src/index.js', import.meta.url), 'utf8');
+const source = readFileSync(new URL('../src/admin-page.js', import.meta.url), 'utf8');
 const adminApiSource = readFileSync(new URL('../src/admin-api.js', import.meta.url), 'utf8');
+const routerSource = readFileSync(new URL('../src/router.js', import.meta.url), 'utf8');
 const absenceSource = readFileSync(new URL('../src/absence.js', import.meta.url), 'utf8');
 const approvalsSource = readFileSync(new URL('../src/approvals.js', import.meta.url), 'utf8');
 const moneySource = readFileSync(new URL('../src/money.js', import.meta.url), 'utf8');
@@ -1935,8 +1936,8 @@ test('discovers each absence once while excluding an exempt employee and a not-y
 });
 
 test('registers the absence scan as an hourly Worker Cron', () => {
-  assert.match(source, /async scheduled\(controller, env, ctx\)/);
-  assert.match(source, /ctx\.waitUntil\(processAbsenceFines\(env, new Date\(controller\.scheduledTime\)\)\)/);
+  assert.match(routerSource, /async scheduled\(controller, env, ctx\)/);
+  assert.match(routerSource, /ctx\.waitUntil\(processAbsenceFines\(env, new Date\(controller\.scheduledTime\)\)\)/);
   assert.match(wrangler, /\[triggers\]\s+crons = \["10 \* \* \* \*"\]/);
 });
 

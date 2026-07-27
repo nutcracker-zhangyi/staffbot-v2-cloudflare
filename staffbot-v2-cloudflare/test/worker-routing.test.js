@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
+import { readFile } from 'node:fs/promises';
 import { DatabaseSync } from 'node:sqlite';
 
 import { handleAdminApi } from '../src/admin-api.js';
@@ -9,6 +10,10 @@ import { createD1 } from './helpers/d1.js';
 
 const schema = readFileSync(
   new URL('../db/schema.sql', import.meta.url),
+  'utf8'
+);
+const indexSource = await readFile(
+  new URL('../src/index.js', import.meta.url),
   'utf8'
 );
 
@@ -21,6 +26,73 @@ function context() {
     }
   };
 }
+
+function normalizedHtml(value) {
+  return String(value).replace(/\s+/g, ' ').trim();
+}
+
+test('keeps the Worker entrypoint as a compatibility facade', () => {
+  assert.equal(indexSource.includes('async function handleAdminApi'), false);
+  assert.equal(indexSource.includes('function adminHtml'), false);
+  assert.equal(indexSource.includes('const TEXT ='), false);
+  assert.ok(indexSource.split('\n').length < 120);
+});
+
+test('preserves the complete admin document contract', async () => {
+  const response = await worker.fetch(
+    new Request('https://staffbot.test/admin'),
+    { ENVIRONMENT: 'staging' },
+    context()
+  );
+  const document = normalizedHtml(await response.text());
+
+  assert.equal(response.status, 200);
+  assert.equal(
+    response.headers.get('content-security-policy'),
+    "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'"
+  );
+  assert.match(document, /STAGING 测试环境/);
+
+  for (const tab of [
+    'stores',
+    'members',
+    'income',
+    'salary',
+    'advances',
+    'attendance',
+    'absence',
+    'leave',
+    'logs'
+  ]) {
+    assert.match(document, new RegExp(`data-tab="${tab}"`));
+    assert.match(document, new RegExp(`id="tab-${tab}"`));
+  }
+
+  for (const selector of [
+    'data-filter-date-from',
+    'data-filter-date-to',
+    'data-filter-employee',
+    'data-filter-stores',
+    'data-absence-status',
+    'data-apply-filters',
+    'data-absence-action',
+    'data-income-delete-id',
+    'data-income-fine-id',
+    'data-attendance-detail'
+  ]) {
+    assert.match(document, new RegExp(selector));
+  }
+
+  for (const id of [
+    'sendCode',
+    'verifyCode',
+    'logout',
+    'saveStore',
+    'saveMember'
+  ]) {
+    assert.match(document, new RegExp(`id="${id}"`));
+  }
+});
 
 test('handles authenticated, unknown, and unauthorized admin API requests directly', async () => {
   const database = new DatabaseSync(':memory:');
