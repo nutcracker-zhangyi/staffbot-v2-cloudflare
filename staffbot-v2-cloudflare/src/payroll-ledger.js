@@ -47,6 +47,14 @@ export function legacyPayrollImpactMicros(record) {
   }
 }
 
+export function payrollLedgerWritesEnabled(env) {
+  const mode = String((env && env.PAYROLL_LEDGER_WRITE_MODE) || '').trim();
+  if (!mode || mode === 'off') return false;
+  if (mode === 'dual') return true;
+  console.error(`Invalid PAYROLL_LEDGER_WRITE_MODE: ${mode}`);
+  return false;
+}
+
 export function validatePayrollEntry(entry, originalEntry = null) {
   if (!entry || typeof entry !== 'object') {
     throw new TypeError('payroll entry is required');
@@ -116,6 +124,18 @@ export function validatePayrollEntry(entry, originalEntry = null) {
   return entry;
 }
 
+function legacyMetadata(record) {
+  return JSON.stringify({
+    legacy_record_id: record.record_id,
+    legacy_request_id: record.request_id ?? null,
+    legacy_income: Number(record.income || 0),
+    legacy_commission_rate: Number(record.commission_rate || 0),
+    legacy_commission_income: Number(record.commission_income || 0),
+    legacy_original_fine: Number(record.original_fine || 0),
+    legacy_fine: Number(record.fine || 0)
+  });
+}
+
 export function legacyIncomeRecordToPayrollEntry(record, currency, createdAt) {
   const amountMicros = legacyPayrollImpactMicros(record);
   if (amountMicros === 0) return null;
@@ -133,15 +153,53 @@ export function legacyIncomeRecordToPayrollEntry(record, currency, createdAt) {
     created_by: record.admin_id,
     created_at: createdAt,
     reverses_entry_id: null,
-    metadata_json: JSON.stringify({
-      legacy_record_id: record.record_id,
-      legacy_request_id: record.request_id ?? null,
-      legacy_income: Number(record.income || 0),
-      legacy_commission_rate: Number(record.commission_rate || 0),
-      legacy_commission_income: Number(record.commission_income || 0),
-      legacy_original_fine: Number(record.original_fine || 0),
-      legacy_fine: Number(record.fine || 0)
-    })
+    metadata_json: legacyMetadata(record)
   };
   return validatePayrollEntry(entry);
+}
+
+export function payrollEntryFromIncomeRecordDraft(record, currency, entryId) {
+  const amountMicros = legacyPayrollImpactMicros(record);
+  if (amountMicros === 0) return null;
+
+  return validatePayrollEntry({
+    entry_id: entryId,
+    store_id: record.store_id,
+    telegram_id: record.telegram_id,
+    type: record.type,
+    amount_micros: amountMicros,
+    currency,
+    effective_at: record.approved_at,
+    source: record.source,
+    source_id: record.request_id || record.record_id,
+    created_by: record.admin_id,
+    created_at: record.approved_at,
+    reverses_entry_id: null,
+    metadata_json: legacyMetadata(record)
+  });
+}
+
+export function payrollEntryInsertStatement(env, entry) {
+  validatePayrollEntry(entry);
+  return env.DB.prepare(`
+    INSERT INTO payroll_entries (
+      entry_id, store_id, telegram_id, type, amount_micros, currency,
+      effective_at, source, source_id, created_by, created_at,
+      reverses_entry_id, metadata_json
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).bind(
+    entry.entry_id,
+    entry.store_id,
+    entry.telegram_id,
+    entry.type,
+    entry.amount_micros,
+    entry.currency,
+    entry.effective_at,
+    entry.source,
+    entry.source_id,
+    entry.created_by,
+    entry.created_at,
+    entry.reverses_entry_id,
+    entry.metadata_json
+  );
 }

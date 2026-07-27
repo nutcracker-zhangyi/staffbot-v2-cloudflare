@@ -14,6 +14,7 @@ crons = ["10 * * * *"]
 [vars]
 CURRENCY = "$"
 ENVIRONMENT = "production"
+PAYROLL_LEDGER_WRITE_MODE = "off"
 SCHEDULED_TASKS_ENABLED = "true"
 TELEGRAM_RECIPIENT_MODE = "all"
 # Put non-secret local defaults here only.
@@ -35,6 +36,7 @@ bucket_name = "staffbot-v2-payroll-proofs-staging"
 [env.staging.vars]
 CURRENCY = "$"
 ENVIRONMENT = "staging"
+PAYROLL_LEDGER_WRITE_MODE = "off"
 SCHEDULED_TASKS_ENABLED = "false"
 TELEGRAM_RECIPIENT_MODE = "allowlist"
 

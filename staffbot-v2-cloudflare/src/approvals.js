@@ -1,19 +1,64 @@
-import { audit, makeId, nowIso } from './audit.js';
+import { audit, auditStatement, makeId, nowIso } from './audit.js';
 import {
   absenceFineRecordDraft,
   approvedIncomeRecordDrafts,
   attendanceFineDecision,
   checkoutFineRecordDrafts
 } from './money.js';
+import {
+  payrollEntryFromIncomeRecordDraft,
+  payrollEntryInsertStatement,
+  payrollLedgerWritesEnabled
+} from './payroll-ledger.js';
 import { getTotalIncome } from './payroll.js';
 import { getStore } from './stores.js';
 
 export async function insertSystemFine(env, storeId, userId, fine, source, sourceId, adminId = 'SYSTEM', originalFine = fine) {
-  await env.DB.prepare(`
+  const approvedAt = nowIso();
+  const draft = {
+    record_id: makeId('REC'),
+    store_id: storeId,
+    telegram_id: userId,
+    income: 0,
+    commission_rate: 0.6,
+    commission_income: 0,
+    original_fine: Number(originalFine || 0),
+    fine: Number(fine || 0),
+    type: 'fine',
+    source,
+    request_id: sourceId,
+    approved_at: approvedAt,
+    admin_id: adminId
+  };
+  const legacyStatement = env.DB.prepare(`
     INSERT INTO income_records
       (record_id, store_id, telegram_id, income, commission_rate, commission_income, original_fine, fine, type, source, request_id, approved_at, admin_id)
     VALUES (?, ?, ?, 0, 0.6, 0, ?, ?, 'fine', ?, ?, ?, ?)
-  `).bind(makeId('REC'), storeId, userId, originalFine, fine, source, sourceId, nowIso(), adminId).run();
+  `).bind(
+    draft.record_id,
+    draft.store_id,
+    draft.telegram_id,
+    draft.original_fine,
+    draft.fine,
+    draft.source,
+    draft.request_id,
+    draft.approved_at,
+    draft.admin_id
+  );
+  if (!payrollLedgerWritesEnabled(env)) {
+    await legacyStatement.run();
+    return;
+  }
+
+  const store = await getStore(env, storeId);
+  const entry = payrollEntryFromIncomeRecordDraft(
+    draft,
+    store.currency,
+    makeId('PAY')
+  );
+  const statements = [legacyStatement];
+  if (entry) statements.push(payrollEntryInsertStatement(env, entry));
+  await env.DB.batch(statements);
 }
 
 export async function hasPendingCheckout(env, storeId, userId, businessDate) {
@@ -36,6 +81,60 @@ export function mutationCount(result) {
   return Number(result && result.meta ? result.meta.changes : 0);
 }
 
+function pendingAbsenceLedgerStatement(env, entry, requestId, expectedStoreId) {
+  const storeSql = expectedStoreId ? ` AND store_id = ?` : '';
+  const requestParams = expectedStoreId
+    ? [requestId, expectedStoreId]
+    : [requestId];
+  return env.DB.prepare(`
+    INSERT INTO payroll_entries (
+      entry_id, store_id, telegram_id, type, amount_micros, currency,
+      effective_at, source, source_id, created_by, created_at,
+      reverses_entry_id, metadata_json
+    )
+    SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+    FROM absence_fine_requests
+    WHERE request_id = ? AND status = 'pending'${storeSql}
+  `).bind(
+    entry.entry_id,
+    entry.store_id,
+    entry.telegram_id,
+    entry.type,
+    entry.amount_micros,
+    entry.currency,
+    entry.effective_at,
+    entry.source,
+    entry.source_id,
+    entry.created_by,
+    entry.created_at,
+    entry.reverses_entry_id,
+    entry.metadata_json,
+    ...requestParams
+  );
+}
+
+function pendingAbsenceAuditStatement(env, found, adminId, decidedAt, expectedStoreId) {
+  const storeSql = expectedStoreId ? ` AND store_id = ?` : '';
+  const requestParams = expectedStoreId
+    ? [found.request_id, expectedStoreId]
+    : [found.request_id];
+  return env.DB.prepare(`
+    INSERT INTO admin_audit_logs (
+      store_id, admin_id, action, target_id, details_json, created_at
+    )
+    SELECT ?, ?, 'approve_absence_fine', ?, ?, ?
+    FROM absence_fine_requests
+    WHERE request_id = ? AND status = 'pending'${storeSql}
+  `).bind(
+    found.store_id,
+    adminId,
+    found.request_id,
+    JSON.stringify(found),
+    decidedAt,
+    ...requestParams
+  );
+}
+
 export async function approveAbsenceFineRequest(env, requestId, adminId, expectedStoreId = '') {
   const storeSql = expectedStoreId ? ` AND store_id = ?` : '';
   const requestParams = expectedStoreId ? [requestId, expectedStoreId] : [requestId];
@@ -47,7 +146,7 @@ export async function approveAbsenceFineRequest(env, requestId, adminId, expecte
   const decidedAt = nowIso();
   const recordId = makeId('REC');
   const draft = absenceFineRecordDraft(found, adminId, decidedAt, recordId);
-  const results = await env.DB.batch([
+  const statements = [
     env.DB.prepare(`
       INSERT INTO income_records
         (record_id, store_id, telegram_id, income, commission_rate, commission_income, original_fine, fine, type, source, request_id, approved_at, admin_id)
@@ -57,15 +156,45 @@ export async function approveAbsenceFineRequest(env, requestId, adminId, expecte
       draft.record_id, draft.store_id, draft.telegram_id, draft.income, draft.commission_rate,
       draft.commission_income, draft.original_fine, draft.fine, draft.type, draft.source, draft.request_id,
       draft.approved_at, draft.admin_id, ...requestParams
-    ),
+    )
+  ];
+  if (payrollLedgerWritesEnabled(env)) {
+    const store = await getStore(env, found.store_id);
+    const entry = payrollEntryFromIncomeRecordDraft(
+      draft,
+      store.currency,
+      makeId('PAY')
+    );
+    if (entry) {
+      statements.push(
+        pendingAbsenceLedgerStatement(
+          env,
+          entry,
+          requestId,
+          expectedStoreId
+        )
+      );
+    }
+  }
+  statements.push(
+    pendingAbsenceAuditStatement(
+      env,
+      found,
+      adminId,
+      decidedAt,
+      expectedStoreId
+    )
+  );
+  const updateIndex = statements.length;
+  statements.push(
     env.DB.prepare(`
       UPDATE absence_fine_requests
       SET status = 'approved', decided_at = ?, admin_id = ?, income_record_id = ?
       WHERE request_id = ? AND status = 'pending'${storeSql}
     `).bind(decidedAt, adminId, recordId, ...requestParams)
-  ]);
-  if (mutationCount(results[1]) !== 1) return { ok: false };
-  await audit(env, found.store_id, adminId, 'approve_absence_fine', requestId, found);
+  );
+  const results = await env.DB.batch(statements);
+  if (mutationCount(results[updateIndex]) !== 1) return { ok: false };
   return { ok: true, row: found, recordId };
 }
 
@@ -93,7 +222,7 @@ export async function approveIncomeRequest(env, storeId, requestId, adminId) {
   const store = await getStore(env, storeId);
   const approvedAt = nowIso();
   const drafts = approvedIncomeRecordDrafts(found, adminId, approvedAt, [makeId('REC'), makeId('REC')]);
-  await env.DB.batch([
+  const statements = [
     env.DB.prepare(`UPDATE pending_income SET status = 'approved', decided_at = ?, admin_id = ? WHERE store_id = ? AND request_id = ?`)
       .bind(approvedAt, adminId, storeId, requestId),
     ...drafts.map((draft) => env.DB.prepare(`
@@ -105,8 +234,29 @@ export async function approveIncomeRequest(env, storeId, requestId, adminId) {
       draft.commission_income, draft.original_fine, draft.fine, draft.type, draft.source, draft.request_id,
       draft.approved_at, draft.admin_id
     ))
-  ]);
-  await audit(env, storeId, adminId, 'approve_income', requestId, found);
+  ];
+  if (payrollLedgerWritesEnabled(env)) {
+    for (const draft of drafts) {
+      const entry = payrollEntryFromIncomeRecordDraft(
+        draft,
+        store.currency,
+        makeId('PAY')
+      );
+      if (entry) statements.push(payrollEntryInsertStatement(env, entry));
+    }
+  }
+  statements.push(
+    auditStatement(
+      env,
+      storeId,
+      adminId,
+      'approve_income',
+      requestId,
+      found,
+      approvedAt
+    )
+  );
+  await env.DB.batch(statements);
   return { ok: true, row: found, store };
 }
 
@@ -195,18 +345,59 @@ export async function approveSalaryAdvanceRequest(env, storeId, requestId, admin
   if (Number(found.amount || 0) > total) return { ok: false, error: 'amount_exceeds_salary', store, total };
   const decidedAt = nowIso();
   const recordId = makeId('REC');
-
-  await env.DB.batch([
+  const draft = {
+    record_id: recordId,
+    store_id: storeId,
+    telegram_id: found.telegram_id,
+    income: 0,
+    commission_rate: 0.6,
+    commission_income: 0,
+    original_fine: Number(found.amount || 0),
+    fine: Number(found.amount || 0),
+    type: 'advance',
+    source: 'salary_advance',
+    request_id: requestId,
+    approved_at: decidedAt,
+    admin_id: adminId
+  };
+  const statements = [
     env.DB.prepare(`UPDATE salary_advance_requests SET status = 'approved', decided_at = ?, admin_id = ? WHERE store_id = ? AND request_id = ?`)
       .bind(decidedAt, adminId, storeId, requestId),
     env.DB.prepare(`
       INSERT INTO income_records
         (record_id, store_id, telegram_id, income, commission_rate, commission_income, original_fine, fine, type, source, request_id, approved_at, admin_id)
       VALUES (?, ?, ?, 0, 0.6, 0, ?, ?, 'advance', 'salary_advance', ?, ?, ?)
-    `).bind(recordId, storeId, found.telegram_id, found.amount, found.amount, requestId, decidedAt, adminId)
-  ]);
-
-  await audit(env, storeId, adminId, 'approve_salary_advance', requestId, found);
+    `).bind(
+      draft.record_id,
+      draft.store_id,
+      draft.telegram_id,
+      draft.original_fine,
+      draft.fine,
+      draft.request_id,
+      draft.approved_at,
+      draft.admin_id
+    )
+  ];
+  if (payrollLedgerWritesEnabled(env)) {
+    const entry = payrollEntryFromIncomeRecordDraft(
+      draft,
+      store.currency,
+      makeId('PAY')
+    );
+    if (entry) statements.push(payrollEntryInsertStatement(env, entry));
+  }
+  statements.push(
+    auditStatement(
+      env,
+      storeId,
+      adminId,
+      'approve_salary_advance',
+      requestId,
+      found,
+      decidedAt
+    )
+  );
+  await env.DB.batch(statements);
   return { ok: true, row: found, store };
 }
 

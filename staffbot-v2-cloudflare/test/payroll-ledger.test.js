@@ -7,6 +7,7 @@ import {
   amountToMicros,
   legacyIncomeRecordToPayrollEntry,
   legacyPayrollImpactMicros,
+  payrollLedgerWritesEnabled,
   validatePayrollEntry
 } from '../src/payroll-ledger.js';
 
@@ -103,6 +104,30 @@ test('rejects non-numeric and unsafe micros values', () => {
     () => amountToMicros(Number.MAX_SAFE_INTEGER),
     /safe integer/
   );
+});
+
+test('enables ledger writes only for explicit dual mode', () => {
+  assert.equal(payrollLedgerWritesEnabled({}), false);
+  assert.equal(payrollLedgerWritesEnabled({
+    PAYROLL_LEDGER_WRITE_MODE: 'off'
+  }), false);
+  assert.equal(payrollLedgerWritesEnabled({
+    PAYROLL_LEDGER_WRITE_MODE: 'dual'
+  }), true);
+
+  const originalConsoleError = console.error;
+  let errorMessage = '';
+  console.error = (message) => {
+    errorMessage = message;
+  };
+  try {
+    assert.equal(payrollLedgerWritesEnabled({
+      PAYROLL_LEDGER_WRITE_MODE: 'unexpected'
+    }), false);
+  } finally {
+    console.error = originalConsoleError;
+  }
+  assert.match(errorMessage, /Invalid PAYROLL_LEDGER_WRITE_MODE: unexpected/);
 });
 
 test('maps supported legacy payroll types to signed micros', () => {

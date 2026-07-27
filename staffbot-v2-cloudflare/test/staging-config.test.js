@@ -17,6 +17,7 @@ test('declares a separate staging Worker and bindings', () => {
 
 test('declares staging safety variables explicitly', () => {
   assert.match(config, /\[env\.staging\.vars\][\s\S]*ENVIRONMENT\s*=\s*"staging"/);
+  assert.match(config, /\[env\.staging\.vars\][\s\S]*PAYROLL_LEDGER_WRITE_MODE\s*=\s*"off"/);
   assert.match(config, /SCHEDULED_TASKS_ENABLED\s*=\s*"false"/);
   assert.match(config, /TELEGRAM_RECIPIENT_MODE\s*=\s*"allowlist"/);
 });
