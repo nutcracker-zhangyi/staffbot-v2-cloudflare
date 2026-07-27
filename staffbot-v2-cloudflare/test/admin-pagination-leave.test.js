@@ -52,6 +52,7 @@ const source = readFileSync(new URL('../src/index.js', import.meta.url), 'utf8')
 const absenceSource = readFileSync(new URL('../src/absence.js', import.meta.url), 'utf8');
 const approvalsSource = readFileSync(new URL('../src/approvals.js', import.meta.url), 'utf8');
 const moneySource = readFileSync(new URL('../src/money.js', import.meta.url), 'utf8');
+const telegramSource = readFileSync(new URL('../src/telegram.js', import.meta.url), 'utf8');
 const wrangler = readFileSync(new URL('../wrangler.toml', import.meta.url), 'utf8');
 const absenceOutboxMigration = readFileSync(new URL('../db/migrations/017_absence_notification_outbox.sql', import.meta.url), 'utf8');
 
@@ -1140,10 +1141,10 @@ test('keeps absence approval callbacks below Telegram limit', () => {
 });
 
 test('routes compact absence approval callbacks through store authorization', () => {
-  assert.match(source, /parts\[0\] === 'abs'/);
-  assert.match(source, /approveAbsenceFineRequest/);
-  assert.match(source, /rejectAbsenceFineRequest/);
-  assert.match(source, /cancelAbsenceForApprovedLeave/);
+  assert.match(telegramSource, /parts\[0\] === 'abs'/);
+  assert.match(telegramSource, /approveAbsenceFineRequest/);
+  assert.match(telegramSource, /rejectAbsenceFineRequest/);
+  assert.match(approvalsSource, /cancelAbsenceForApprovedLeave/);
 });
 
 test('absence fines use the existing editable fine record path', () => {
