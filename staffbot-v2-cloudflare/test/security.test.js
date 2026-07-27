@@ -11,9 +11,9 @@ import worker, {
   scheduledTasksEnabled,
   securityHeaders,
   serviceEnvironment,
-  telegram,
   webhookSecretMatches
 } from '../src/index.js';
+import { telegram } from '../src/telegram-client.js';
 
 test('requires an explicit service environment', () => {
   assert.equal(serviceEnvironment({}), 'unknown');

@@ -1,0 +1,48 @@
+import { logEvent } from './audit.js';
+import { JSON_HEADERS } from './http.js';
+import { isTelegramRecipientAllowed } from './security.js';
+
+export async function sendMessage(env, chatId, text, replyMarkup) {
+  const payload = { chat_id: chatId, text };
+  if (replyMarkup) payload.reply_markup = replyMarkup;
+  return telegram(env, 'sendMessage', payload);
+}
+
+export async function answerCallback(env, callbackQueryId, text = '', showAlert = false) {
+  return telegram(env, 'answerCallbackQuery', {
+    callback_query_id: callbackQueryId,
+    text,
+    show_alert: showAlert
+  });
+}
+
+export async function editCallbackMessage(env, callback, text) {
+  return telegram(env, 'editMessageText', {
+    chat_id: callback.message.chat.id,
+    message_id: callback.message.message_id,
+    text
+  });
+}
+
+export async function telegram(env, method, payload) {
+  if (!isTelegramRecipientAllowed(env, payload)) {
+    await logEvent(env, 'warn', 'staging_telegram_recipient_blocked', {
+      telegram_id: String(payload.chat_id),
+      method
+    });
+    return {
+      ok: false,
+      error_code: 403,
+      description: 'staging_recipient_blocked'
+    };
+  }
+
+  const response = await fetch(`https://api.telegram.org/bot${env.BOT_TOKEN}/${method}`, {
+    method: 'POST',
+    headers: JSON_HEADERS,
+    body: JSON.stringify(payload)
+  });
+  const result = await response.json();
+  if (!result.ok) await logEvent(env, 'error', 'telegram_api_error', { method, payload, result });
+  return result;
+}

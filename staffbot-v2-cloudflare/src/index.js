@@ -13,6 +13,7 @@ import {
   toCsv,
   visibleAdminStores
 } from './admin-query.js';
+import { logError, logEvent } from './audit.js';
 import { DEFAULT_STORE_ID } from './constants.js';
 import {
   absenceScanDates,
@@ -34,7 +35,6 @@ import {
 } from './dates.js';
 import {
   CSV_HEADERS,
-  JSON_HEADERS,
   clearSessionCookie,
   html,
   json,
@@ -43,6 +43,7 @@ import {
   setSessionCookie
 } from './http.js';
 import { makeId, makeStoreId } from './ids.js';
+import { LANGS, allLangLabels, render, t } from './i18n.js';
 import {
   absenceFineRecordDraft,
   approvedIncomeRecordDrafts,
@@ -65,7 +66,6 @@ import {
 import {
   adminIds,
   isGlobalAdmin,
-  isTelegramRecipientAllowed,
   isWebhookConfigReady,
   nextLoginFailureState,
   parseTelegramAllowlist,
@@ -73,6 +73,11 @@ import {
   serviceEnvironment,
   webhookSecretMatches
 } from './security.js';
+import {
+  answerCallback,
+  editCallbackMessage,
+  sendMessage
+} from './telegram-client.js';
 import { normalizePositiveInt, validTime } from './validation.js';
 
 export * from './admin-query.js';
@@ -80,8 +85,10 @@ export * from './dates.js';
 export * from './ids.js';
 export * from './money.js';
 export * from './security.js';
+export { sanitizeLogPayload } from './audit.js';
+export { render } from './i18n.js';
+export { telegram } from './telegram-client.js';
 
-const LANGS = ['zh', 'en', 'vi', 'ru'];
 export const ABSENCE_PENDING_COLUMNS = Object.freeze([
   'store_id', 'display_name', 'business_date', 'fine', 'created_at',
   'notification_status', 'notification_delivery', 'action'
@@ -90,199 +97,6 @@ export const ABSENCE_HISTORY_COLUMNS = Object.freeze([
   'store_id', 'display_name', 'business_date', 'status', 'original_fine',
   'actual_fine', 'admin_id', 'decided_at', 'decision_reason', 'income_record_id'
 ]);
-const TEXT = {
-  choose_lang: { zh: '请选择语言：', en: 'Please choose language:', vi: 'Vui lòng chọn ngôn ngữ:' },
-  lang_set: { zh: '语言已设置为中文。', en: 'Language set to English.', vi: 'Đã chọn Tiếng Việt.' },
-  welcome: { zh: '欢迎使用员工管理机器人。请选择操作：', en: 'Welcome to the Staff Bot. Choose an action:', vi: 'Chào mừng bạn đến với Staff Bot. Vui lòng chọn:' },
-  help: {
-    zh: '可用命令：\n/store - 切换店铺\n/income - 提交收入\n/total - 查看总收入\n/salary - 申请工资\n/advance - 预支薪资\n/attendance - 打卡\n/leave - 请假\n/lang - 切换语言\n/cancel - 取消当前流程\n/ping - 测试机器人',
-    en: 'Commands:\n/store - Switch store\n/income - Submit income\n/total - Total income\n/salary - Request salary\n/advance - Salary advance\n/attendance - Attendance\n/leave - Request leave\n/lang - Change language\n/cancel - Cancel current flow\n/ping - Test bot',
-    vi: 'Lệnh:\n/store - Đổi cửa hàng\n/income - Nộp thu nhập\n/total - Tổng thu nhập\n/salary - Yêu cầu lương\n/advance - Ứng lương\n/attendance - Chấm công\n/leave - Xin nghỉ\n/lang - Đổi ngôn ngữ\n/cancel - Hủy thao tác\n/ping - Kiểm tra bot'
-  },
-  cancelled: { zh: '已取消当前流程。', en: 'Cancelled.', vi: 'Đã hủy thao tác.' },
-  unknown: { zh: '无法识别。发送 /start 查看可用命令。', en: 'Unknown command. Send /start for help.', vi: 'Không hiểu lệnh. Gửi /start để xem hướng dẫn.' },
-  no_permission: { zh: '你没有权限。', en: 'You are not authorized.', vi: 'Bạn không có quyền.' },
-  no_store: { zh: '你还没有被管理员添加，请联系管理员。', en: 'You have not been added by an admin. Contact an admin.', vi: 'Bạn chưa được quản trị viên thêm. Vui lòng liên hệ quản trị viên.' },
-  joined_store: { zh: '已加入店铺：{store}', en: 'Joined store: {store}', vi: 'Đã tham gia cửa hàng: {store}' },
-  register_intro: { zh: '你还没有加入店铺。请选择要申请加入的店铺：', en: 'You have not joined a store yet. Choose the store to apply to:', vi: 'Bạn chưa tham gia cửa hàng. Vui lòng chọn cửa hàng muốn đăng ký:' },
-  ask_register_name: { zh: '请输入你的姓名，提交后等待管理员审批。', en: 'Enter your name. An admin will review your request.', vi: 'Nhập tên của bạn. Quản trị viên sẽ duyệt yêu cầu.' },
-  register_submitted: { zh: '申请已提交，请等待管理员审批。', en: 'Application submitted. Please wait for admin approval.', vi: 'Đã gửi yêu cầu. Vui lòng chờ quản trị viên duyệt.' },
-  register_approved: { zh: '你的店铺加入申请已通过。\n店铺：{store}', en: 'Your store application was approved.\nStore: {store}', vi: 'Yêu cầu tham gia cửa hàng đã được duyệt.\nCửa hàng: {store}' },
-  register_rejected: { zh: '你的店铺加入申请已被驳回。\n店铺：{store}', en: 'Your store application was rejected.\nStore: {store}', vi: 'Yêu cầu tham gia cửa hàng đã bị từ chối.\nCửa hàng: {store}' },
-  choose_store: { zh: '请选择当前店铺：', en: 'Please choose the current store:', vi: 'Vui lòng chọn cửa hàng hiện tại:' },
-  store_set: { zh: '当前店铺已切换为：{store}', en: 'Current store switched to: {store}', vi: 'Đã đổi cửa hàng hiện tại thành: {store}' },
-  current_store: { zh: '当前店铺：{store}', en: 'Current store: {store}', vi: 'Cửa hàng hiện tại: {store}' },
-  need_store_choice: { zh: '你属于多个店铺，请先选择当前店铺。', en: 'You belong to multiple stores. Choose the current store first.', vi: 'Bạn thuộc nhiều cửa hàng. Vui lòng chọn cửa hàng hiện tại trước.' },
-  already_processed: { zh: '该请求已处理。', en: 'This request was already processed.', vi: 'Yêu cầu này đã được xử lý.' },
-  btn_store: { zh: '切换店铺', en: 'Switch Store', vi: 'Đổi cửa hàng' },
-  btn_income: { zh: '提交收入', en: 'Submit Income', vi: 'Nộp thu nhập' },
-  btn_total: { zh: '总收入', en: 'Total Income', vi: 'Tổng thu nhập' },
-  btn_salary: { zh: '申请工资', en: 'Request Salary', vi: 'Yêu cầu lương' },
-  btn_advance: { zh: '预支薪资', en: 'Salary Advance', vi: 'Ứng lương' },
-  btn_attendance: { zh: '打卡', en: 'Attendance', vi: 'Chấm công' },
-  btn_leave: { zh: '请假', en: 'Leave', vi: 'Xin nghỉ' },
-  btn_cancel: { zh: '取消', en: 'Cancel', vi: 'Hủy' },
-  btn_approve: { zh: '批准', en: 'Approve', vi: 'Đồng ý' },
-  btn_reject: { zh: '驳回', en: 'Reject', vi: 'Từ chối' },
-  btn_confirm: { zh: '确认', en: 'Confirm', vi: 'Xác nhận' },
-  btn_checkin: { zh: '上班签到', en: 'Check In', vi: 'Vào ca' },
-  btn_checkout: { zh: '下班签退', en: 'Check Out', vi: 'Ra ca' },
-  btn_share_location: { zh: '分享当前位置', en: 'Share Current Location', vi: 'Chia sẻ vị trí hiện tại' },
-  ask_income: { zh: '请输入收入金额，例如：2000', en: 'Enter income amount, e.g. 2000', vi: 'Nhập số tiền thu nhập, ví dụ: 2000', ru: 'Введите сумму дохода, например: 2000' },
-  ask_fine: { zh: '请输入罚款金额，没有罚款请输入 0', en: 'Enter fine amount, or 0 if none', vi: 'Nhập tiền phạt, nếu không có nhập 0', ru: 'Введите сумму штрафа или 0, если штрафа нет' },
-  ask_advance: { zh: '请输入预支薪资金额：', en: 'Enter salary advance amount:', vi: 'Nhập số tiền ứng lương:' },
-  vnd_income_hint: {
-    zh: '例如如果收入是300万越南盾的话，请输入3',
-    en: 'For example, if income is 3,000,000 VND, enter 3.',
-    vi: 'Ví dụ thu nhập là 3.000.000 VND thì nhập 3.',
-    ru: 'Например, если доход 3 000 000 VND, введите 3.'
-  },
-  vnd_fine_hint: {
-    zh: '越南盾罚款也按百万输入，例如50万请输入0.5',
-    en: 'Enter VND fines in millions too, e.g. 500,000 VND as 0.5.',
-    vi: 'Tiền phạt VND cũng nhập theo triệu, ví dụ 500.000 VND nhập 0.5.',
-    ru: 'Штрафы в VND тоже вводятся в миллионах, например 500 000 VND как 0.5.'
-  },
-  vnd_advance_hint: {
-    zh: '越南盾预支也按百万输入，例如50万请输入0.5',
-    en: 'Enter VND advances in millions too, e.g. 500,000 VND as 0.5.',
-    vi: 'Ứng lương VND cũng nhập theo triệu, ví dụ 500.000 VND nhập 0.5.',
-    ru: 'Авансы в VND тоже вводятся в миллионах, например 500 000 VND как 0.5.'
-  },
-  invalid_income: { zh: '收入金额无效，请输入正数，例如：2000', en: 'Invalid income. Enter a positive number, e.g. 2000', vi: 'Thu nhập không hợp lệ. Nhập số dương, ví dụ: 2000' },
-  invalid_fine: { zh: '罚款金额无效，请输入 0 或正数。', en: 'Invalid fine. Enter 0 or a positive number.', vi: 'Tiền phạt không hợp lệ. Nhập 0 hoặc số dương.' },
-  income_submitted: { zh: '已提交审核。\n收入：{income}\n提成比例：{commission}\n提成收入：{commission_income}\n店铺：{store}\n管理员审核后会通知你。', en: 'Submitted for approval.\nIncome: {income}\nCommission: {commission}\nCommission income: {commission_income}\nStore: {store}\nYou will be notified after review.', vi: 'Đã gửi để duyệt.\nThu nhập: {income}\nTỷ lệ hoa hồng: {commission}\nThu nhập hoa hồng: {commission_income}\nCửa hàng: {store}' },
-  income_approved: { zh: '你的收入已批准。\n收入：{income}\n提成比例：{commission}\n提成收入：{commission_income}', en: 'Your income was approved.\nIncome: {income}\nCommission: {commission}\nCommission income: {commission_income}', vi: 'Thu nhập của bạn đã được duyệt.\nThu nhập: {income}\nTỷ lệ hoa hồng: {commission}\nThu nhập hoa hồng: {commission_income}' },
-  income_rejected: { zh: '你的收入提交已被驳回。\n原因：{reason}', en: 'Your income submission was rejected.\nReason: {reason}', vi: 'Đơn thu nhập bị từ chối.\nLý do: {reason}' },
-  ask_reject_reason: { zh: '请输入驳回原因，或发送 /cancel 取消：', en: 'Enter rejection reason, or send /cancel:', vi: 'Nhập lý do từ chối, hoặc gửi /cancel:' },
-  reject_recorded: { zh: '驳回已记录，员工已收到通知。', en: 'Rejection recorded and employee notified.', vi: 'Đã ghi nhận từ chối và thông báo cho nhân viên.' },
-  total: { zh: '店铺：{store}\n当前总收入：{total}', en: 'Store: {store}\nCurrent total income: {total}', vi: 'Cửa hàng: {store}\nTổng thu nhập hiện tại: {total}' },
-  no_salary: { zh: '当前总收入：{total}\n暂无可申请金额。', en: 'Current total: {total}\nNothing to request yet.', vi: 'Tổng hiện tại: {total}\nChưa có gì để yêu cầu.' },
-  salary_pending: { zh: '你已有待审核的工资申请，请等待审核。', en: 'You already have a pending salary request.', vi: 'Bạn đã có yêu cầu lương đang chờ duyệt.' },
-  salary_confirm: { zh: '店铺：{store}\n当前总收入：{total}\n提成比例：{commission}\n可申请工资：{amount}\n确认申请发薪吗？', en: 'Store: {store}\nCurrent total: {total}\nCommission: {commission}\nRequestable salary: {amount}\nConfirm salary request?', vi: 'Cửa hàng: {store}\nTổng hiện tại: {total}\nTỷ lệ hoa hồng: {commission}\nLương có thể yêu cầu: {amount}\nXác nhận yêu cầu lương?', ru: 'Магазин: {store}\nТекущий итог: {total}\nКомиссия: {commission}\nДоступная зарплата: {amount}\nПодтвердить запрос зарплаты?' },
-  salary_submitted: { zh: '工资申请已提交，审核后会通知你。', en: 'Salary request submitted.', vi: 'Đã gửi yêu cầu lương.' },
-  salary_approved: { zh: '你的工资申请已批准。\n金额：{amount}\n周期：{start} ~ {end}\n新周期已开始。', en: 'Salary approved.\nAmount: {amount}\nPeriod: {start} ~ {end}\nA new cycle has started.', vi: 'Lương đã được duyệt.\nSố tiền: {amount}\nKỳ: {start} ~ {end}' },
-  salary_rejected: { zh: '你的工资申请已被驳回。\n原因：{reason}', en: 'Salary request rejected.\nReason: {reason}', vi: 'Yêu cầu lương bị từ chối.\nLý do: {reason}' },
-  advance_pending: { zh: '你已有待审核的预支薪资申请，请等待审核。', en: 'You already have a pending salary advance request.', vi: 'Bạn đã có yêu cầu ứng lương đang chờ duyệt.' },
-  invalid_advance: { zh: '预支金额无效，请输入正数。', en: 'Invalid salary advance amount. Enter a positive number.', vi: 'Số tiền ứng lương không hợp lệ. Nhập số dương.' },
-  advance_exceeds_salary: { zh: '预支金额不能超过当前可申请工资：{amount}', en: 'Salary advance cannot exceed current requestable salary: {amount}', vi: 'Ứng lương không được vượt quá lương có thể yêu cầu hiện tại: {amount}' },
-  advance_submitted: { zh: '预支薪资申请已提交，审核后会通知你。\n金额：{amount}', en: 'Salary advance request submitted.\nAmount: {amount}', vi: 'Đã gửi yêu cầu ứng lương.\nSố tiền: {amount}' },
-  advance_approved: { zh: '你的预支薪资申请已批准。\n金额：{amount}\n该金额已从当前应付工资中扣除。', en: 'Salary advance approved.\nAmount: {amount}\nThis amount has been deducted from current payable salary.', vi: 'Ứng lương đã được duyệt.\nSố tiền: {amount}\nSố tiền này đã được trừ vào lương hiện tại.' },
-  advance_rejected: { zh: '你的预支薪资申请已被驳回。\n原因：{reason}', en: 'Salary advance request rejected.\nReason: {reason}', vi: 'Yêu cầu ứng lương bị từ chối.\nLý do: {reason}' },
-  ask_location: { zh: '请分享当前位置以继续：', en: 'Please share your current location:', vi: 'Vui lòng chia sẻ vị trí hiện tại:' },
-  location_received: { zh: '位置已收到。', en: 'Location received.', vi: 'Đã nhận vị trí.' },
-  choose_attendance_action: { zh: '请选择签到或签退：', en: 'Choose check-in or checkout:', vi: 'Chọn vào ca hoặc ra ca:' },
-  location_expired: { zh: '位置已过期，请重新点击打卡。', en: 'Location expired. Please start attendance again.', vi: 'Vị trí đã hết hạn. Vui lòng chấm công lại.' },
-  checkin_done: { zh: '签到成功。\n日期：{date}\n时间：{time}{extra}', en: 'Check-in recorded.\nDate: {date}\nTime: {time}{extra}', vi: 'Đã ghi nhận vào ca.\nNgày: {date}\nGiờ: {time}{extra}' },
-  checkout_done: { zh: '签退成功。\n日期：{date}\n时间：{time}{extra}', en: 'Checkout recorded.\nDate: {date}\nTime: {time}{extra}', vi: 'Đã ghi nhận ra ca.\nNgày: {date}\nGiờ: {time}{extra}' },
-  checkout_submitted: { zh: '签退申请已提交，请等待管理员审批。\n日期：{date}\n时间：{time}{extra}', en: 'Checkout request submitted. Please wait for admin approval.\nDate: {date}\nTime: {time}{extra}', vi: 'Đã gửi yêu cầu ra ca. Vui lòng chờ quản trị viên duyệt.\nNgày: {date}\nGiờ: {time}{extra}' },
-  checkout_rejected: { zh: '你的签退申请已被驳回。\n日期：{date}\n原因：{reason}', en: 'Your checkout request was rejected.\nDate: {date}\nReason: {reason}', vi: 'Yêu cầu ra ca bị từ chối.\nNgày: {date}\nLý do: {reason}' },
-  late: { zh: '\n迟到，已扣罚款 {fine}。', en: '\nLate, fine {fine} applied.', vi: '\nĐi muộn, phạt {fine}.' },
-  early: { zh: '\n早退，已扣罚款 {fine}。', en: '\nEarly leave, fine {fine} applied.', vi: '\nRa sớm, phạt {fine}.' },
-  early_waived: { zh: '\n早退，罚款 {fine} 已免除。', en: '\nEarly leave, fine {fine} waived.', vi: '\nRa sớm, đã miễn phạt {fine}.' },
-  ontime: { zh: '\n按时。', en: '\nOn time.', vi: '\nĐúng giờ.' },
-  already_checkin: { zh: '今天已经签到。', en: 'Already checked in today.', vi: 'Hôm nay đã vào ca.' },
-  already_checkout: { zh: '今天已经签退。', en: 'Already checked out today.', vi: 'Hôm nay đã ra ca.' },
-  checkout_pending: { zh: '今天已有签退申请等待审批。', en: 'A checkout request is already pending for today.', vi: 'Đã có yêu cầu ra ca đang chờ duyệt hôm nay.' },
-  need_checkin: { zh: '请先签到，再签退。', en: 'Please check in before checkout.', vi: 'Vui lòng vào ca trước khi ra ca.' }
-  ,
-  ask_leave_date: { zh: '请输入请假日期，格式 YYYY-MM-DD。只能选择提前 {min} 到 {max} 天的日期。', en: 'Enter leave date as YYYY-MM-DD. Only dates {min} to {max} days ahead are allowed.', vi: 'Nhập ngày nghỉ theo YYYY-MM-DD. Chỉ được chọn ngày trước {min} đến {max} ngày.' },
-  invalid_leave_date: { zh: '请假日期无效。请输入提前 {min} 到 {max} 天之间的日期，格式 YYYY-MM-DD。', en: 'Invalid leave date. Enter a date {min} to {max} days ahead as YYYY-MM-DD.', vi: 'Ngày nghỉ không hợp lệ. Nhập ngày trước {min} đến {max} ngày theo YYYY-MM-DD.' },
-  leave_conflict: { zh: '这一天已经有人请假或正在等待审批，请选择其他日期。', en: 'Someone already has leave or a pending leave request for that date.', vi: 'Ngày này đã có người xin nghỉ hoặc đang chờ duyệt.' },
-  leave_month_limit: { zh: '本月请假已达到 {limit} 天上限。', en: 'Monthly leave limit of {limit} days has been reached.', vi: 'Đã đạt giới hạn {limit} ngày nghỉ trong tháng.' },
-  leave_submitted: { zh: '请假申请已提交，审核后会通知你。\n日期：{date}', en: 'Leave request submitted. You will be notified after review.\nDate: {date}', vi: 'Đã gửi đơn xin nghỉ. Bạn sẽ được thông báo sau khi duyệt.\nNgày: {date}' },
-  leave_approved: { zh: '你的请假申请已批准。\n日期：{date}', en: 'Your leave request was approved.\nDate: {date}', vi: 'Đơn xin nghỉ của bạn đã được duyệt.\nNgày: {date}' },
-  leave_rejected: { zh: '你的请假申请已被驳回。\n日期：{date}\n原因：{reason}', en: 'Your leave request was rejected.\nDate: {date}\nReason: {reason}', vi: 'Đơn xin nghỉ của bạn bị từ chối.\nNgày: {date}\nLý do: {reason}' }
-};
-
-const RU_TEXT = {
-  choose_lang: 'Выберите язык:',
-  lang_set: 'Язык изменен на русский.',
-  welcome: 'Добро пожаловать в Staff Bot. Выберите действие:',
-  help: 'Команды:\n/store - сменить магазин\n/income - отправить доход\n/total - общий доход\n/salary - запросить зарплату\n/advance - аванс зарплаты\n/attendance - посещаемость\n/leave - отпуск\n/lang - сменить язык\n/cancel - отменить текущий процесс\n/ping - проверить бота',
-  cancelled: 'Текущий процесс отменен.',
-  unknown: 'Команда не распознана. Отправьте /start для списка команд.',
-  no_permission: 'У вас нет доступа.',
-  no_store: 'Администратор еще не добавил вас. Свяжитесь с администратором.',
-  joined_store: 'Вы присоединились к магазину: {store}',
-  register_intro: 'Вы еще не присоединились к магазину. Выберите магазин для заявки:',
-  ask_register_name: 'Введите ваше имя. Администратор проверит заявку.',
-  register_submitted: 'Заявка отправлена. Ожидайте проверки администратора.',
-  register_approved: 'Ваша заявка на магазин одобрена.\nМагазин: {store}',
-  register_rejected: 'Ваша заявка на магазин отклонена.\nМагазин: {store}',
-  choose_store: 'Выберите текущий магазин:',
-  store_set: 'Текущий магазин изменен на: {store}',
-  current_store: 'Текущий магазин: {store}',
-  need_store_choice: 'Вы привязаны к нескольким магазинам. Сначала выберите текущий магазин.',
-  already_processed: 'Этот запрос уже обработан.',
-  btn_store: 'Сменить магазин',
-  btn_income: 'Отправить доход',
-  btn_total: 'Общий доход',
-  btn_salary: 'Запросить зарплату',
-  btn_advance: 'Аванс зарплаты',
-  btn_attendance: 'Посещаемость',
-  btn_leave: 'Отпуск',
-  btn_cancel: 'Отмена',
-  btn_approve: 'Одобрить',
-  btn_reject: 'Отклонить',
-  btn_confirm: 'Подтвердить',
-  btn_checkin: 'Начать смену',
-  btn_checkout: 'Закончить смену',
-  btn_share_location: 'Поделиться текущей геопозицией',
-  ask_income: 'Введите сумму дохода, например: 2000',
-  ask_fine: 'Введите сумму штрафа или 0, если штрафа нет',
-  ask_advance: 'Введите сумму аванса зарплаты:',
-  invalid_income: 'Некорректная сумма дохода. Введите положительное число, например: 2000',
-  invalid_fine: 'Некорректный штраф. Введите 0 или положительное число.',
-  income_submitted: 'Отправлено на проверку.\nДоход: {income}\nКомиссия: {commission}\nКомиссионный доход: {commission_income}\nМагазин: {store}\nВы получите уведомление после проверки.',
-  income_approved: 'Ваш доход одобрен.\nДоход: {income}\nКомиссия: {commission}\nКомиссионный доход: {commission_income}',
-  income_rejected: 'Ваш доход отклонен.\nПричина: {reason}',
-  ask_reject_reason: 'Введите причину отклонения или отправьте /cancel:',
-  reject_recorded: 'Отклонение сохранено, сотрудник уведомлен.',
-  total: 'Магазин: {store}\nТекущий общий доход: {total}',
-  no_salary: 'Текущий итог: {total}\nПока нечего запрашивать.',
-  salary_pending: 'У вас уже есть ожидающий запрос зарплаты.',
-  salary_confirm: 'Магазин: {store}\nТекущий итог: {total}\nКомиссия: {commission}\nДоступная зарплата: {amount}\nПодтвердить запрос зарплаты?',
-  salary_submitted: 'Запрос зарплаты отправлен.',
-  salary_approved: 'Зарплата одобрена.\nСумма: {amount}\nПериод: {start} ~ {end}\nНачался новый цикл.',
-  salary_rejected: 'Запрос зарплаты отклонен.\nПричина: {reason}',
-  advance_pending: 'У вас уже есть ожидающий запрос аванса зарплаты.',
-  invalid_advance: 'Некорректная сумма аванса. Введите положительное число.',
-  advance_exceeds_salary: 'Аванс не может превышать доступную зарплату: {amount}',
-  advance_submitted: 'Запрос аванса зарплаты отправлен.\nСумма: {amount}',
-  advance_approved: 'Аванс зарплаты одобрен.\nСумма: {amount}\nЭта сумма вычтена из текущей зарплаты к выплате.',
-  advance_rejected: 'Запрос аванса зарплаты отклонен.\nПричина: {reason}',
-  ask_location: 'Поделитесь текущей геопозицией:',
-  location_received: 'Геопозиция получена.',
-  choose_attendance_action: 'Выберите начало или конец смены:',
-  location_expired: 'Геопозиция устарела. Начните посещаемость заново.',
-  checkin_done: 'Начало смены записано.\nДата: {date}\nВремя: {time}{extra}',
-  checkout_done: 'Конец смены записан.\nДата: {date}\nВремя: {time}{extra}',
-  checkout_submitted: 'Запрос на завершение смены отправлен. Дождитесь одобрения администратора.\nДата: {date}\nВремя: {time}{extra}',
-  checkout_rejected: 'Ваш запрос на завершение смены отклонен.\nДата: {date}\nПричина: {reason}',
-  late: '\nОпоздание, штраф {fine}.',
-  early: '\nРанний уход, штраф {fine}.',
-  early_waived: '\nРанний уход, штраф {fine} отменен.',
-  ontime: '\nВовремя.',
-  already_checkin: 'Сегодня начало смены уже записано.',
-  already_checkout: 'Сегодня конец смены уже записан.',
-  checkout_pending: 'На сегодня уже есть запрос на завершение смены.',
-  need_checkin: 'Сначала начните смену, затем завершите ее.',
-  vnd_income_hint: 'Например, если доход 3 000 000 VND, введите 3.',
-  vnd_fine_hint: 'Штрафы в VND тоже вводятся в миллионах, например 500 000 VND как 0.5.',
-  ask_leave_date: 'Введите дату отпуска в формате YYYY-MM-DD. Доступны даты за {min}-{max} дней вперед.',
-  invalid_leave_date: 'Некорректная дата отпуска. Введите дату за {min}-{max} дней вперед в формате YYYY-MM-DD.',
-  leave_conflict: 'На этот день уже есть отпуск или заявка на проверке.',
-  leave_month_limit: 'Достигнут месячный лимит отпуска {limit} дней.',
-  leave_submitted: 'Заявка на отпуск отправлена. Вы получите уведомление после проверки.\nДата: {date}',
-  leave_approved: 'Ваша заявка на отпуск одобрена.\nДата: {date}',
-  leave_rejected: 'Ваша заявка на отпуск отклонена.\nДата: {date}\nПричина: {reason}'
-};
-
-for (const [key, value] of Object.entries(RU_TEXT)) {
-  if (TEXT[key]) TEXT[key].ru = value;
-}
-
 export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
@@ -3044,51 +2858,6 @@ async function notifyStoreAdmins(env, storeId, text, replyMarkup) {
   }
 }
 
-async function sendMessage(env, chatId, text, replyMarkup) {
-  const payload = { chat_id: chatId, text };
-  if (replyMarkup) payload.reply_markup = replyMarkup;
-  return telegram(env, 'sendMessage', payload);
-}
-
-async function answerCallback(env, callbackQueryId, text = '', showAlert = false) {
-  return telegram(env, 'answerCallbackQuery', {
-    callback_query_id: callbackQueryId,
-    text,
-    show_alert: showAlert
-  });
-}
-
-async function editCallbackMessage(env, callback, text) {
-  return telegram(env, 'editMessageText', {
-    chat_id: callback.message.chat.id,
-    message_id: callback.message.message_id,
-    text
-  });
-}
-
-export async function telegram(env, method, payload) {
-  if (!isTelegramRecipientAllowed(env, payload)) {
-    await logEvent(env, 'warn', 'staging_telegram_recipient_blocked', {
-      telegram_id: String(payload.chat_id),
-      method
-    });
-    return {
-      ok: false,
-      error_code: 403,
-      description: 'staging_recipient_blocked'
-    };
-  }
-
-  const response = await fetch(`https://api.telegram.org/bot${env.BOT_TOKEN}/${method}`, {
-    method: 'POST',
-    headers: JSON_HEADERS,
-    body: JSON.stringify(payload)
-  });
-  const result = await response.json();
-  if (!result.ok) await logEvent(env, 'error', 'telegram_api_error', { method, payload, result });
-  return result;
-}
-
 async function audit(env, storeId, adminId, action, targetId, details) {
   await auditStatement(env, storeId, adminId, action, targetId, details).run();
 }
@@ -3098,38 +2867,6 @@ function auditStatement(env, storeId, adminId, action, targetId, details, create
     INSERT INTO admin_audit_logs (store_id, admin_id, action, target_id, details_json, created_at)
     VALUES (?, ?, ?, ?, ?, ?)
   `).bind(storeId || DEFAULT_STORE_ID, adminId, action, targetId || '', JSON.stringify(details || {}), createdAt);
-}
-
-async function logEvent(env, level, event, payload) {
-  const safePayload = sanitizeLogPayload(payload);
-  const telegramId = safePayload && safePayload.telegram_id ? String(safePayload.telegram_id) : null;
-  const messageText = safePayload && safePayload.text ? String(safePayload.text) : null;
-  const storeId = safePayload && safePayload.store_id ? String(safePayload.store_id) : DEFAULT_STORE_ID;
-  await env.DB.prepare(`
-    INSERT INTO bot_logs (store_id, level, event, telegram_id, message_text, payload_json, created_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?)
-  `).bind(storeId, level, event, telegramId, messageText, JSON.stringify(safePayload || {}), nowIso()).run();
-}
-
-async function logError(env, event, error, payload) {
-  await logEvent(env, 'error', event, {
-    store_id: payload && payload.store_id ? payload.store_id : DEFAULT_STORE_ID,
-    error: error && error.message ? error.message : String(error),
-    payload
-  });
-}
-
-export function sanitizeLogPayload(payload) {
-  if (!payload || typeof payload !== 'object') return {};
-  const redacted = new Set(['text', 'message_text', 'payload', 'payload_json', 'latitude', 'longitude', 'lat', 'lng', 'location']);
-  const safe = {};
-  for (const [key, value] of Object.entries(payload)) {
-    if (redacted.has(key)) safe[key] = '[redacted]';
-    else if (key === 'telegram_id' || key === 'chat_id') safe[key] = String(value);
-    else if (value === null || ['string', 'number', 'boolean'].includes(typeof value)) safe[key] = value;
-    else safe[key] = '[redacted]';
-  }
-  return safe;
 }
 
 function isIncomeCommand(text, lang) {
@@ -3158,10 +2895,6 @@ function isLeaveCommand(text, lang) {
 
 function isStoreCommand(text, lang) {
   return commandMatches(text, ['/store', '/shop', 'store', 'shop'], allLangLabels(lang, 'btn_store'));
-}
-
-function allLangLabels(lang, key) {
-  return Array.from(new Set([t(lang, key), ...LANGS.map((code) => t(code, key))]));
 }
 
 function commandMatches(text, commands, labels) {
@@ -3223,18 +2956,6 @@ function leaveDateKeyboard(store) {
       callback_data: `leave:date:${store.store_id}:${date}`
     }])
   };
-}
-
-function t(lang, key) {
-  return (TEXT[key] && (TEXT[key][lang] || TEXT[key].zh)) || key;
-}
-
-export function render(lang, key, params) {
-  let text = t(lang, key);
-  for (const [name, value] of Object.entries(params || {})) {
-    text = text.replaceAll(`{${name}}`, String(value));
-  }
-  return text;
 }
 
 export function incomeAdminNotificationText({ storeName, employeeName, userId, income, commission, commissionIncome, requestId }) {
