@@ -4,6 +4,12 @@ import { readFileSync } from 'node:fs';
 import { DatabaseSync } from 'node:sqlite';
 
 import worker from '../src/index.js';
+import {
+  approveIncomeRequest,
+  approveSalaryAdvanceRequest,
+  approveSalaryRequest
+} from '../src/approvals.js';
+import { getTotalIncome } from '../src/payroll.js';
 import { createD1 } from './helpers/d1.js';
 
 const schema = readFileSync(
@@ -57,6 +63,130 @@ function adminRequest(env, pathname) {
     }
   }), env, { waitUntil() {} });
 }
+
+test('direct income approval records income and fine in the current payroll total', async () => {
+  const { database, env } = approvalFixture();
+  database.prepare(`
+    INSERT INTO pending_income (
+      request_id, store_id, telegram_id, income, commission_rate,
+      commission_income, fine, status, submitted_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?)
+  `).run(
+    'INC-DIRECT', 'STORE1', 'EMP1', 100, 0.6, 60, 5,
+    '2026-07-15T00:00:00.000Z'
+  );
+
+  const result = await approveIncomeRequest(env, 'STORE1', 'INC-DIRECT', 'ADMIN1');
+
+  assert.equal(result.ok, true);
+  assert.equal(await getTotalIncome(env, 'STORE1', 'EMP1'), 55);
+  assert.deepEqual(
+    database.prepare(`
+      SELECT type, source, commission_income, fine
+      FROM income_records
+      WHERE request_id = 'INC-DIRECT'
+      ORDER BY type
+    `).all().map((row) => ({ ...row })),
+    [
+      { type: 'fine', source: 'manual_fine', commission_income: 0, fine: 5 },
+      { type: 'income', source: 'manual', commission_income: 60, fine: 0 }
+    ]
+  );
+});
+
+test('direct salary advance approval writes one payroll deduction', async () => {
+  const { database, env } = approvalFixture();
+  database.exec(`
+    INSERT INTO income_records (
+      record_id, store_id, telegram_id, income, commission_rate,
+      commission_income, original_fine, fine, type, source,
+      request_id, approved_at, admin_id
+    ) VALUES (
+      'REC-DIRECT-INCOME', 'STORE1', 'EMP1', 100, 0.6,
+      60, 0, 0, 'income', 'manual',
+      'INC-DIRECT-SEED', '2026-07-15T00:00:00.000Z', 'ADMIN1'
+    );
+    INSERT INTO salary_advance_requests (
+      request_id, store_id, telegram_id, amount, status, requested_at
+    ) VALUES (
+      'ADV-DIRECT', 'STORE1', 'EMP1', 20, 'pending',
+      '2026-07-16T00:00:00.000Z'
+    );
+  `);
+
+  const result = await approveSalaryAdvanceRequest(
+    env,
+    'STORE1',
+    'ADV-DIRECT',
+    'ADMIN1'
+  );
+
+  assert.equal(result.ok, true);
+  assert.equal(await getTotalIncome(env, 'STORE1', 'EMP1'), 40);
+  assert.deepEqual(
+    { ...database.prepare(`
+      SELECT type, source, commission_income, original_fine, fine
+      FROM income_records WHERE request_id = 'ADV-DIRECT'
+    `).get() },
+    {
+      type: 'advance',
+      source: 'salary_advance',
+      commission_income: 0,
+      original_fine: 20,
+      fine: 20
+    }
+  );
+});
+
+test('direct salary approval freezes the net total and starts a new cycle', async () => {
+  const { database, env } = approvalFixture();
+  database.exec(`
+    INSERT INTO income_records (
+      record_id, store_id, telegram_id, income, commission_rate,
+      commission_income, original_fine, fine, type, source,
+      request_id, approved_at, admin_id
+    ) VALUES
+      (
+        'REC-DIRECT-SALARY-INCOME', 'STORE1', 'EMP1', 100, 0.6,
+        60, 0, 0, 'income', 'manual',
+        'INC-DIRECT-SALARY', '2026-07-15T00:00:00.000Z', 'ADMIN1'
+      ),
+      (
+        'REC-DIRECT-SALARY-FINE', 'STORE1', 'EMP1', 0, 0.6,
+        0, 5, 5, 'fine', 'manual_fine',
+        'FINE-DIRECT-SALARY', '2026-07-16T00:00:00.000Z', 'ADMIN1'
+      ),
+      (
+        'REC-DIRECT-SALARY-ADVANCE', 'STORE1', 'EMP1', 0, 0.6,
+        0, 20, 20, 'advance', 'salary_advance',
+        'ADV-DIRECT-SALARY', '2026-07-17T00:00:00.000Z', 'ADMIN1'
+      );
+    INSERT INTO salary_requests (
+      request_id, store_id, telegram_id, amount_snapshot, status, requested_at
+    ) VALUES (
+      'SALREQ-DIRECT', 'STORE1', 'EMP1', 35, 'pending',
+      '2026-07-18T00:00:00.000Z'
+    );
+  `);
+
+  const result = await approveSalaryRequest(
+    env,
+    'STORE1',
+    'SALREQ-DIRECT',
+    'ADMIN1'
+  );
+
+  assert.equal(result.ok, true);
+  assert.equal(result.amount, 35);
+  assert.equal(await getTotalIncome(env, 'STORE1', 'EMP1'), 0);
+  assert.equal(
+    database.prepare(`
+      SELECT cycle_start FROM store_members
+      WHERE store_id = 'STORE1' AND telegram_id = 'EMP1'
+    `).get().cycle_start,
+    result.periodEnd
+  );
+});
 
 test('approves income and its linked fine once across sequential replay', async () => {
   const { database, env } = approvalFixture();

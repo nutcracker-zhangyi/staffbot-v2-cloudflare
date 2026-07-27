@@ -1,7 +1,36 @@
 import { DEFAULT_STORE_ID } from './constants.js';
 
-function nowIso() {
+export function makeId(prefix) {
+  return `${prefix}-${crypto.randomUUID()}`;
+}
+
+export function makeStoreId() {
+  const bytes = new Uint8Array(3);
+  crypto.getRandomValues(bytes);
+  return `STORE_${Array.from(bytes).map((byte) => byte.toString(16).padStart(2, '0')).join('').toUpperCase()}`;
+}
+
+export function nowIso() {
   return new Date().toISOString();
+}
+
+export function safeJson(text) {
+  try {
+    return JSON.parse(text || '{}');
+  } catch {
+    return {};
+  }
+}
+
+export async function audit(env, storeId, adminId, action, targetId, details) {
+  await auditStatement(env, storeId, adminId, action, targetId, details).run();
+}
+
+export function auditStatement(env, storeId, adminId, action, targetId, details, createdAt = nowIso()) {
+  return env.DB.prepare(`
+    INSERT INTO admin_audit_logs (store_id, admin_id, action, target_id, details_json, created_at)
+    VALUES (?, ?, ?, ?, ?, ?)
+  `).bind(storeId || DEFAULT_STORE_ID, adminId, action, targetId || '', JSON.stringify(details || {}), createdAt);
 }
 
 export async function logEvent(env, level, event, payload) {

@@ -13,7 +13,38 @@ import {
   toCsv,
   visibleAdminStores
 } from './admin-query.js';
-import { logError, logEvent } from './audit.js';
+import {
+  approveAbsenceFineRequest,
+  approveCheckoutRequest,
+  approveIncomeRequest,
+  approveLeaveRequest,
+  approveSalaryAdvanceRequest,
+  approveSalaryRequest,
+  cancelAbsenceForApprovedLeave,
+  deleteIncomeRecord,
+  deletePendingIncome,
+  hasAttendance,
+  hasPendingCheckout,
+  insertSystemFine,
+  mutationCount,
+  rejectAbsenceFineRequest,
+  rejectCheckoutRequest,
+  rejectIncomeRequest,
+  rejectLeaveRequest,
+  rejectSalaryAdvanceRequest,
+  rejectSalaryRequest,
+  updateIncomeFineRecord
+} from './approvals.js';
+import {
+  audit,
+  auditStatement,
+  logError,
+  logEvent,
+  makeId,
+  makeStoreId,
+  nowIso,
+  safeJson
+} from './audit.js';
 import { DEFAULT_STORE_ID } from './constants.js';
 import {
   absenceScanDates,
@@ -42,19 +73,13 @@ import {
   sessionCookieValue,
   setSessionCookie
 } from './http.js';
-import { makeId, makeStoreId } from './ids.js';
 import { LANGS, allLangLabels, render, t } from './i18n.js';
 import {
-  absenceFineRecordDraft,
-  approvedIncomeRecordDrafts,
   attendanceAdminActions,
   attendanceFineAmount,
-  attendanceFineDecision,
   calculateCommissionIncome,
   calculateIncomeRowsTotal,
   calculateNetIncome,
-  calculateSalaryAmount,
-  checkoutFineRecordDrafts,
   checkoutFineWaiverAmount,
   formatAdminMoney,
   formatMoney,
@@ -63,6 +88,11 @@ import {
   normalizeCommissionRate,
   parseStoreAmount
 } from './money.js';
+import {
+  calculateSalaryAmount,
+  getMemberCommissionRate,
+  getTotalIncome
+} from './payroll.js';
 import {
   adminIds,
   isGlobalAdmin,
@@ -73,6 +103,18 @@ import {
   serviceEnvironment,
   webhookSecretMatches
 } from './security.js';
+import {
+  getCurrentStoreId,
+  getMemberDisplayName,
+  getStore,
+  getStoreForMember,
+  isAnyAdmin,
+  isStoreAdmin,
+  listActiveStores,
+  listMemberStores,
+  resolveStoreForUser,
+  setCurrentStore
+} from './stores.js';
 import {
   answerCallback,
   editCallbackMessage,
@@ -85,6 +127,12 @@ export * from './dates.js';
 export * from './ids.js';
 export * from './money.js';
 export * from './security.js';
+export {
+  approveAbsenceFineRequest,
+  approveLeaveRequest,
+  cancelAbsenceForApprovedLeave,
+  rejectAbsenceFineRequest
+} from './approvals.js';
 export { sanitizeLogPayload } from './audit.js';
 export { render } from './i18n.js';
 export { telegram } from './telegram-client.js';
@@ -981,340 +1029,6 @@ async function finishCheckoutReject(env, adminId, chatId, storeId, requestId, re
   return sendMessage(env, chatId, t(lang, 'reject_recorded'), mainMenu(lang));
 }
 
-async function insertSystemFine(env, storeId, userId, fine, source, sourceId, adminId = 'SYSTEM', originalFine = fine) {
-  await env.DB.prepare(`
-    INSERT INTO income_records
-      (record_id, store_id, telegram_id, income, commission_rate, commission_income, original_fine, fine, type, source, request_id, approved_at, admin_id)
-    VALUES (?, ?, ?, 0, 0.6, 0, ?, ?, 'fine', ?, ?, ?, ?)
-  `).bind(makeId('REC'), storeId, userId, originalFine, fine, source, sourceId, nowIso(), adminId).run();
-}
-
-async function hasPendingCheckout(env, storeId, userId, businessDate) {
-  const row = await env.DB.prepare(`
-    SELECT request_id FROM pending_checkout_requests
-    WHERE store_id = ? AND telegram_id = ? AND business_date = ? AND status = 'pending'
-  `).bind(storeId, userId, businessDate).first();
-  return !!row;
-}
-
-async function hasAttendance(env, storeId, userId, businessDate, type) {
-  const row = await env.DB.prepare(`
-    SELECT record_id FROM attendance_records
-    WHERE store_id = ? AND telegram_id = ? AND business_date = ? AND type = ?
-  `).bind(storeId, userId, businessDate, type).first();
-  return !!row;
-}
-
-function mutationCount(result) {
-  return Number(result && result.meta ? result.meta.changes : 0);
-}
-
-export async function approveAbsenceFineRequest(env, requestId, adminId, expectedStoreId = '') {
-  const storeSql = expectedStoreId ? ` AND store_id = ?` : '';
-  const requestParams = expectedStoreId ? [requestId, expectedStoreId] : [requestId];
-  const found = await env.DB.prepare(`
-    SELECT * FROM absence_fine_requests WHERE request_id = ? AND status = 'pending'${storeSql}
-  `).bind(...requestParams).first();
-  if (!found) return { ok: false };
-
-  const decidedAt = nowIso();
-  const recordId = makeId('REC');
-  const draft = absenceFineRecordDraft(found, adminId, decidedAt, recordId);
-  const results = await env.DB.batch([
-    env.DB.prepare(`
-      INSERT INTO income_records
-        (record_id, store_id, telegram_id, income, commission_rate, commission_income, original_fine, fine, type, source, request_id, approved_at, admin_id)
-      SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
-      FROM absence_fine_requests WHERE request_id = ? AND status = 'pending'${storeSql}
-    `).bind(
-      draft.record_id, draft.store_id, draft.telegram_id, draft.income, draft.commission_rate,
-      draft.commission_income, draft.original_fine, draft.fine, draft.type, draft.source, draft.request_id,
-      draft.approved_at, draft.admin_id, ...requestParams
-    ),
-    env.DB.prepare(`
-      UPDATE absence_fine_requests
-      SET status = 'approved', decided_at = ?, admin_id = ?, income_record_id = ?
-      WHERE request_id = ? AND status = 'pending'${storeSql}
-    `).bind(decidedAt, adminId, recordId, ...requestParams)
-  ]);
-  if (mutationCount(results[1]) !== 1) return { ok: false };
-  await audit(env, found.store_id, adminId, 'approve_absence_fine', requestId, found);
-  return { ok: true, row: found, recordId };
-}
-
-export async function rejectAbsenceFineRequest(env, requestId, adminId, reason = 'Rejected by admin', expectedStoreId = '') {
-  const storeSql = expectedStoreId ? ` AND store_id = ?` : '';
-  const requestParams = expectedStoreId ? [requestId, expectedStoreId] : [requestId];
-  const found = await env.DB.prepare(`
-    SELECT * FROM absence_fine_requests WHERE request_id = ? AND status = 'pending'${storeSql}
-  `).bind(...requestParams).first();
-  if (!found) return { ok: false };
-
-  const result = await env.DB.prepare(`
-    UPDATE absence_fine_requests
-    SET status = 'rejected', decided_at = ?, admin_id = ?, reject_reason = ?
-    WHERE request_id = ? AND status = 'pending'${storeSql}
-  `).bind(nowIso(), adminId, reason, ...requestParams).run();
-  if (mutationCount(result) !== 1) return { ok: false };
-  await audit(env, found.store_id, adminId, 'reject_absence_fine', requestId, { reason, ...found });
-  return { ok: true, row: found, reason };
-}
-
-async function approveIncomeRequest(env, storeId, requestId, adminId) {
-  const found = await env.DB.prepare(`SELECT * FROM pending_income WHERE store_id = ? AND request_id = ?`).bind(storeId, requestId).first();
-  if (!found || found.status !== 'pending') return { ok: false };
-  const store = await getStore(env, storeId);
-  const approvedAt = nowIso();
-  const drafts = approvedIncomeRecordDrafts(found, adminId, approvedAt, [makeId('REC'), makeId('REC')]);
-  await env.DB.batch([
-    env.DB.prepare(`UPDATE pending_income SET status = 'approved', decided_at = ?, admin_id = ? WHERE store_id = ? AND request_id = ?`)
-      .bind(approvedAt, adminId, storeId, requestId),
-    ...drafts.map((draft) => env.DB.prepare(`
-      INSERT INTO income_records
-        (record_id, store_id, telegram_id, income, commission_rate, commission_income, original_fine, fine, type, source, request_id, approved_at, admin_id)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `).bind(
-      draft.record_id, draft.store_id, draft.telegram_id, draft.income, draft.commission_rate,
-      draft.commission_income, draft.original_fine, draft.fine, draft.type, draft.source, draft.request_id,
-      draft.approved_at, draft.admin_id
-    ))
-  ]);
-  await audit(env, storeId, adminId, 'approve_income', requestId, found);
-  return { ok: true, row: found, store };
-}
-
-async function rejectIncomeRequest(env, storeId, requestId, adminId, reason) {
-  const found = await env.DB.prepare(`SELECT * FROM pending_income WHERE store_id = ? AND request_id = ?`).bind(storeId, requestId).first();
-  if (!found || found.status !== 'pending') return { ok: false };
-  await env.DB.prepare(`
-    UPDATE pending_income
-    SET status = 'rejected', decided_at = ?, admin_id = ?, reject_reason = ?
-    WHERE store_id = ? AND request_id = ?
-  `).bind(nowIso(), adminId, reason, storeId, requestId).run();
-  await audit(env, storeId, adminId, 'reject_income', requestId, { reason, ...found });
-  return { ok: true, row: found, reason };
-}
-
-async function deletePendingIncome(env, storeId, requestId, adminId) {
-  const found = await env.DB.prepare(`SELECT * FROM pending_income WHERE store_id = ? AND request_id = ?`).bind(storeId, requestId).first();
-  if (!found) return { ok: false, error: 'not_found' };
-  await env.DB.prepare(`DELETE FROM pending_income WHERE store_id = ? AND request_id = ?`).bind(storeId, requestId).run();
-  await audit(env, storeId, adminId, 'delete_pending_income', requestId, found);
-  return { ok: true };
-}
-
-async function deleteIncomeRecord(env, storeId, recordId, adminId) {
-  const found = await env.DB.prepare(`SELECT * FROM income_records WHERE store_id = ? AND record_id = ?`).bind(storeId, recordId).first();
-  if (!found) return { ok: false, error: 'not_found' };
-  await env.DB.prepare(`DELETE FROM income_records WHERE store_id = ? AND record_id = ?`).bind(storeId, recordId).run();
-  await audit(env, storeId, adminId, 'delete_income_record', recordId, found);
-  return { ok: true };
-}
-
-async function updateIncomeFineRecord(env, storeId, recordId, adminId, fine) {
-  const amount = Number(fine);
-  if (!Number.isFinite(amount)) return { ok: false, error: 'invalid_fine' };
-  const found = await env.DB.prepare(`SELECT * FROM income_records WHERE store_id = ? AND record_id = ?`).bind(storeId, recordId).first();
-  if (!found) return { ok: false, error: 'not_found' };
-  if (found.type !== 'fine') return { ok: false, error: 'not_fine_record' };
-  await env.DB.prepare(`UPDATE income_records SET fine = ? WHERE store_id = ? AND record_id = ?`).bind(amount, storeId, recordId).run();
-  await audit(env, storeId, adminId, 'update_income_fine', recordId, { before: found.fine, after: amount });
-  return { ok: true };
-}
-
-async function approveSalaryRequest(env, storeId, requestId, adminId) {
-  const found = await env.DB.prepare(`SELECT * FROM salary_requests WHERE store_id = ? AND request_id = ?`).bind(storeId, requestId).first();
-  if (!found || found.status !== 'pending') return { ok: false };
-  const store = await getStore(env, storeId);
-  const member = await env.DB.prepare(`SELECT cycle_start, commission_rate FROM store_members WHERE store_id = ? AND telegram_id = ?`).bind(storeId, found.telegram_id).first();
-  const periodStart = member ? member.cycle_start : found.requested_at;
-  const periodEnd = nowIso();
-  const finalAmount = await getTotalIncome(env, storeId, found.telegram_id);
-  const recordId = makeId('SAL');
-
-  await env.DB.batch([
-    env.DB.prepare(`UPDATE salary_requests SET status = 'approved', decided_at = ?, admin_id = ? WHERE store_id = ? AND request_id = ?`)
-      .bind(periodEnd, adminId, storeId, requestId),
-    env.DB.prepare(`
-      INSERT INTO salary_records
-        (record_id, store_id, telegram_id, amount, period_start, period_end, approved_at, admin_id, request_id)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `).bind(recordId, storeId, found.telegram_id, finalAmount, periodStart, periodEnd, periodEnd, adminId, requestId),
-    env.DB.prepare(`UPDATE store_members SET cycle_start = ?, updated_at = ? WHERE store_id = ? AND telegram_id = ?`)
-      .bind(periodEnd, periodEnd, storeId, found.telegram_id)
-  ]);
-
-  await audit(env, storeId, adminId, 'approve_salary', requestId, { amount: finalAmount, ...found });
-  return { ok: true, row: found, store, amount: finalAmount, periodStart, periodEnd };
-}
-
-async function rejectSalaryRequest(env, storeId, requestId, adminId, reason) {
-  const found = await env.DB.prepare(`SELECT * FROM salary_requests WHERE store_id = ? AND request_id = ?`).bind(storeId, requestId).first();
-  if (!found || found.status !== 'pending') return { ok: false };
-  await env.DB.prepare(`
-    UPDATE salary_requests
-    SET status = 'rejected', decided_at = ?, admin_id = ?, reject_reason = ?
-    WHERE store_id = ? AND request_id = ?
-  `).bind(nowIso(), adminId, reason, storeId, requestId).run();
-  await audit(env, storeId, adminId, 'reject_salary', requestId, { reason, ...found });
-  return { ok: true, row: found, reason };
-}
-
-async function approveSalaryAdvanceRequest(env, storeId, requestId, adminId) {
-  const found = await env.DB.prepare(`SELECT * FROM salary_advance_requests WHERE store_id = ? AND request_id = ?`).bind(storeId, requestId).first();
-  if (!found || found.status !== 'pending') return { ok: false };
-  const store = await getStore(env, storeId);
-  const total = await getTotalIncome(env, storeId, found.telegram_id);
-  if (Number(found.amount || 0) > total) return { ok: false, error: 'amount_exceeds_salary', store, total };
-  const decidedAt = nowIso();
-  const recordId = makeId('REC');
-
-  await env.DB.batch([
-    env.DB.prepare(`UPDATE salary_advance_requests SET status = 'approved', decided_at = ?, admin_id = ? WHERE store_id = ? AND request_id = ?`)
-      .bind(decidedAt, adminId, storeId, requestId),
-    env.DB.prepare(`
-      INSERT INTO income_records
-        (record_id, store_id, telegram_id, income, commission_rate, commission_income, original_fine, fine, type, source, request_id, approved_at, admin_id)
-      VALUES (?, ?, ?, 0, 0.6, 0, ?, ?, 'advance', 'salary_advance', ?, ?, ?)
-    `).bind(recordId, storeId, found.telegram_id, found.amount, found.amount, requestId, decidedAt, adminId)
-  ]);
-
-  await audit(env, storeId, adminId, 'approve_salary_advance', requestId, found);
-  return { ok: true, row: found, store };
-}
-
-async function rejectSalaryAdvanceRequest(env, storeId, requestId, adminId, reason) {
-  const found = await env.DB.prepare(`SELECT * FROM salary_advance_requests WHERE store_id = ? AND request_id = ?`).bind(storeId, requestId).first();
-  if (!found || found.status !== 'pending') return { ok: false };
-  await env.DB.prepare(`
-    UPDATE salary_advance_requests
-    SET status = 'rejected', decided_at = ?, admin_id = ?, reject_reason = ?
-    WHERE store_id = ? AND request_id = ?
-  `).bind(nowIso(), adminId, reason, storeId, requestId).run();
-  await audit(env, storeId, adminId, 'reject_salary_advance', requestId, { reason, ...found });
-  return { ok: true, row: found, reason };
-}
-
-export async function approveLeaveRequest(env, storeId, requestId, adminId) {
-  const found = await env.DB.prepare(`SELECT * FROM leave_requests WHERE store_id = ? AND request_id = ?`).bind(storeId, requestId).first();
-  if (!found || !['pending', 'approved'].includes(found.status)) return { ok: false };
-  if (found.status === 'pending') {
-    const store = await getStore(env, storeId);
-    const conflict = await env.DB.prepare(`
-      SELECT COUNT(*) AS total FROM leave_requests
-      WHERE store_id = ? AND leave_date = ? AND status = 'approved' AND request_id != ?
-    `).bind(storeId, found.leave_date, requestId).first();
-    if (Number(conflict && conflict.total ? conflict.total : 0) >= Number((store && store.leave_daily_limit) || 1)) {
-      return { ok: false, error: 'leave_conflict' };
-    }
-  }
-  const absence = await env.DB.prepare(`
-    SELECT * FROM absence_fine_requests
-    WHERE store_id = ? AND telegram_id = ? AND business_date = ?
-      AND status IN ('pending', 'approved', 'rejected')
-  `).bind(storeId, found.telegram_id, found.leave_date).first();
-  if (found.status === 'approved' && !absence) return { ok: false };
-
-  const decidedAt = nowIso();
-  const statements = [];
-  if (found.status === 'pending') {
-    statements.push(env.DB.prepare(`
-      UPDATE leave_requests SET status = 'approved', decided_at = ?, admin_id = ?
-      WHERE store_id = ? AND request_id = ? AND status = 'pending'
-    `).bind(decidedAt, adminId, storeId, requestId));
-  }
-  if (absence) statements.push(...absenceCancellationStatements(env, storeId, absence.request_id, decidedAt, adminId));
-  const results = await env.DB.batch(statements);
-  if (found.status === 'pending' && mutationCount(results[0]) !== 1) return { ok: false };
-  const absenceResultIndex = statements.length - 1;
-  if (absence && mutationCount(results[absenceResultIndex]) !== 1) return { ok: false };
-  if (found.status === 'pending') await audit(env, storeId, adminId, 'approve_leave', requestId, found);
-  if (absence) await audit(env, storeId, adminId, 'cancel_absence_for_leave', absence.request_id, absence);
-  return { ok: true, row: found };
-}
-
-function absenceCancellationStatements(env, storeId, requestId, decidedAt, adminId) {
-  return [
-    env.DB.prepare(`
-      UPDATE income_records SET fine = 0
-      WHERE store_id = ? AND source = 'attendance_absence'
-        AND record_id = (
-          SELECT income_record_id FROM absence_fine_requests
-          WHERE request_id = ? AND status = 'approved'
-        )
-    `).bind(storeId, requestId),
-    env.DB.prepare(`
-      UPDATE absence_fine_requests
-      SET status = 'cancelled', cancellation_reason = 'Approved leave',
-          decided_at = COALESCE(decided_at, ?), admin_id = COALESCE(admin_id, ?)
-      WHERE request_id = ? AND status IN ('pending', 'approved', 'rejected')
-    `).bind(decidedAt, adminId, requestId)
-  ];
-}
-
-export async function cancelAbsenceForApprovedLeave(env, storeId, telegramId, leaveDate, adminId) {
-  const found = await env.DB.prepare(`
-    SELECT * FROM absence_fine_requests
-    WHERE store_id = ? AND telegram_id = ? AND business_date = ?
-      AND status IN ('pending', 'approved', 'rejected')
-  `).bind(storeId, telegramId, leaveDate).first();
-  if (!found) return { ok: false };
-
-  const decidedAt = nowIso();
-  const results = await env.DB.batch(absenceCancellationStatements(env, storeId, found.request_id, decidedAt, adminId));
-  if (mutationCount(results[1]) !== 1) return { ok: false };
-  await audit(env, storeId, adminId, 'cancel_absence_for_leave', found.request_id, found);
-  return { ok: true, row: found };
-}
-
-async function rejectLeaveRequest(env, storeId, requestId, adminId, reason) {
-  const found = await env.DB.prepare(`SELECT * FROM leave_requests WHERE store_id = ? AND request_id = ?`).bind(storeId, requestId).first();
-  if (!found || found.status !== 'pending') return { ok: false };
-  await env.DB.prepare(`
-    UPDATE leave_requests
-    SET status = 'rejected', decided_at = ?, admin_id = ?, reject_reason = ?
-    WHERE store_id = ? AND request_id = ?
-  `).bind(nowIso(), adminId, reason, storeId, requestId).run();
-  await audit(env, storeId, adminId, 'reject_leave', requestId, { reason, ...found });
-  return { ok: true, row: found, reason };
-}
-
-async function approveCheckoutRequest(env, storeId, requestId, adminId, applyFine = true) {
-  const found = await env.DB.prepare(`SELECT * FROM pending_checkout_requests WHERE store_id = ? AND request_id = ?`).bind(storeId, requestId).first();
-  if (!found || found.status !== 'pending') return { ok: false };
-  if (await hasAttendance(env, storeId, found.telegram_id, found.business_date, 'checkout')) return { ok: false };
-  const store = await getStore(env, storeId);
-  const approvedAt = nowIso();
-  const recordId = makeId('ATT');
-  const fineDecision = attendanceFineDecision(found.fine, applyFine);
-  await env.DB.batch([
-    env.DB.prepare(`UPDATE pending_checkout_requests SET status = 'approved', decided_at = ?, admin_id = ? WHERE store_id = ? AND request_id = ?`)
-      .bind(approvedAt, adminId, storeId, requestId),
-    env.DB.prepare(`
-      INSERT INTO attendance_records
-        (record_id, store_id, telegram_id, business_date, type, timestamp, latitude, longitude, late, early_leave, original_fine, fine)
-      VALUES (?, ?, ?, ?, 'checkout', ?, ?, ?, 0, ?, ?, ?)
-    `).bind(recordId, storeId, found.telegram_id, found.business_date, found.timestamp, found.latitude, found.longitude, found.early_leave, fineDecision.originalFine, fineDecision.fine)
-  ]);
-  for (const fineRecord of checkoutFineRecordDrafts(found.fine, applyFine)) {
-    await insertSystemFine(env, storeId, found.telegram_id, fineRecord.fine, 'attendance_early', recordId, adminId, fineRecord.original_fine);
-  }
-  await audit(env, storeId, adminId, 'approve_checkout', requestId, found);
-  return { ok: true, row: found, store, waivedFine: !applyFine && Number(found.fine || 0) > 0 };
-}
-
-async function rejectCheckoutRequest(env, storeId, requestId, adminId, reason) {
-  const found = await env.DB.prepare(`SELECT * FROM pending_checkout_requests WHERE store_id = ? AND request_id = ?`).bind(storeId, requestId).first();
-  if (!found || found.status !== 'pending') return { ok: false };
-  await env.DB.prepare(`
-    UPDATE pending_checkout_requests
-    SET status = 'rejected', decided_at = ?, admin_id = ?, reject_reason = ?
-    WHERE store_id = ? AND request_id = ?
-  `).bind(nowIso(), adminId, reason, storeId, requestId).run();
-  await audit(env, storeId, adminId, 'reject_checkout', requestId, { reason, ...found });
-  return { ok: true, row: found, reason };
-}
-
 async function leaveDateOccupied(env, storeId, leaveDate, dailyLimit = 1) {
   const row = await env.DB.prepare(`
     SELECT COUNT(*) AS total FROM leave_requests
@@ -1393,68 +1107,6 @@ async function acceptInvite(env, telegramId, inviteCode) {
   return invite;
 }
 
-async function resolveStoreForUser(env, telegramId, preferredStoreId) {
-  if (preferredStoreId) {
-    const preferred = await getStoreForMember(env, preferredStoreId, telegramId);
-    if (preferred) return { store: preferred, needsChoice: false, stores: [preferred] };
-  }
-  const currentStoreId = await getCurrentStoreId(env, telegramId);
-  if (currentStoreId) {
-    const current = await getStoreForMember(env, currentStoreId, telegramId);
-    if (current) return { store: current, needsChoice: false, stores: [current] };
-  }
-  const stores = await listMemberStores(env, telegramId);
-  if (stores.length === 1) {
-    await setCurrentStore(env, telegramId, stores[0].store_id);
-    return { store: stores[0], needsChoice: false, stores };
-  }
-  if (stores.length > 1) return { store: null, needsChoice: true, stores };
-  if (isGlobalAdmin(env, telegramId)) {
-    const defaultStore = await getStore(env, DEFAULT_STORE_ID);
-    return { store: defaultStore, needsChoice: false, stores: defaultStore ? [defaultStore] : [] };
-  }
-  return { store: null, needsChoice: false, stores: [] };
-}
-
-async function listMemberStores(env, telegramId) {
-  const rows = await env.DB.prepare(`
-    SELECT s.* FROM stores s
-    JOIN store_members m ON m.store_id = s.store_id
-    WHERE m.telegram_id = ? AND m.status = 'active' AND s.status = 'active'
-    ORDER BY CASE WHEN s.store_id = ? THEN 0 ELSE 1 END, s.name
-  `).bind(telegramId, DEFAULT_STORE_ID).all();
-  return rows.results || [];
-}
-
-async function getStoreForMember(env, storeId, telegramId) {
-  const row = await env.DB.prepare(`
-    SELECT s.* FROM stores s
-    JOIN store_members m ON m.store_id = s.store_id
-    WHERE s.store_id = ? AND m.telegram_id = ? AND m.status = 'active' AND s.status = 'active'
-  `).bind(storeId, telegramId).first();
-  return row || null;
-}
-
-async function getStore(env, storeId) {
-  const row = await env.DB.prepare(`SELECT * FROM stores WHERE store_id = ?`).bind(storeId || DEFAULT_STORE_ID).first();
-  return row || null;
-}
-
-async function getMemberDisplayName(env, storeId, telegramId) {
-  const row = await env.DB.prepare(`
-    SELECT COALESCE(
-      NULLIF(m.display_name, ''),
-      NULLIF(u.name, ''),
-      NULLIF(u.username, ''),
-      m.telegram_id
-    ) AS display_name
-    FROM store_members m
-    LEFT JOIN users u ON u.telegram_id = m.telegram_id
-    WHERE m.store_id = ? AND m.telegram_id = ?
-  `).bind(storeId, telegramId).first();
-  return row && row.display_name ? row.display_name : telegramId;
-}
-
 async function getState(env, telegramId) {
   const row = await env.DB.prepare(`SELECT state, data_json FROM user_states WHERE telegram_id = ?`).bind(telegramId).first();
   if (!row) return null;
@@ -1476,42 +1128,9 @@ async function clearState(env, telegramId) {
   await env.DB.prepare(`DELETE FROM user_states WHERE telegram_id = ?`).bind(telegramId).run();
 }
 
-async function getTotalIncome(env, storeId, telegramId) {
-  const member = await env.DB.prepare(`SELECT cycle_start FROM store_members WHERE store_id = ? AND telegram_id = ?`).bind(storeId, telegramId).first();
-  const cycleStart = member ? member.cycle_start : '1970-01-01T00:00:00.000Z';
-  const row = await env.DB.prepare(`
-    SELECT COALESCE(SUM(commission_income - fine), 0) AS total
-    FROM income_records
-    WHERE store_id = ? AND telegram_id = ? AND approved_at >= ?
-  `).bind(storeId, telegramId, cycleStart).first();
-  return Number(row.total || 0);
-}
-
-async function getMemberCommissionRate(env, storeId, telegramId) {
-  const row = await env.DB.prepare(`
-    SELECT commission_rate FROM store_members WHERE store_id = ? AND telegram_id = ?
-  `).bind(storeId, telegramId).first();
-  return normalizeCommissionRate(row && row.commission_rate);
-}
-
 async function getUserLang(env, telegramId) {
   const row = await env.DB.prepare(`SELECT language FROM user_preferences WHERE telegram_id = ?`).bind(telegramId).first();
   return row && LANGS.includes(row.language) ? row.language : 'zh';
-}
-
-async function getCurrentStoreId(env, telegramId) {
-  const row = await env.DB.prepare(`SELECT current_store_id FROM user_preferences WHERE telegram_id = ?`).bind(telegramId).first();
-  return row && row.current_store_id ? String(row.current_store_id) : '';
-}
-
-async function setCurrentStore(env, telegramId, storeId) {
-  await env.DB.prepare(`
-    INSERT INTO user_preferences (telegram_id, language, current_store_id, updated_at)
-    VALUES (?, 'zh', ?, ?)
-    ON CONFLICT(telegram_id) DO UPDATE SET
-      current_store_id = excluded.current_store_id,
-      updated_at = excluded.updated_at
-  `).bind(telegramId, storeId, nowIso()).run();
 }
 
 async function setUserLang(env, telegramId, language) {
@@ -1539,13 +1158,6 @@ async function sendRegistrationStoreChooser(env, chatId, lang) {
   const stores = await listActiveStores(env);
   if (!stores.length) return sendMessage(env, chatId, t(lang, 'no_store'));
   return sendMessage(env, chatId, t(lang, 'register_intro'), registrationStoreKeyboard(stores));
-}
-
-async function listActiveStores(env) {
-  const rows = await env.DB.prepare(`
-    SELECT * FROM stores WHERE status = 'active' ORDER BY name
-  `).all();
-  return rows.results || [];
 }
 
 async function finishRegistrationRequest(env, userId, chatId, storeId, name, lang) {
@@ -2828,25 +2440,6 @@ function monthRange(monthFrom, monthTo) {
   };
 }
 
-async function isAnyAdmin(env, telegramId) {
-  if (isGlobalAdmin(env, telegramId)) return true;
-  const row = await env.DB.prepare(`
-    SELECT 1 FROM store_members
-    WHERE telegram_id = ? AND status = 'active' AND role IN ('admin', 'owner')
-    LIMIT 1
-  `).bind(telegramId).first();
-  return !!row;
-}
-
-async function isStoreAdmin(env, telegramId, storeId) {
-  if (isGlobalAdmin(env, telegramId)) return true;
-  const row = await env.DB.prepare(`
-    SELECT 1 FROM store_members
-    WHERE store_id = ? AND telegram_id = ? AND status = 'active' AND role IN ('admin', 'owner')
-  `).bind(storeId, telegramId).first();
-  return !!row;
-}
-
 async function notifyStoreAdmins(env, storeId, text, replyMarkup) {
   const rows = await env.DB.prepare(`
     SELECT telegram_id FROM store_members
@@ -2856,17 +2449,6 @@ async function notifyStoreAdmins(env, storeId, text, replyMarkup) {
   for (const adminId of ids) {
     await sendMessage(env, adminId, text, replyMarkup);
   }
-}
-
-async function audit(env, storeId, adminId, action, targetId, details) {
-  await auditStatement(env, storeId, adminId, action, targetId, details).run();
-}
-
-function auditStatement(env, storeId, adminId, action, targetId, details, createdAt = nowIso()) {
-  return env.DB.prepare(`
-    INSERT INTO admin_audit_logs (store_id, admin_id, action, target_id, details_json, created_at)
-    VALUES (?, ?, ?, ?, ?, ?)
-  `).bind(storeId || DEFAULT_STORE_ID, adminId, action, targetId || '', JSON.stringify(details || {}), createdAt);
 }
 
 function isIncomeCommand(text, lang) {
@@ -2988,18 +2570,6 @@ function makeNumericCode() {
   crypto.getRandomValues(bytes);
   const value = ((bytes[0] << 24) >>> 0) + (bytes[1] << 16) + (bytes[2] << 8) + bytes[3];
   return String(value % 1000000).padStart(6, '0');
-}
-
-function nowIso() {
-  return new Date().toISOString();
-}
-
-function safeJson(text) {
-  try {
-    return JSON.parse(text || '{}');
-  } catch {
-    return {};
-  }
 }
 
 export async function processAbsenceFines(env, now = new Date()) {
