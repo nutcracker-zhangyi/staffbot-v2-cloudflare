@@ -44,6 +44,7 @@ import worker, {
 } from '../src/index.js';
 
 const source = readFileSync(new URL('../src/index.js', import.meta.url), 'utf8');
+const moneySource = readFileSync(new URL('../src/money.js', import.meta.url), 'utf8');
 const wrangler = readFileSync(new URL('../wrangler.toml', import.meta.url), 'utf8');
 const absenceOutboxMigration = readFileSync(new URL('../db/migrations/017_absence_notification_outbox.sql', import.meta.url), 'utf8');
 
@@ -1131,7 +1132,7 @@ test('routes compact absence approval callbacks through store authorization', ()
 
 test('absence fines use the existing editable fine record path', () => {
   assert.match(source, /found\.type !== 'fine'/);
-  assert.match(source, /source: 'attendance_absence'/);
+  assert.match(moneySource, /source: 'attendance_absence'/);
 });
 
 test('approves an absence fine exactly once across replayed requests', async () => {

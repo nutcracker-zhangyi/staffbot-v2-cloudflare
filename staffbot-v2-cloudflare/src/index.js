@@ -1,16 +1,87 @@
-const JSON_HEADERS = { 'content-type': 'application/json; charset=utf-8' };
-const HTML_HEADERS = { 'content-type': 'text/html; charset=utf-8', ...securityHeaders() };
-const TEXT_HEADERS = { 'content-type': 'text/plain; charset=utf-8' };
-const CSV_HEADERS = {
-  'content-type': 'text/csv; charset=utf-8',
-  'content-disposition': 'attachment',
-  ...securityHeaders()
-};
+import {
+  addRangeFilter,
+  adminOrderSql,
+  adminPage,
+  adminSortColumns,
+  adminStoreWhere,
+  absenceAdminSortColumns,
+  currentAdminStoreId,
+  memberListQuery,
+  placeholders,
+  resetAdminSortPages,
+  sumAttendanceEmployeeStats,
+  toCsv,
+  visibleAdminStores
+} from './admin-query.js';
+import { DEFAULT_STORE_ID } from './constants.js';
+import {
+  absenceScanDates,
+  addIsoDays,
+  completedAttendanceDate,
+  dateRange,
+  formatAdminDateTime,
+  formatAdminShortDateHour,
+  getBusinessDate,
+  leaveDateOptions,
+  leaveMonthRange,
+  leaveRuleParams,
+  localDate,
+  localParts,
+  localTime,
+  minutesOf,
+  validateLeaveDate,
+  zonedMidnightIso
+} from './dates.js';
+import {
+  CSV_HEADERS,
+  JSON_HEADERS,
+  clearSessionCookie,
+  html,
+  json,
+  readJson,
+  sessionCookieValue,
+  setSessionCookie
+} from './http.js';
+import { makeId, makeStoreId } from './ids.js';
+import {
+  absenceFineRecordDraft,
+  approvedIncomeRecordDrafts,
+  attendanceAdminActions,
+  attendanceFineAmount,
+  attendanceFineDecision,
+  calculateCommissionIncome,
+  calculateIncomeRowsTotal,
+  calculateNetIncome,
+  calculateSalaryAmount,
+  checkoutFineRecordDrafts,
+  checkoutFineWaiverAmount,
+  formatAdminMoney,
+  formatMoney,
+  formatPercent,
+  isVndStore,
+  normalizeCommissionRate,
+  parseStoreAmount
+} from './money.js';
+import {
+  adminIds,
+  isGlobalAdmin,
+  isTelegramRecipientAllowed,
+  isWebhookConfigReady,
+  nextLoginFailureState,
+  parseTelegramAllowlist,
+  scheduledTasksEnabled,
+  serviceEnvironment,
+  webhookSecretMatches
+} from './security.js';
+import { normalizePositiveInt, validTime } from './validation.js';
 
-const DEFAULT_STORE_ID = 'DEFAULT';
-const SESSION_COOKIE = 'staffbot_admin_session';
+export * from './admin-query.js';
+export * from './dates.js';
+export * from './ids.js';
+export * from './money.js';
+export * from './security.js';
+
 const LANGS = ['zh', 'en', 'vi', 'ru'];
-const ADMIN_PAGE_SIZE = 100;
 export const ABSENCE_PENDING_COLUMNS = Object.freeze([
   'store_id', 'display_name', 'business_date', 'fine', 'created_at',
   'notification_status', 'notification_delivery', 'action'
@@ -19,9 +90,6 @@ export const ABSENCE_HISTORY_COLUMNS = Object.freeze([
   'store_id', 'display_name', 'business_date', 'status', 'original_fine',
   'actual_fine', 'admin_id', 'decided_at', 'decision_reason', 'income_record_id'
 ]);
-const MAX_LOGIN_FAILURES = 5;
-const LOGIN_LOCK_MS = 10 * 60 * 1000;
-
 const TEXT = {
   choose_lang: { zh: '请选择语言：', en: 'Please choose language:', vi: 'Vui lòng chọn ngôn ngữ:' },
   lang_set: { zh: '语言已设置为中文。', en: 'Language set to English.', vi: 'Đã chọn Tiếng Việt.' },
@@ -1852,7 +1920,7 @@ async function adminLoginVerify(request, env) {
 }
 
 async function requireAdminSession(request, env) {
-  const token = cookieValue(request.headers.get('cookie') || '', SESSION_COOKIE);
+  const token = sessionCookieValue(request.headers.get('cookie') || '');
   if (!token) return null;
   const row = await env.DB.prepare(`SELECT * FROM admin_sessions WHERE token = ? AND expires_at > ?`).bind(token, nowIso()).first();
   if (!row || !(await isAnyAdmin(env, row.telegram_id))) return null;
@@ -2430,26 +2498,6 @@ async function handleAdminAttendance(request, env, url, storeId, parts, adminId)
   return json({ ok: false, error: 'not_found' }, 404);
 }
 
-export function sumAttendanceEmployeeStats(rows) {
-  const totals = { work_days: 0, late_days: 0, absence_days: 0, leave_days: 0 };
-  const money = new Map();
-  for (const row of rows || []) {
-    totals.work_days += Number(row.work_days || 0);
-    totals.late_days += Number(row.late_days || 0);
-    totals.absence_days += Number(row.absence_days || 0);
-    totals.leave_days += Number(row.leave_days || 0);
-    const currency = String(row.currency || '');
-    money.set(currency, (money.get(currency) || 0) + Number(row.fine_total || 0));
-  }
-  const fineTotals = [...money].map(([currency, amount]) => ({ currency, amount }));
-  return {
-    ...totals,
-    fine_total: fineTotals.length <= 1 ? (fineTotals[0]?.amount || 0) : null,
-    currency: fineTotals.length === 1 ? fineTotals[0].currency : null,
-    fine_totals: fineTotals
-  };
-}
-
 export async function attendanceEmployeeStats(env, filters, now = new Date()) {
   const stores = await env.DB.prepare(`
     SELECT store_id, name, timezone, currency
@@ -2878,11 +2926,6 @@ async function listPagedRows(env, url, pageParam, rowsKey, selectSql, countSql, 
   return { [rowsKey]: rows.results || [], pagination };
 }
 
-function adminSortColumns(columns, tableAlias = '') {
-  const prefix = tableAlias ? `${tableAlias}.` : '';
-  return Object.fromEntries(columns.map((column) => [column, prefix + column]));
-}
-
 async function adminFilters(env, url, fallbackStoreId, adminId) {
   const requestedStoreIds = String(url.searchParams.get('stores') || fallbackStoreId)
     .split(',')
@@ -2913,17 +2956,6 @@ async function adminFilters(env, url, fallbackStoreId, adminId) {
     monthDateStart: range ? range.startDate : '',
     monthDateEnd: range ? range.endDate : ''
   };
-}
-
-function addRangeFilter(where, params, column, start, end) {
-  if (start) {
-    where.push(`${column} >= ?`);
-    params.push(start);
-  }
-  if (end) {
-    where.push(`${column} < ?`);
-    params.push(end);
-  }
 }
 
 function exportSql(baseSql, params, filters, dateColumn, dateOnly, orderSql) {
@@ -2980,64 +3012,6 @@ function monthRange(monthFrom, monthTo) {
     startDate: start.toISOString().slice(0, 10),
     endDate: end.toISOString().slice(0, 10)
   };
-}
-
-function parseIsoDate(value) {
-  const dateText = String(value || '').trim();
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(dateText)) return null;
-  const [year, month, day] = dateText.split('-').map(Number);
-  const date = new Date(Date.UTC(year, month - 1, day));
-  if (date.toISOString().slice(0, 10) !== dateText) return null;
-  return dateText;
-}
-
-export function dateRange(dateFrom, dateTo, timezone = 'UTC') {
-  const from = parseIsoDate(dateFrom);
-  const to = parseIsoDate(dateTo);
-  if (!from && !to) return { startIso: '', endIso: '', startDate: '', endDate: '' };
-  let startDate = from || '';
-  let endDate = to || '';
-  if (startDate && endDate && startDate > endDate) {
-    const temp = startDate;
-    startDate = endDate;
-    endDate = temp;
-  }
-  const endExclusive = endDate ? addIsoDays(endDate, 1) : '';
-  return {
-    startIso: startDate ? zonedMidnightIso(startDate, timezone) : '',
-    endIso: endExclusive ? zonedMidnightIso(endExclusive, timezone) : '',
-    startDate,
-    endDate: endExclusive
-  };
-}
-
-function zonedMidnightIso(isoDate, timezone) {
-  const [year, month, day] = isoDate.split('-').map(Number);
-  let utc = Date.UTC(year, month - 1, day);
-  const target = Date.UTC(year, month - 1, day);
-  for (let i = 0; i < 3; i += 1) {
-    const parts = zonedParts(new Date(utc), timezone || 'UTC');
-    const seen = Date.UTC(Number(parts.year), Number(parts.month) - 1, Number(parts.day), Number(parts.hour), Number(parts.minute));
-    utc += target - seen;
-  }
-  return new Date(utc).toISOString();
-}
-
-function zonedParts(date, timezone) {
-  const parts = new Intl.DateTimeFormat('en-CA', {
-    timeZone: timezone || 'UTC',
-    year: 'numeric',
-    month: '2-digit',
-    day: '2-digit',
-    hour: '2-digit',
-    minute: '2-digit',
-    hourCycle: 'h23'
-  }).formatToParts(date);
-  return Object.fromEntries(parts.filter((part) => part.type !== 'literal').map((part) => [part.type, part.value]));
-}
-
-function placeholders(count) {
-  return Array.from({ length: count }, () => '?').join(',');
 }
 
 async function isAnyAdmin(env, telegramId) {
@@ -3276,14 +3250,6 @@ export function incomeAdminNotificationText({ storeName, employeeName, userId, i
   ].join('\n');
 }
 
-function isGlobalAdmin(env, telegramId) {
-  return adminIds(env).includes(String(telegramId));
-}
-
-function adminIds(env) {
-  return Array.from(new Set(String(env.ADMIN_IDS || '').split(',').map((id) => id.trim()).filter(Boolean)));
-}
-
 function amountPrompt(lang, store, type) {
   const key = type === 'fine' ? 'ask_fine' : type === 'advance' ? 'ask_advance' : 'ask_income';
   const base = t(lang, key);
@@ -3296,214 +3262,11 @@ function leaveRulePrompt(lang, store) {
   return render(lang, 'ask_leave_date', leaveRuleParams(store));
 }
 
-export function leaveRuleParams(store, now = new Date()) {
-  const tz = (store && store.timezone) || 'Asia/Tokyo';
-  const min = leaveWindowMinDays(store, now, tz);
-  const max = Math.max(normalizePositiveInt(store && store.leave_max_notice_days, 5, 1, 365), min);
-  return { min, max };
-}
-
-function parseAmount(text, allowZero) {
-  const value = Number(String(text).replace(',', '.').trim());
-  if (!Number.isFinite(value)) return null;
-  if (value < 0 || value > 1000000) return null;
-  if (!allowZero && value === 0) return null;
-  return Math.round(value * 100) / 100;
-}
-
-export function parseStoreAmount(store, text, allowZero) {
-  const value = parseAmount(text, allowZero);
-  if (value === null) return null;
-  if (!isVndStore(store)) return value;
-  return Math.round(value * 1000000);
-}
-
-export function attendanceFineAmount(store, amount) {
-  return parseStoreAmount(store, String(amount || 0), true) || 0;
-}
-
-function isVndStore(store) {
-  const currency = String((store && store.currency) || '').trim().toUpperCase();
-  return currency === '₫' || currency === 'VND';
-}
-
-export function formatMoney(store, amount) {
-  const currency = (store && store.currency) || '$';
-  if (isVndStore(store)) return `${currency}${Math.round(Number(amount || 0)).toLocaleString('en-US')}`;
-  return `${currency}${Number(amount || 0).toFixed(2)}`;
-}
-
-export function formatAdminMoney(value) {
-  if (value === null || value === undefined || value === '') return '';
-  const number = Number(value);
-  if (!Number.isFinite(number)) return String(value);
-  return number.toLocaleString('en-US', { maximumFractionDigits: 20 });
-}
-
-export function formatAdminDateTime(value, timezone = 'Asia/Tokyo') {
-  const text = String(value || '').trim();
-  if (!text) return '';
-  if (/^\d{4}-\d{2}-\d{2}$/.test(text)) return text.replaceAll('-', '/') + ' 00:00:00';
-  const date = new Date(text);
-  if (Number.isNaN(date.getTime())) return text;
-  const parts = new Intl.DateTimeFormat('en-CA', {
-    timeZone: timezone || 'Asia/Tokyo',
-    year: 'numeric',
-    month: '2-digit',
-    day: '2-digit',
-    hour: '2-digit',
-    minute: '2-digit',
-    second: '2-digit',
-    hour12: false
-  }).formatToParts(date);
-  const map = Object.fromEntries(parts.filter((part) => part.type !== 'literal').map((part) => [part.type, part.value]));
-  return `${map.year}/${map.month}/${map.day} ${map.hour}:${map.minute}:${map.second}`;
-}
-
-export function formatAdminShortDateHour(value, timezone = 'Asia/Tokyo') {
-  const text = String(value || '').trim();
-  if (!text) return '';
-  const date = new Date(text);
-  if (Number.isNaN(date.getTime())) return text;
-  const parts = new Intl.DateTimeFormat('en-CA', {
-    timeZone: timezone || 'Asia/Tokyo',
-    month: '2-digit',
-    day: '2-digit',
-    hour: '2-digit',
-    hour12: false
-  }).formatToParts(date);
-  const map = Object.fromEntries(parts.filter((part) => part.type !== 'literal').map((part) => [part.type, part.value]));
-  return `${map.month}/${map.day} ${map.hour}点`;
-}
-
-function normalizeCommissionRate(value) {
-  const rate = Number(value);
-  if (!Number.isFinite(rate) || rate <= 0) return 0.6;
-  if (rate > 1) return Math.min(rate / 100, 1);
-  return Math.min(rate, 1);
-}
-
-export function calculateSalaryAmount(total, commissionRate) {
-  return Math.round(Number(total || 0) * normalizeCommissionRate(commissionRate) * 100) / 100;
-}
-
-export function calculateCommissionIncome(income, commissionRate) {
-  return Math.round(Number(income || 0) * normalizeCommissionRate(commissionRate) * 100) / 100;
-}
-
-export function calculateNetIncome(income, fine, commissionRate) {
-  return calculateCommissionIncome(income, commissionRate) - Number(fine || 0);
-}
-
-export function calculateIncomeRowsTotal(rows) {
-  return (rows || []).reduce((total, row) => total + Number(row.commission_income || 0) - Number(row.fine || 0), 0);
-}
-
-export function absenceFineRecordDraft(request, adminId, decidedAt, recordId) {
-  return {
-    record_id: recordId,
-    store_id: request.store_id,
-    telegram_id: request.telegram_id,
-    income: 0,
-    commission_rate: 0.6,
-    commission_income: 0,
-    original_fine: Number(request.original_fine || 0),
-    fine: Number(request.fine || 0),
-    type: 'fine',
-    source: 'attendance_absence',
-    request_id: request.request_id,
-    approved_at: decidedAt,
-    admin_id: adminId
-  };
-}
-
-export function approvedIncomeRecordDrafts(found, adminId, approvedAt, recordIds) {
-  const ids = recordIds || [];
-  const rows = [{
-    record_id: ids[0] || makeId('REC'),
-    store_id: found.store_id,
-    telegram_id: found.telegram_id,
-    income: Number(found.income || 0),
-    commission_rate: normalizeCommissionRate(found.commission_rate),
-    commission_income: Number(found.commission_income || 0),
-    original_fine: 0,
-    fine: 0,
-    type: 'income',
-    source: 'manual',
-    request_id: found.request_id,
-    approved_at: approvedAt,
-    admin_id: adminId
-  }];
-  if (Number(found.fine || 0) !== 0) {
-    rows.push({
-      record_id: ids[1] || makeId('REC'),
-      store_id: found.store_id,
-      telegram_id: found.telegram_id,
-      income: 0,
-      commission_rate: normalizeCommissionRate(found.commission_rate),
-      commission_income: 0,
-      original_fine: Number(found.fine || 0),
-      fine: Number(found.fine || 0),
-      type: 'fine',
-      source: 'manual_fine',
-      request_id: found.request_id,
-      approved_at: approvedAt,
-      admin_id: adminId
-    });
-  }
-  return rows;
-}
-
-export function checkoutFineWaiverAmount(fine, waived) {
-  const amount = Number(fine || 0);
-  return waived && amount > 0 ? -amount : 0;
-}
-
-export function checkoutFineRecordDrafts(fine, applyFine) {
-  const amount = Number(fine || 0);
-  if (amount <= 0) return [];
-  return [{ fine: applyFine ? amount : 0, original_fine: amount }];
-}
-
-export function attendanceAdminActions(fine) {
-  return Number(fine || 0) > 0 ? ['approve_fine', 'approve_no_fine', 'reject'] : ['approve', 'reject'];
-}
-
-export function attendanceFineDecision(originalFine, applyFine) {
-  const amount = Number(originalFine || 0);
-  return {
-    fine: applyFine ? amount : 0,
-    originalFine: amount
-  };
-}
-
-function formatPercent(value) {
-  return `${Math.round(normalizeCommissionRate(value) * 10000) / 100}%`;
-}
-
-function makeId(prefix) {
-  return `${prefix}-${crypto.randomUUID()}`;
-}
-
-export function makeStoreId() {
-  const bytes = new Uint8Array(3);
-  crypto.getRandomValues(bytes);
-  return `STORE_${Array.from(bytes).map((byte) => byte.toString(16).padStart(2, '0')).join('').toUpperCase()}`;
-}
-
 function makeNumericCode() {
   const bytes = new Uint8Array(4);
   crypto.getRandomValues(bytes);
   const value = ((bytes[0] << 24) >>> 0) + (bytes[1] << 16) + (bytes[2] << 8) + bytes[3];
   return String(value % 1000000).padStart(6, '0');
-}
-
-export function nextLoginFailureState(currentFailures, now = new Date()) {
-  const failedAttempts = Number(currentFailures || 0) + 1;
-  return {
-    failedAttempts,
-    lockedUntil: failedAttempts >= MAX_LOGIN_FAILURES ? new Date(now.getTime() + LOGIN_LOCK_MS).toISOString() : null
-  };
 }
 
 function nowIso() {
@@ -3516,95 +3279,6 @@ function safeJson(text) {
   } catch {
     return {};
   }
-}
-
-export function serviceEnvironment(env) {
-  const value = String(env && env.ENVIRONMENT || '').trim().toLowerCase();
-  if (value === 'production' || value === 'staging') return value;
-  return 'unknown';
-}
-
-export function parseTelegramAllowlist(value) {
-  return new Set(
-    String(value || '')
-      .split(',')
-      .map((id) => id.trim())
-      .filter(Boolean)
-  );
-}
-
-export function isTelegramRecipientAllowed(env, payload) {
-  const environment = serviceEnvironment(env);
-  if (environment === 'production') return true;
-  if (environment !== 'staging') return false;
-  if (!payload || payload.chat_id === undefined || payload.chat_id === null) return true;
-  if (String(env.TELEGRAM_RECIPIENT_MODE || '').toLowerCase() !== 'allowlist') return false;
-  return parseTelegramAllowlist(env.STAGING_ALLOWED_TELEGRAM_IDS).has(String(payload.chat_id));
-}
-
-export function scheduledTasksEnabled(env) {
-  return !!(env && (env.SCHEDULED_TASKS_ENABLED === true
-    || String(env.SCHEDULED_TASKS_ENABLED || '').toLowerCase() === 'true'));
-}
-
-export function isWebhookConfigReady(env) {
-  return !!(env && env.BOT_TOKEN && env.WEBHOOK_SECRET);
-}
-
-export function webhookSecretMatches(headerSecret, expectedSecret) {
-  return !headerSecret || headerSecret === expectedSecret;
-}
-
-export function securityHeaders() {
-  return {
-    'x-content-type-options': 'nosniff',
-    'x-frame-options': 'DENY',
-    'referrer-policy': 'no-referrer',
-    'permissions-policy': 'geolocation=(), microphone=(), camera=()',
-    'content-security-policy': "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'"
-  };
-}
-
-function localParts(date, tz) {
-  const parts = new Intl.DateTimeFormat('en-CA', {
-    timeZone: tz,
-    year: 'numeric',
-    month: '2-digit',
-    day: '2-digit',
-    hour: '2-digit',
-    minute: '2-digit',
-    hour12: false
-  }).formatToParts(date);
-  return Object.fromEntries(parts.filter((p) => p.type !== 'literal').map((p) => [p.type, p.value]));
-}
-
-function localTime(date, tz) {
-  const p = localParts(date, tz);
-  return `${p.hour}:${p.minute}`;
-}
-
-function localDate(date, tz) {
-  const p = localParts(date, tz);
-  return `${p.year}-${p.month}-${p.day}`;
-}
-
-export function completedAttendanceDate(now = new Date(), timezone = 'Asia/Tokyo') {
-  const today = localDate(now, timezone);
-  const hour = Number(localParts(now, timezone).hour);
-  return addIsoDays(today, hour >= 12 ? -1 : -2);
-}
-
-export function absenceScanDates(store, now = new Date()) {
-  if (!store || !store.absence_fine_enabled_at) return [];
-  const timezone = store.timezone || 'Asia/Tokyo';
-  const enabledDate = localDate(new Date(store.absence_fine_enabled_at), timezone);
-  const firstDate = store.absence_last_checked_date
-    ? addIsoDays(store.absence_last_checked_date, 1)
-    : enabledDate;
-  const finalDate = completedAttendanceDate(now, timezone);
-  const dates = [];
-  for (let date = firstDate; date <= finalDate; date = addIsoDays(date, 1)) dates.push(date);
-  return dates;
 }
 
 export async function processAbsenceFines(env, now = new Date()) {
@@ -3839,187 +3513,6 @@ async function cancelAbsenceNotification(env, notification, reason) {
   `).bind(reason, notification.request_id, notification.admin_id).run();
 }
 
-function getBusinessDate(date, tz) {
-  const p = localParts(date, tz);
-  const hour = Number(p.hour);
-  if (hour >= 12) return `${p.year}-${p.month}-${p.day}`;
-  const prev = new Date(date.getTime() - 24 * 60 * 60 * 1000);
-  const q = localParts(prev, tz);
-  return `${q.year}-${q.month}-${q.day}`;
-}
-
-function minutesOf(hhmm) {
-  const [hRaw, mRaw] = String(hhmm).split(':');
-  let h = Number(hRaw);
-  const m = Number(mRaw || 0);
-  if (h < 12) h += 24;
-  return h * 60 + m;
-}
-
-export function adminPage(rawPage, total) {
-  const totalRows = Math.max(0, Math.floor(Number(total) || 0));
-  const totalPages = Math.max(1, Math.ceil(totalRows / ADMIN_PAGE_SIZE));
-  const pageNumber = Math.floor(Number(rawPage));
-  const page = Math.min(Math.max(Number.isFinite(pageNumber) && pageNumber > 0 ? pageNumber : 1, 1), totalPages);
-  return {
-    page,
-    page_size: ADMIN_PAGE_SIZE,
-    total: totalRows,
-    total_pages: totalPages,
-    has_prev: page > 1,
-    has_next: page < totalPages,
-    limit: ADMIN_PAGE_SIZE,
-    offset: (page - 1) * ADMIN_PAGE_SIZE
-  };
-}
-
-export function visibleAdminStores(stores) {
-  return (stores || []).filter((store) => !store.status || store.status === 'active');
-}
-
-export function currentAdminStoreId(stores, selectedStoreIds) {
-  return (selectedStoreIds && selectedStoreIds[0]) || (stores[0] && stores[0].store_id) || DEFAULT_STORE_ID;
-}
-
-export function adminStoreWhere(tableAlias, storeIds) {
-  const ids = storeIds && storeIds.length ? storeIds : [DEFAULT_STORE_ID];
-  const prefix = tableAlias ? `${tableAlias}.` : '';
-  return { sql: `${prefix}store_id IN (${placeholders(ids.length)})`, params: ids };
-}
-
-export function memberListQuery(filterQueryText, pageQueryText) {
-  return [filterQueryText, pageQueryText].filter(Boolean).join('&');
-}
-
-export function adminOrderSql(url, pageParam, allowedColumns, defaultOrderSql, tieBreakerSql = '') {
-  const prefix = String(pageParam || '').replace(/_page$/, '');
-  const sort = url.searchParams.get(`${prefix}_sort`);
-  const dir = String(url.searchParams.get(`${prefix}_dir`) || '').toLowerCase();
-  if (!sort || !allowedColumns || !allowedColumns[sort] || !['asc', 'desc'].includes(dir)) return defaultOrderSql;
-  const tieBreaker = tieBreakerSql ? `, ${tieBreakerSql}` : '';
-  return `ORDER BY ${allowedColumns[sort]} ${dir.toUpperCase()}${tieBreaker}`;
-}
-
-export function absenceAdminSortColumns() {
-  return {
-    ...adminSortColumns([
-      'request_id', 'store_id', 'telegram_id', 'business_date', 'original_fine', 'fine', 'status',
-      'created_at', 'notified_at', 'decided_at', 'admin_id', 'reject_reason', 'cancellation_reason',
-      'income_record_id'
-    ], 'r'),
-    display_name: 'display_name',
-    username: 'u.username',
-    store_name: 's.name',
-    currency: 's.currency',
-    actual_fine: 'actual_fine',
-    notification_status: 'notification_status',
-    notification_delivery: `CASE
-      WHEN n.request_id IS NULL THEN 0
-      WHEN n.sent_total = n.notification_total THEN 2000000000 + COALESCE(n.notification_total, 0)
-      ELSE 1000000000 + COALESCE(n.notification_attempts, 0)
-    END`,
-    decision_reason: `COALESCE(NULLIF(r.reject_reason, ''), r.cancellation_reason, '')`
-  };
-}
-
-export function resetAdminSortPages(pageState, tab, group) {
-  const tabPages = pageState[tab] || {};
-  const absencePageKey = tab === 'absence'
-    ? { pending: 'absence_pending_page', history: 'absence_history_page' }[group]
-    : '';
-  const keys = absencePageKey ? [absencePageKey] : Object.keys(tabPages);
-  for (const key of keys) {
-    if (Object.prototype.hasOwnProperty.call(tabPages, key)) tabPages[key] = 1;
-  }
-}
-
-export function validateLeaveDate(store, value, now = new Date()) {
-  const date = String(value || '').trim();
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return { ok: false, error: 'invalid_format' };
-  const tz = (store && store.timezone) || 'Asia/Tokyo';
-  const minDays = normalizePositiveInt(store && store.leave_min_notice_days, 1, 1, 365);
-  const maxDays = Math.max(normalizePositiveInt(store && store.leave_max_notice_days, 5, 1, 365), minDays);
-  const today = localDate(now, tz);
-  const minDate = addIsoDays(today, leaveWindowMinDays(store, now, tz));
-  const maxDate = addIsoDays(today, maxDays);
-  if (date < minDate || date > maxDate) return { ok: false, error: 'outside_window', min_date: minDate, max_date: maxDate };
-  return { ok: true, date };
-}
-
-export function leaveDateOptions(store, now = new Date()) {
-  const tz = (store && store.timezone) || 'Asia/Tokyo';
-  const minDays = leaveWindowMinDays(store, now, tz);
-  const maxDays = Math.max(normalizePositiveInt(store && store.leave_max_notice_days, 5, 1, 365), minDays);
-  const today = localDate(now, tz);
-  const dates = [];
-  for (let day = minDays; day <= maxDays; day += 1) {
-    dates.push(addIsoDays(today, day));
-  }
-  return dates;
-}
-
-function leaveWindowMinDays(store, now, tz) {
-  const minDays = normalizePositiveInt(store && store.leave_min_notice_days, 1, 1, 365);
-  const cutoffHour = normalizePositiveInt(store && store.leave_same_day_cutoff_hour, 5, 0, 23);
-  return minDays === 1 && Number(localParts(now, tz).hour) < cutoffHour ? 0 : minDays;
-}
-
-export function leaveMonthRange(leaveDate) {
-  const match = /^(\d{4})-(\d{2})-\d{2}$/.exec(leaveDate || '');
-  if (!match) return { startDate: '', endDate: '' };
-  const year = Number(match[1]);
-  const monthIndex = Number(match[2]) - 1;
-  const start = new Date(Date.UTC(year, monthIndex, 1));
-  const end = new Date(Date.UTC(year, monthIndex + 1, 1));
-  return {
-    startDate: start.toISOString().slice(0, 10),
-    endDate: end.toISOString().slice(0, 10)
-  };
-}
-
-function addIsoDays(isoDate, days) {
-  const [year, month, day] = isoDate.split('-').map(Number);
-  const date = new Date(Date.UTC(year, month - 1, day + Number(days || 0)));
-  return date.toISOString().slice(0, 10);
-}
-
-async function readJson(request) {
-  try {
-    return await request.json();
-  } catch {
-    return {};
-  }
-}
-
-function json(data, status = 200, extraHeaders = {}) {
-  return new Response(JSON.stringify(data), { status, headers: { ...JSON_HEADERS, ...securityHeaders(), ...extraHeaders } });
-}
-
-function html(text) {
-  return new Response(text, { headers: HTML_HEADERS });
-}
-
-function cookieValue(cookieHeader, name) {
-  const parts = cookieHeader.split(';').map((part) => part.trim());
-  for (const part of parts) {
-    const [key, ...rest] = part.split('=');
-    if (key === name) return decodeURIComponent(rest.join('='));
-  }
-  return '';
-}
-
-function setSessionCookie(token, expiresAt) {
-  return {
-    'set-cookie': `${SESSION_COOKIE}=${encodeURIComponent(token)}; Expires=${new Date(expiresAt).toUTCString()}; Path=/; HttpOnly; Secure; SameSite=Lax`
-  };
-}
-
-function clearSessionCookie() {
-  return {
-    'set-cookie': `${SESSION_COOKIE}=; Expires=Thu, 01 Jan 1970 00:00:00 GMT; Path=/; HttpOnly; Secure; SameSite=Lax`
-  };
-}
-
 function cleanStoreId(value) {
   return String(value || '')
     .trim()
@@ -4104,33 +3597,6 @@ export function normalizeEmployeeAbsenceCheck(input, currentMember, now = new Da
     absence_check_enabled: 1,
     absence_check_enabled_at: currentEnabled ? currentEnabledAt : now.toISOString()
   };
-}
-
-function validTime(value) {
-  return /^\d{2}:\d{2}$/.test(String(value || ''));
-}
-
-function normalizePositiveInt(value, fallback, min, max) {
-  const number = Math.floor(Number(value));
-  if (!Number.isFinite(number)) return fallback;
-  return Math.min(Math.max(number, min), max);
-}
-
-function toCsv(rows) {
-  if (!rows.length) return '';
-  const headers = Object.keys(rows[0]);
-  const lines = [headers.join(',')];
-  for (const row of rows) {
-    lines.push(headers.map((header) => csvCell(row[header])).join(','));
-  }
-  return lines.join('\n');
-}
-
-export function csvCell(value) {
-  const text = value === null || value === undefined ? '' : String(value);
-  const safe = /^[=+\-@]/.test(text) ? `'${text}` : text;
-  if (/[",\n]/.test(safe)) return `"${safe.replaceAll('"', '""')}"`;
-  return safe;
 }
 
 function adminHtml(env) {
