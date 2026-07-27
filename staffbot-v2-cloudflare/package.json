@@ -6,6 +6,7 @@
   "scripts": {
     "check": "node --check src/index.js",
     "test": "node --test test/*.test.js",
+    "test:ledger": "node --test test/payroll-ledger.test.js test/payroll-reconciliation.test.js",
     "test:staging": "node --test test/staging-config.test.js test/staging-sanitize.test.js"
   },
   "devDependencies": {}
