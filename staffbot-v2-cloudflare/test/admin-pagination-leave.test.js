@@ -49,6 +49,7 @@ import {
 } from '../src/absence.js';
 
 const source = readFileSync(new URL('../src/index.js', import.meta.url), 'utf8');
+const adminApiSource = readFileSync(new URL('../src/admin-api.js', import.meta.url), 'utf8');
 const absenceSource = readFileSync(new URL('../src/absence.js', import.meta.url), 'utf8');
 const approvalsSource = readFileSync(new URL('../src/approvals.js', import.meta.url), 'utf8');
 const moneySource = readFileSync(new URL('../src/money.js', import.meta.url), 'utf8');
@@ -481,8 +482,8 @@ test('groups aggregate attendance fines by currency instead of adding incompatib
 });
 
 test('attendance API returns summary and employee statistics', () => {
-  assert.match(source, /employee_stats/);
-  assert.match(source, /summary: sumAttendanceEmployeeStats/);
+  assert.match(adminApiSource, /employee_stats/);
+  assert.match(adminApiSource, /summary: sumAttendanceEmployeeStats/);
 });
 
 test('attendance page renders five metrics and a multi-employee drill-down table', () => {
@@ -720,10 +721,10 @@ test('maps every visible sortable absence column to server ordering', () => {
 });
 
 test('absence pagination uses request id as the stable default and custom-sort tiebreaker', () => {
-  assert.match(source, /ORDER BY r\.business_date DESC, r\.created_at DESC, r\.request_id DESC/);
-  assert.match(source, /ORDER BY COALESCE\(r\.decided_at, r\.created_at\) DESC, r\.request_id DESC/);
-  assert.match(source, /baseParams, `ORDER BY r\.business_date DESC, r\.created_at DESC, r\.request_id DESC`, absenceSort, `r\.request_id DESC`/);
-  assert.match(source, /baseParams, `ORDER BY COALESCE\(r\.decided_at, r\.created_at\) DESC, r\.request_id DESC`, absenceSort, `r\.request_id DESC`/);
+  assert.match(adminApiSource, /ORDER BY r\.business_date DESC, r\.created_at DESC, r\.request_id DESC/);
+  assert.match(adminApiSource, /ORDER BY COALESCE\(r\.decided_at, r\.created_at\) DESC, r\.request_id DESC/);
+  assert.match(adminApiSource, /baseParams, `ORDER BY r\.business_date DESC, r\.created_at DESC, r\.request_id DESC`, absenceSort, `r\.request_id DESC`/);
+  assert.match(adminApiSource, /baseParams, `ORDER BY COALESCE\(r\.decided_at, r\.created_at\) DESC, r\.request_id DESC`, absenceSort, `r\.request_id DESC`/);
 });
 
 test('resets only the sorted absence pager while preserving existing tab behavior', () => {
@@ -881,7 +882,7 @@ test('admin store form exposes absence fine controls', () => {
 test('member form exposes daily absence checking', () => {
   assert.match(source, /memberAbsenceCheck/);
   assert.equal((source.match(/absence_check_enabled:'[^']+'/g) || []).length, 4);
-  assert.equal((source.match(/m\.commission_rate,\s*m\.absence_check_enabled,/g) || []).length, 2);
+  assert.equal((adminApiSource.match(/m\.commission_rate,\s*m\.absence_check_enabled,/g) || []).length, 2);
   assert.match(source, /\['store_id','telegram_id','display_name','username','role','status','commission_rate','absence_check_enabled','cycle_start','joined_at','action'\]/);
   assert.match(source, /absence_check_enabled:\s*member\.absence_check_enabled === 0 \? L\('disable'\) : L\('enable'\)/);
   assert.match(source, /absence_check_enabled:\s*\$\('memberAbsenceCheck'\)\.value === 'true'/);

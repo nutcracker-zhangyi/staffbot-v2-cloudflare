@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { DatabaseSync } from 'node:sqlite';
 
+import { handleAdminApi } from '../src/admin-api.js';
 import worker from '../src/index.js';
 import { createD1 } from './helpers/d1.js';
 
@@ -20,6 +21,68 @@ function context() {
     }
   };
 }
+
+test('handles authenticated, unknown, and unauthorized admin API requests directly', async () => {
+  const database = new DatabaseSync(':memory:');
+  database.exec(schema);
+  database.exec(`
+    INSERT INTO admin_sessions (
+      token, telegram_id, expires_at, created_at
+    ) VALUES (
+      'direct-handler-session',
+      'ADMIN1',
+      '2099-01-01T00:00:00.000Z',
+      '2026-07-28T00:00:00.000Z'
+    )
+  `);
+  const env = {
+    DB: createD1(database),
+    ADMIN_IDS: 'ADMIN1'
+  };
+  const authenticatedHeaders = {
+    cookie: 'staffbot_admin_session=direct-handler-session'
+  };
+
+  const me = await handleAdminApi(
+    new Request('https://staffbot.test/api/admin/me', {
+      headers: authenticatedHeaders
+    }),
+    env,
+    new URL('https://staffbot.test/api/admin/me'),
+    context()
+  );
+  const unknown = await handleAdminApi(
+    new Request('https://staffbot.test/api/admin/unknown', {
+      headers: authenticatedHeaders
+    }),
+    env,
+    new URL('https://staffbot.test/api/admin/unknown'),
+    context()
+  );
+  const unauthorized = await handleAdminApi(
+    new Request('https://staffbot.test/api/admin/me'),
+    env,
+    new URL('https://staffbot.test/api/admin/me'),
+    context()
+  );
+
+  assert.equal(me.status, 200);
+  assert.deepEqual(await me.json(), {
+    ok: true,
+    telegram_id: 'ADMIN1',
+    global_admin: true
+  });
+  assert.equal(unknown.status, 404);
+  assert.deepEqual(await unknown.json(), {
+    ok: false,
+    error: 'not_found'
+  });
+  assert.equal(unauthorized.status, 401);
+  assert.deepEqual(await unauthorized.json(), {
+    ok: false,
+    error: 'unauthorized'
+  });
+});
 
 test('routes health and admin pages with visible staging identity', async () => {
   const ctx = context();
