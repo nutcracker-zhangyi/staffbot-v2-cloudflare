@@ -18,11 +18,17 @@ Run from the `staffbot-v2-cloudflare` project directory:
 ```bash
 npm run check
 npm test
-npm run test:staging
 npx wrangler deploy --env staging
+curl -fsS https://staffbot-v2-staging.staffbot-v2.workers.dev/
 ```
 
-Never run a staging deployment without `--env staging`.
+This is the required phase-2 verification order. Run `npm run test:staging`
+as an additional focused check before deployment when staging configuration
+or sanitization changes.
+
+No remote mutation or deployment command without `--env staging` is permitted
+in this phase. In particular, never run a bare `npx wrangler deploy`.
+Production deploys and production migrations are outside this phase.
 
 ## Verify
 

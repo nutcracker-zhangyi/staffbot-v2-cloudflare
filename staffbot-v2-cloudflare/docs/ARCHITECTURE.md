@@ -1,101 +1,126 @@
-# 架构设计
+# StaffBot V2 架构
 
-## 总体结构
+## 当前阶段
+
+本文件记录模块化重构完成后的实际结构。当前阶段只拆分代码所有权，
+不改变业务规则、数据库结构、API 响应、Telegram 文案或回调数据。
+
+> The source of truth is still income_records during this phase.
+> payroll_entries and amount_micros begin only in the next approved phase.
+
+统一账本、金额整数化、个人第 16/30 天发薪流程、付款凭证和 Dashboard
+仍属于下一阶段，必须在本阶段 staging 验收通过并获得批准后才能开始。
+
+## 运行结构
 
 ```text
-Telegram User
-    |
-    v
-Telegram Bot API
-    |
-    v
-Cloudflare Worker
-    |
-    v
-Cloudflare D1 Database
+Telegram / Admin Browser / Cron
+               |
+               v
+           router.js
+        /       |       \
+telegram.js  admin-api.js  absence.js
+     |            |           |
+     +------------+-----------+
+                  |
+       approvals.js / payroll.js
+                  |
+             Cloudflare D1
 ```
 
-## 核心组件
+`src/index.js` 仅作为 Wrangler 和既有测试的兼容入口，默认导出
+`router.js`，并重新导出既有公共函数。业务代码不得重新写回入口文件。
 
-| 组件 | 作用 |
+## 模块所有权
+
+| Module | Owns | Must not own |
+| --- | --- | --- |
+| router.js | Worker entrypoints and dispatch | business calculations |
+| telegram.js | bot state and interaction flow | raw admin HTML |
+| telegram-client.js | Telegram HTTP delivery and staging fence | business decisions |
+| admin-api.js | authenticated admin routes | browser rendering logic |
+| admin-page.js | admin HTML/CSS/JS | payroll SQL |
+| approvals.js | existing approval state transitions | Telegram copy |
+| payroll.js | current payroll queries | payment UI |
+| absence.js | absence scan and delivery lifecycle | general admin routing |
+| money.js | pure legacy money calculations | D1 access |
+| dates.js | pure timezone/date calculations | D1 access |
+
+辅助模块：
+
+| Module | Responsibility |
 | --- | --- |
-| Telegram Bot | 员工和管理员使用的聊天界面 |
-| Cloudflare Worker | 接收 Telegram webhook，处理业务逻辑 |
-| Cloudflare D1 | 保存用户、收入、审批、状态、日志 |
-| Cloudflare Secrets | 保存 Bot Token、管理员 ID 等敏感配置 |
+| `admin-query.js` | 后台分页、排序白名单、筛选和 CSV 纯辅助逻辑 |
+| `audit.js` | 审计、运行日志、ID 和时间戳 |
+| `http.js` | JSON、HTML、CSV 响应与会话 Cookie |
+| `security.js` | 环境识别、管理员和 staging 安全策略 |
+| `stores.js` | 店铺、成员和管理员权限查询 |
+| `i18n.js` | Telegram 与后台共用的多语言文本 |
+| `validation.js` | 无数据库访问的输入规范化 |
+| `constants.js` | 跨模块常量 |
 
-## 请求流程
-
-1. 用户在 Telegram 发送消息。
-2. Telegram 调用 Worker 的 webhook URL。
-3. Worker 验证 webhook secret。
-4. Worker 把原始 update 写入 `bot_logs`。
-5. Worker 根据消息类型分发到命令处理器。
-6. 命令处理器读写 D1 数据库。
-7. Worker 调用 Telegram Bot API 回复用户。
-
-## 推荐代码结构
+## 允许的依赖方向
 
 ```text
-staffbot-v2-cloudflare/
-  src/
-    index.ts              # Worker 入口
-    config.ts             # 环境变量读取
-    telegram.ts           # Telegram API 封装
-    router.ts             # 消息和 callback 分发
-    commands/
-      start.ts
-      ping.ts
-      income.ts
-      total.ts
-      cancel.ts
-    services/
-      users.ts
-      state.ts
-      income.ts
-      audit.ts
-      logs.ts
-    db/
-      schema.sql
-      queries.ts
-  docs/
+index.js
+  -> router.js and compatibility exports
+
+router.js
+  -> telegram.js / admin-api.js / admin-page.js / absence.js
+
+interaction modules
+  -> approvals.js / payroll.js / stores.js / telegram-client.js
+
+business and query modules
+  -> money.js / dates.js / validation.js / audit.js / constants.js
 ```
 
-## 设计原则
+约束：
 
-### 1. 不使用内存状态
+- 所有模块不得导入 `index.js`。
+- `router.js` 只负责路由、鉴权前置检查和调度，不计算工资。
+- `admin-page.js` 不直接访问 D1，也不包含后台 API SQL。
+- `telegram-client.js` 只负责发送和 staging 收件人隔离，不决定业务结果。
+- `money.js`、`dates.js` 和 `validation.js` 保持纯函数，不访问 D1。
+- 数据写入和审批状态转换集中在所有者模块，页面与路由不得复制实现。
 
-用户当前流程必须写进数据库 `user_states`。
+## 当前数据边界
 
-这样如果用户卡住，可以直接在数据库里看到：
+- 工资统计的当前事实来源仍是 `income_records`。
+- 收入、罚款和预支仍遵循现有字段与计算语义。
+- `salary_records` 保存现有工资审批快照。
+- 本阶段没有 `payroll_entries`，也没有 `amount_micros`。
+- 本阶段不执行历史财务迁移或对账。
 
-```text
-telegram_id = 123456789
-state = WAIT_INCOME_AMOUNT
+## 验证命令
+
+本地完整门禁：
+
+```bash
+for file in src/*.js; do node --check "$file"; done
+npm run check
+npm test
+git diff --check
 ```
 
-### 2. 所有输入先记录日志
+只允许部署 staging：
 
-每一条 Telegram update 都写入 `bot_logs`。
-
-排错时先看日志，不靠猜。
-
-### 3. 命令优先于状态
-
-这些命令永远最高优先级：
-
-```text
-/ping
-/cancel
-/start
+```bash
+npx wrangler deploy --env staging
 ```
 
-即使用户卡在收入流程里，也能取消或测试。
+禁止在本阶段执行不带 `--env staging` 的部署命令。production Worker、D1、
+Telegram bot 和 Cron 必须保持不变。详细步骤见
+[`STAGING_RUNBOOK.md`](./STAGING_RUNBOOK.md)。
 
-### 4. 第一版不做多语言
+## 下一阶段交接门槛
 
-先把业务跑通，再做多语言。
+只有以下条件全部满足后，才能申请开始统一账本阶段：
 
-### 5. 管理员操作必须审计
-
-管理员批准、驳回、非法点击，都写入 `admin_audit_logs`。
+1. 所有既有测试与模块边界测试通过。
+2. `src/index.js` 保持为少于 120 行的兼容入口。
+3. staging Worker 成功运行当前提交。
+4. staging Telegram 只向允许名单发送消息。
+5. staging Cron 保持禁用。
+6. production 健康检查与部署前一致。
+7. 用户明确批准开始 `payroll_entries` 和 `amount_micros` 阶段。
