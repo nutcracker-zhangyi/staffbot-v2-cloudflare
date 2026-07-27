@@ -16,7 +16,7 @@ import worker, {
   attendanceAdminActions,
   attendanceFineDecision,
   absenceApprovalKeyboard,
-  absenceScanDates,
+  absenceScanDates as facadeAbsenceScanDates,
   approveLeaveRequest,
   approveAbsenceFineRequest,
   cancelAbsenceForApprovedLeave,
@@ -34,16 +34,22 @@ import worker, {
   leaveRuleParams,
   normalizeAbsenceFineSetting,
   normalizeEmployeeAbsenceCheck,
-  processAbsenceFines,
+  processAbsenceFines as facadeProcessAbsenceFines,
   resetAdminSortPages,
-  deliverAbsenceNotification,
+  deliverAbsenceNotification as facadeDeliverAbsenceNotification,
   rejectAbsenceFineRequest,
   sumAttendanceEmployeeStats,
   validateLeaveDate,
   visibleAdminStores
 } from '../src/index.js';
+import {
+  absenceScanDates,
+  deliverAbsenceNotification,
+  processAbsenceFines
+} from '../src/absence.js';
 
 const source = readFileSync(new URL('../src/index.js', import.meta.url), 'utf8');
+const absenceSource = readFileSync(new URL('../src/absence.js', import.meta.url), 'utf8');
 const approvalsSource = readFileSync(new URL('../src/approvals.js', import.meta.url), 'utf8');
 const moneySource = readFileSync(new URL('../src/money.js', import.meta.url), 'utf8');
 const wrangler = readFileSync(new URL('../wrangler.toml', import.meta.url), 'utf8');
@@ -1107,11 +1113,20 @@ test('returns every unprocessed enabled date through the completed date', () => 
     absence_fine_enabled_at: '2026-07-12T03:00:00.000Z',
     absence_last_checked_date: '2026-07-12'
   };
-  assert.deepEqual(absenceScanDates(store, new Date('2026-07-15T03:10:00.000Z')), [
+  const now = new Date('2026-07-15T03:10:00.000Z');
+  const expectedDates = [
     '2026-07-13',
     '2026-07-14'
-  ]);
-  assert.deepEqual(absenceScanDates({ ...store, absence_fine_enabled_at: null }, new Date('2026-07-15T03:10:00.000Z')), []);
+  ];
+  assert.deepEqual(absenceScanDates(store, now), expectedDates);
+  assert.deepEqual(facadeAbsenceScanDates(store, now), expectedDates);
+  assert.deepEqual(absenceScanDates({ ...store, absence_fine_enabled_at: null }, now), []);
+});
+
+test('keeps absence processing interfaces available through the worker facade', () => {
+  assert.equal(facadeAbsenceScanDates, absenceScanDates);
+  assert.equal(facadeDeliverAbsenceNotification, deliverAbsenceNotification);
+  assert.equal(facadeProcessAbsenceFines, processAbsenceFines);
 });
 
 test('keeps absence approval callbacks below Telegram limit', () => {
@@ -1914,7 +1929,7 @@ test('discovers each absence once while excluding an exempt employee and a not-y
   assert.match(notifications[0].text, /₫1,500,000/);
   assert.deepEqual(notifications[0].reply_markup.inline_keyboard, absenceApprovalKeyboard(requests[0].request_id));
   assert.deepEqual(outbox.map((row) => row.status), ['sent']);
-  assert.match(source, /m\.role = 'employee'/);
+  assert.match(absenceSource, /m\.role = 'employee'/);
 });
 
 test('registers the absence scan as an hourly Worker Cron', () => {
