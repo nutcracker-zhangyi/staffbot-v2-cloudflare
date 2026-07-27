@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { DatabaseSync } from 'node:sqlite';
 
+import { createD1 } from './helpers/d1.js';
 import worker, {
   ABSENCE_HISTORY_COLUMNS,
   ABSENCE_PENDING_COLUMNS,
@@ -210,51 +211,7 @@ async function getAdminAbsence(env, query = '') {
 }
 
 function d1TestDatabase(database, afterFirst, hooks = {}) {
-  function prepare(sql) {
-    let params = [];
-    return {
-      _sql: sql,
-      bind(...values) {
-        params = values;
-        return this;
-      },
-      async first() {
-        if (hooks.beforeFirst) await hooks.beforeFirst(sql, params);
-        const row = database.prepare(sql).get(...params) || null;
-        if (afterFirst) await afterFirst(sql, row);
-        return row;
-      },
-      async all() {
-        return { results: database.prepare(sql).all(...params) };
-      },
-      async run() {
-        if (hooks.beforeRun) await hooks.beforeRun(sql, params);
-        return this._run();
-      },
-      _run() {
-        const result = database.prepare(sql).run(...params);
-        return { success: true, meta: { changes: Number(result.changes) } };
-      }
-    };
-  }
-  return {
-    prepare,
-    async batch(statements) {
-      database.exec('BEGIN IMMEDIATE');
-      try {
-        const results = [];
-        for (const statement of statements) {
-          if (hooks.beforeBatchStatement) await hooks.beforeBatchStatement(statement._sql);
-          results.push(statement._run());
-        }
-        database.exec('COMMIT');
-        return results;
-      } catch (error) {
-        database.exec('ROLLBACK');
-        throw error;
-      }
-    }
-  };
+  return createD1(database, { ...hooks, afterFirst });
 }
 
 function memberAbsenceTestDatabase() {
