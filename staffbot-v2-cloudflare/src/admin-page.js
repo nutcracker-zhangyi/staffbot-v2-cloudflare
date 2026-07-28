@@ -113,11 +113,11 @@ export function adminHtml(env) {
     .badge { display:inline-flex; align-items:center; min-height:22px; border:1px solid var(--line); border-radius:999px; padding:2px 8px; font-size:12px; }
     .dashboard-reversal { color:var(--bad); border-color:rgba(255,107,107,.5); background:var(--bad-soft); }
     .staging-banner { padding:10px 24px; background:#7f1d1d; color:#fff; font-weight:700; text-align:center; letter-spacing:.04em; }
-    @media (max-width: 720px) { main { padding:12px; } table { min-width:820px; } header { align-items:flex-start; flex-direction:column; padding:14px 12px; } .toolbar, .member-filter { align-items:stretch; } .member-filter > * { width:100%; } input, select, button { min-height:44px; } nav button { min-height:40px; } }
     @media (max-width:720px) {
       .dashboard-chart-grid { grid-template-columns:1fr; }
     }
     ` : ''}
+    @media (max-width: 720px) { main { padding:12px; } table { min-width:820px; } header { align-items:flex-start; flex-direction:column; padding:14px 12px; } .toolbar, .member-filter { align-items:stretch; } .member-filter > * { width:100%; } input, select, button { min-height:44px; } nav button { min-height:40px; } }
   </style>
 </head>
 <body>

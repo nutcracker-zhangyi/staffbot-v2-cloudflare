@@ -113,6 +113,7 @@ test('shows Dashboard only in staging and keeps production admin unchanged', asy
   );
   const stagingDocument = normalizedHtml(await staging.text());
   const productionDocument = normalizedHtml(await production.text());
+  const generalMobileCss = '@media (max-width: 720px) { main { padding:12px; } table { min-width:820px; } header { align-items:flex-start; flex-direction:column; padding:14px 12px; } .toolbar, .member-filter { align-items:stretch; } .member-filter > * { width:100%; } input, select, button { min-height:44px; } nav button { min-height:40px; } }';
 
   assert.match(stagingDocument, /data-tab="dashboard"/);
   assert.match(stagingDocument, /id="tab-dashboard"/);
@@ -149,6 +150,8 @@ test('shows Dashboard only in staging and keeps production admin unchanged', asy
     assert.doesNotMatch(productionDocument, new RegExp(marker.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
   }
   assert.doesNotMatch(productionDocument, /dashboard/i);
+  assert.ok(stagingDocument.includes(generalMobileCss));
+  assert.ok(productionDocument.includes(generalMobileCss));
 });
 
 test('generated Dashboard client builds its independent query and formats signed micros', async () => {
