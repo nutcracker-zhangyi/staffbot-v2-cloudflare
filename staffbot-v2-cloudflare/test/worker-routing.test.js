@@ -31,6 +31,12 @@ function normalizedHtml(value) {
   return String(value).replace(/\s+/g, ' ').trim();
 }
 
+function inlineAdminScript(document) {
+  const match = String(document).match(/<script>([\s\S]*?)<\/script>/);
+  assert.ok(match, 'admin document should contain an inline script');
+  return match[1];
+}
+
 test('keeps the Worker entrypoint as a compatibility facade', () => {
   assert.equal(indexSource.includes('async function handleAdminApi'), false);
   assert.equal(indexSource.includes('function adminHtml'), false);
@@ -92,6 +98,79 @@ test('preserves the complete admin document contract', async () => {
   ]) {
     assert.match(document, new RegExp(`id="${id}"`));
   }
+});
+
+test('shows Dashboard only in staging and keeps production admin unchanged', async () => {
+  const staging = await worker.fetch(
+    new Request('https://staffbot.test/admin'),
+    { ENVIRONMENT: 'staging' },
+    context()
+  );
+  const production = await worker.fetch(
+    new Request('https://staffbot.test/admin'),
+    { ENVIRONMENT: 'production' },
+    context()
+  );
+  const stagingDocument = normalizedHtml(await staging.text());
+  const productionDocument = normalizedHtml(await production.text());
+
+  assert.match(stagingDocument, /data-tab="dashboard"/);
+  assert.match(stagingDocument, /id="tab-dashboard"/);
+  assert.match(stagingDocument, /data-dashboard-filter/);
+  assert.match(stagingDocument, /data-dashboard-employee/);
+  assert.doesNotMatch(productionDocument, /data-tab="dashboard"/);
+  assert.doesNotMatch(productionDocument, /id="tab-dashboard"/);
+});
+
+test('generated Dashboard client builds its independent query and formats signed micros', async () => {
+  const response = await worker.fetch(
+    new Request('https://staffbot.test/admin'),
+    { ENVIRONMENT: 'staging' },
+    context()
+  );
+  const script = inlineAdminScript(await response.text());
+  new Function(script);
+
+  const queryStart = script.indexOf('function dashboardQuery(');
+  const queryEnd = script.indexOf('\n    async function renderDashboard', queryStart);
+  const dashboardFilters = {
+    dateFrom: '2026-07-01',
+    dateTo: '2026-07-31',
+    employee: 'all',
+    stores: ['TOKYO', 'NEW_YORK'],
+    employeeSort: 'fine_micros',
+    employeeDir: 'asc',
+    selectedEmployee: '',
+    entriesPage: 3
+  };
+  const dashboardQuery = new Function(
+    'dashboardFilters',
+    'storeId',
+    `${script.slice(queryStart, queryEnd)}; return dashboardQuery;`
+  )(dashboardFilters, () => 'SHARED-STORE');
+  const query = Object.fromEntries(new URLSearchParams(dashboardQuery({
+    includeEntries: true,
+    detailEmployeeId: 'EMP-1'
+  })));
+
+  assert.deepEqual(query, {
+    stores: 'TOKYO,NEW_YORK',
+    date_from: '2026-07-01',
+    date_to: '2026-07-31',
+    employee: 'EMP-1',
+    employees_sort: 'fine_micros',
+    employees_dir: 'asc',
+    entries_page: '3'
+  });
+
+  const formatStart = script.indexOf('function formatDashboardMicros(');
+  const formatEnd = script.indexOf('\n    function bindDashboardControls', formatStart);
+  const formatDashboardMicros = new Function(
+    'formatCurrencyAmount',
+    `${script.slice(formatStart, formatEnd)}; return formatDashboardMicros;`
+  )((currency, value) => `${currency}${value}`);
+
+  assert.equal(formatDashboardMicros('¥', -2_500_000), '¥-2.5');
 });
 
 test('handles authenticated, unknown, and unauthorized admin API requests directly', async () => {

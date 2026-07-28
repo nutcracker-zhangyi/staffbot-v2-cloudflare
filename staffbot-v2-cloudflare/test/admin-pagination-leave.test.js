@@ -689,9 +689,9 @@ test('scopes admin filter controls to the active tab', () => {
   assert.doesNotMatch(source, /type="month"/);
 });
 
-test('syncs visible filter inputs before admin tab changes', () => {
+test('syncs visible shared filters before non-Dashboard tab changes', () => {
   assert.match(source, /function syncFilterInputs\(/);
-  assert.match(source, /document\.querySelectorAll\('nav button'\)\.forEach\(\(b\) => b\.onclick = \(\) => \{ syncFilterInputs\(\); currentTab = b\.dataset\.tab; loadTab\(\); \}\);/);
+  assert.match(source, /document\.querySelectorAll\('nav button'\)\.forEach\(\(b\) => b\.onclick = \(\) => \{[\s\S]*if \(currentTab !== 'dashboard'\) syncFilterInputs\(\);[\s\S]*currentTab = b\.dataset\.tab;[\s\S]*loadTab\(\);[\s\S]*\}\);/);
 });
 
 test('builds admin sort SQL only from allowed fields', () => {

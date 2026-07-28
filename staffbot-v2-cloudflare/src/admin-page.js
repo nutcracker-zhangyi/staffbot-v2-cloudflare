@@ -10,7 +10,15 @@ import {
 import { serviceEnvironment } from './security.js';
 
 export function adminHtml(env) {
-  const stagingBanner = serviceEnvironment(env) === 'staging'
+  const dashboardEnabled = serviceEnvironment(env) === 'staging';
+  const dashboardNav = dashboardEnabled
+    ? '<button data-tab="dashboard" class="active" data-i18n="dashboard">数据看板</button>'
+    : '';
+  const dashboardPanel = dashboardEnabled
+    ? '<section id="tab-dashboard" class="panel"></section>'
+    : '';
+  const defaultTab = dashboardEnabled ? 'dashboard' : 'stores';
+  const stagingBanner = dashboardEnabled
     ? '<div class="staging-banner" role="status">STAGING 测试环境</div>'
     : '';
   return `<!doctype html>
@@ -91,6 +99,9 @@ export function adminHtml(env) {
     .summary-detail { margin-top:4px; font-size:12px; line-height:1.45; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
     .employee-name-cell { min-width:160px; font-weight:600; }
     .metric-cell { text-align:right; font-variant-numeric:tabular-nums; }
+    .dashboard-currency { padding-top:8px; }
+    .dashboard-currency + .dashboard-currency { margin-top:24px; border-top:1px solid var(--line-strong); }
+    .dashboard-currency .section-title h2 { margin:0; }
     .staging-banner { padding:10px 24px; background:#7f1d1d; color:#fff; font-weight:700; text-align:center; letter-spacing:.04em; }
     @media (max-width: 720px) { main { padding:12px; } table { min-width:820px; } header { align-items:flex-start; flex-direction:column; padding:14px 12px; } .toolbar, .member-filter { align-items:stretch; } .member-filter > * { width:100%; } input, select, button { min-height:44px; } nav button { min-height:40px; } }
   </style>
@@ -137,7 +148,8 @@ export function adminHtml(env) {
         </div>
       </section>
       <nav>
-        <button data-tab="stores" class="active" data-i18n="stores">店铺</button>
+        ${dashboardNav}
+        <button data-tab="stores"${dashboardEnabled ? '' : ' class="active"'} data-i18n="stores">店铺</button>
         <button data-tab="members" data-i18n="members">员工</button>
         <button data-tab="income" data-i18n="income">收入</button>
         <button data-tab="salary" data-i18n="salary">工资</button>
@@ -147,6 +159,7 @@ export function adminHtml(env) {
         <button data-tab="leave" data-i18n="leave">请假</button>
         <button data-tab="logs" data-i18n="logs">日志</button>
       </nav>
+      ${dashboardPanel}
       <section id="tab-stores" class="panel"></section>
       <section id="tab-members" class="panel hidden"></section>
       <section id="tab-income" class="panel hidden"></section>
@@ -162,8 +175,18 @@ export function adminHtml(env) {
     ${resetAdminSortPages.toString()}
     const $ = (id) => document.getElementById(id);
     let stores = [];
-    let currentTab = 'stores';
+    let currentTab = ${JSON.stringify(defaultTab)};
     let uiLang = localStorage.getItem('staffbot_admin_lang') || 'zh';
+    const dashboardFilters = {
+      dateFrom: '',
+      dateTo: '',
+      employee: 'all',
+      stores: [],
+      employeeSort: 'net_payroll_micros',
+      employeeDir: 'desc',
+      selectedEmployee: '',
+      entriesPage: 1
+    };
     const filters = {
       dateFrom: '',
       dateTo: '',
@@ -202,6 +225,7 @@ export function adminHtml(env) {
         logout:'退出', login:'登录', telegram_id:'Telegram ID', code:'验证码', send_code:'发送验证码', verify_login:'验证登录',
         refresh:'刷新', members_csv:'员工 CSV', income_csv:'收入 CSV', salary_csv:'工资 CSV', advances_csv:'预支薪资 CSV', attendance_csv:'考勤 CSV', leave_csv:'请假 CSV',
         stores:'店铺', members:'员工', income:'收入', salary:'工资', advances:'预支薪资', attendance:'考勤', absence_approvals:'缺勤审批', leave:'请假', logs:'日志',
+        dashboard:'数据看板', business_overview:'经营概况', payroll_overview:'工资概况', gross_income_micros:'原始营业额', commission_micros:'员工提成', employee_count:'员工人数', net_payroll_micros:'账本净额', fine_micros:'罚款扣减', advance_micros:'预支扣减', paid_salary_micros:'实际已付款', monthly_trend:'月度趋势', payroll_composition:'工资构成', employee_comparison:'员工对比', view_ledger:'查看流水', ledger_entries:'账本流水', reversal:'冲正', dashboard_no_data:'该筛选范围没有数据',
         store_id:'店铺 ID', name:'名称', timezone:'时区', currency:'货币', checkin_time:'签到时间', checkout_time:'签退时间',
         late_fine:'迟到罚款', early_leave_fine:'早退罚款', absence_fine_enabled:'缺勤罚款', absence_fine:'缺勤罚款金额', leave_min_notice_days:'最早提前天数', leave_max_notice_days:'最晚提前天数', leave_monthly_limit:'每月请假上限', leave_daily_limit:'同日请假人数上限', leave_same_day_cutoff_hour:'当天请假截止小时', status:'状态', save_store:'保存店铺', clear:'清空', edit:'编辑',
         disable:'禁用', enable:'启用', delete:'删除', action:'操作', new_store:'新建店铺', employee_name:'姓名',
@@ -223,6 +247,7 @@ export function adminHtml(env) {
         logout:'Log out', login:'Login', telegram_id:'Telegram ID', code:'Code', send_code:'Send code', verify_login:'Verify login',
         refresh:'Refresh', members_csv:'Members CSV', income_csv:'Income CSV', salary_csv:'Salary CSV', advances_csv:'Salary advances CSV', attendance_csv:'Attendance CSV', leave_csv:'Leave CSV',
         stores:'Stores', members:'Members', income:'Income', salary:'Salary', advances:'Salary advances', attendance:'Attendance', absence_approvals:'Absence approvals', leave:'Leave', logs:'Logs',
+        dashboard:'Dashboard', business_overview:'Business overview', payroll_overview:'Payroll overview', gross_income_micros:'Gross sales', commission_micros:'Employee commission', employee_count:'Employees', net_payroll_micros:'Ledger net', fine_micros:'Fine deductions', advance_micros:'Advance deductions', paid_salary_micros:'Actually paid', monthly_trend:'Monthly trend', payroll_composition:'Payroll composition', employee_comparison:'Employee comparison', view_ledger:'View ledger', ledger_entries:'Ledger entries', reversal:'Reversal', dashboard_no_data:'No data in this range',
         store_id:'Store ID', name:'Name', timezone:'Timezone', currency:'Currency', checkin_time:'Check-in time', checkout_time:'Check-out time',
         late_fine:'Late fine', early_leave_fine:'Early leave fine', absence_fine_enabled:'Absence fine', absence_fine:'Absence fine amount', leave_min_notice_days:'Earliest leave days', leave_max_notice_days:'Latest leave days', leave_monthly_limit:'Monthly leave limit', leave_daily_limit:'Daily leave limit', leave_same_day_cutoff_hour:'Same-day leave cutoff hour', status:'Status', save_store:'Save store', clear:'Clear', edit:'Edit',
         disable:'Disable', enable:'Enable', delete:'Delete', action:'Action', new_store:'New store', employee_name:'Employee name',
@@ -244,6 +269,7 @@ export function adminHtml(env) {
         logout:'Đăng xuất', login:'Đăng nhập', telegram_id:'Telegram ID', code:'Mã', send_code:'Gửi mã', verify_login:'Xác minh',
         refresh:'Làm mới', members_csv:'Nhân viên CSV', income_csv:'Thu nhập CSV', salary_csv:'Lương CSV', advances_csv:'Ứng lương CSV', attendance_csv:'Chấm công CSV',
         stores:'Cửa hàng', members:'Nhân viên', income:'Thu nhập', salary:'Lương', advances:'Ứng lương', attendance:'Chấm công', absence_approvals:'Duyệt vắng mặt', logs:'Nhật ký',
+        dashboard:'Bảng dữ liệu', business_overview:'Tổng quan kinh doanh', payroll_overview:'Tổng quan lương', gross_income_micros:'Doanh thu gốc', commission_micros:'Hoa hồng nhân viên', employee_count:'Số nhân viên', net_payroll_micros:'Số ròng sổ lương', fine_micros:'Khấu trừ phạt', advance_micros:'Khấu trừ ứng lương', paid_salary_micros:'Đã thanh toán', monthly_trend:'Xu hướng theo tháng', payroll_composition:'Cơ cấu lương', employee_comparison:'So sánh nhân viên', view_ledger:'Xem sổ cái', ledger_entries:'Bút toán sổ lương', reversal:'Đảo bút toán', dashboard_no_data:'Không có dữ liệu trong phạm vi này',
         store_id:'ID cửa hàng', name:'Tên', timezone:'Múi giờ', currency:'Tiền tệ', checkin_time:'Giờ vào ca', checkout_time:'Giờ ra ca',
         late_fine:'Phạt đi muộn', early_leave_fine:'Phạt về sớm', absence_fine_enabled:'Phạt vắng mặt', absence_fine:'Mức phạt vắng mặt', status:'Trạng thái', save_store:'Lưu cửa hàng', clear:'Xóa form', edit:'Sửa',
         disable:'Tắt', enable:'Bật', delete:'Xóa', action:'Thao tác', new_store:'Cửa hàng mới', employee_name:'Tên nhân viên',
@@ -265,6 +291,7 @@ export function adminHtml(env) {
         logout:'Выйти', login:'Вход', telegram_id:'Telegram ID', code:'Код', send_code:'Отправить код', verify_login:'Проверить вход',
         refresh:'Обновить', members_csv:'Сотрудники CSV', income_csv:'Доход CSV', salary_csv:'Зарплата CSV', advances_csv:'Авансы CSV', attendance_csv:'Посещаемость CSV',
         stores:'Магазины', members:'Сотрудники', income:'Доход', salary:'Зарплата', advances:'Авансы зарплаты', attendance:'Посещаемость', absence_approvals:'Проверка отсутствий', logs:'Журналы',
+        dashboard:'Панель данных', business_overview:'Обзор бизнеса', payroll_overview:'Обзор зарплаты', gross_income_micros:'Валовая выручка', commission_micros:'Комиссия сотрудников', employee_count:'Сотрудники', net_payroll_micros:'Чистая сумма книги', fine_micros:'Удержания штрафов', advance_micros:'Удержания авансов', paid_salary_micros:'Фактически выплачено', monthly_trend:'Помесячная динамика', payroll_composition:'Состав зарплаты', employee_comparison:'Сравнение сотрудников', view_ledger:'Открыть книгу', ledger_entries:'Записи книги', reversal:'Сторно', dashboard_no_data:'Нет данных за выбранный период',
         store_id:'ID магазина', name:'Название', timezone:'Часовой пояс', currency:'Валюта', checkin_time:'Начало смены', checkout_time:'Конец смены',
         late_fine:'Штраф за опоздание', early_leave_fine:'Штраф за ранний уход', absence_fine_enabled:'Штраф за отсутствие', absence_fine:'Размер штрафа за отсутствие', status:'Статус', save_store:'Сохранить магазин', clear:'Очистить', edit:'Редактировать',
         disable:'Отключить', enable:'Включить', delete:'Удалить', action:'Действие', new_store:'Новый магазин', employee_name:'Имя сотрудника',
@@ -421,6 +448,7 @@ export function adminHtml(env) {
       document.querySelectorAll('nav button').forEach((b) => b.classList.toggle('active', b.dataset.tab === currentTab));
       document.querySelectorAll('[id^="tab-"]').forEach((el) => el.classList.add('hidden'));
       $('tab-' + currentTab).classList.remove('hidden');
+      if (currentTab === 'dashboard') return renderDashboard();
       if (currentTab === 'stores') return renderStores();
       if (currentTab === 'members') return renderMembers();
       if (currentTab === 'income') return renderIncome();
@@ -430,6 +458,237 @@ export function adminHtml(env) {
       if (currentTab === 'absence') return renderAbsence();
       if (currentTab === 'leave') return renderLeave();
       if (currentTab === 'logs') return renderRows('logs', '/api/admin/stores/' + encodeURIComponent(storeId()) + '/logs');
+    }
+
+    function dashboardQuery({
+      includeEntries = false,
+      detailEmployeeId = ''
+    } = {}) {
+      const params = new URLSearchParams();
+      const selectedStores = dashboardFilters.stores.length
+        ? dashboardFilters.stores
+        : [storeId()];
+      params.set('stores', selectedStores.join(','));
+      if (dashboardFilters.dateFrom) {
+        params.set('date_from', dashboardFilters.dateFrom);
+      }
+      if (dashboardFilters.dateTo) {
+        params.set('date_to', dashboardFilters.dateTo);
+      }
+      const employeeId = detailEmployeeId
+        || (dashboardFilters.employee !== 'all'
+          ? dashboardFilters.employee
+          : '');
+      if (employeeId) {
+        params.set('employee', employeeId);
+      }
+      params.set('employees_sort', dashboardFilters.employeeSort);
+      params.set('employees_dir', dashboardFilters.employeeDir);
+      if (includeEntries) {
+        params.set('entries_page', String(dashboardFilters.entriesPage));
+      }
+      return params.toString();
+    }
+
+    async function renderDashboard() {
+      const root = $('tab-dashboard');
+      root.innerHTML = '<h2>' + L('dashboard') + '</h2><p class="status" role="status" aria-live="polite">' + L('refresh') + '…</p>';
+      try {
+        const data = await api('/api/admin/stores/' + encodeURIComponent(storeId()) + '/dashboard?' + dashboardQuery());
+        if (!dashboardFilters.dateFrom) dashboardFilters.dateFrom = data.filters && data.filters.date_from || '';
+        if (!dashboardFilters.dateTo) dashboardFilters.dateTo = data.filters && data.filters.date_to || '';
+        const groups = data.groups || [];
+        const employees = dashboardEmployeeOptions(groups);
+        root.innerHTML = '<h2>' + L('dashboard') + '</h2>' +
+          dashboardFilterPanel(employees) +
+          (groups.length
+            ? groups.map(dashboardCurrencySection).join('')
+            : '<p class="muted" role="status">' + L('dashboard_no_data') + '</p>');
+        bindDashboardControls(root);
+      } catch (error) {
+        root.innerHTML = '<h2>' + L('dashboard') + '</h2><p class="status" role="alert">' + esc(error.message || 'request_failed') + '</p>';
+      }
+    }
+
+    function dashboardEmployeeOptions(groups) {
+      const byId = new Map();
+      for (const group of groups || []) {
+        for (const employee of group.employees || []) {
+          if (!byId.has(employee.telegram_id)) {
+            byId.set(employee.telegram_id, {
+              telegram_id: employee.telegram_id,
+              display_name: employee.display_name || employee.telegram_id
+            });
+          }
+        }
+      }
+      return Array.from(byId.values()).sort((a, b) => a.display_name.localeCompare(b.display_name));
+    }
+
+    function dashboardFilterPanel(employees) {
+      const selectedStores = new Set(
+        dashboardFilters.stores.length ? dashboardFilters.stores : [storeId()]
+      );
+      return '<div class="filter-panel" data-dashboard-filter>' +
+        '<h2>' + L('filter') + '</h2>' +
+        '<div class="grid">' +
+        '<label><span>' + L('date_from') + '</span><input data-dashboard-date-from type="date" value="' + esc(dashboardFilters.dateFrom) + '"></label>' +
+        '<label><span>' + L('date_to') + '</span><input data-dashboard-date-to type="date" value="' + esc(dashboardFilters.dateTo) + '"></label>' +
+        '<label><span>' + L('employee') + '</span><select data-dashboard-employee-filter><option value="all">' + L('all_employees') + '</option>' +
+        employees.map((employee) => '<option value="' + esc(employee.telegram_id) + '"' + (dashboardFilters.employee === employee.telegram_id ? ' selected' : '') + '>' + esc(employee.display_name + ' (' + employee.telegram_id + ')') + '</option>').join('') +
+        '</select></label>' +
+        '<div class="filter-field"><span id="dashboard-store-label">' + L('stores_filter') + '</span><div class="store-chips" role="group" aria-labelledby="dashboard-store-label">' +
+        stores.map((store) => '<button type="button" class="store-chip' + (selectedStores.has(store.store_id) ? ' active' : '') + '" data-dashboard-store="' + esc(store.store_id) + '" aria-pressed="' + (selectedStores.has(store.store_id) ? 'true' : 'false') + '">' + esc(store.name) + '</button>').join('') +
+        '</div></div>' +
+        '</div>' +
+        '<div class="row" style="margin-top:10px"><button type="button" data-dashboard-apply>' + L('search') + '</button></div>' +
+        '</div>';
+    }
+
+    function dashboardCurrencySection(group) {
+      const currencyId = 'dashboard-currency-' + String(group.currency || 'currency').replace(/[^a-z0-9_-]/gi, '-');
+      return '<section class="dashboard-currency" aria-labelledby="' + esc(currencyId) + '">' +
+        '<div class="section-title"><h2 id="' + esc(currencyId) + '">' + esc(group.currency) + '</h2></div>' +
+        dashboardSummaryCards(group) +
+        sectionTitle('monthly_trend') +
+        dashboardMonthlyTable(group) +
+        sectionTitle('payroll_composition') +
+        dashboardCompositionTable(group) +
+        sectionTitle('employee_comparison') +
+        dashboardEmployeeTable(group) +
+        '</section>';
+    }
+
+    function dashboardSummaryCards(group) {
+      const summary = group.summary || {};
+      const cards = (title, items) => '<section class="summary"><h2>' + L(title) + '</h2><div class="summary-grid">' +
+        items.map((item) => '<div class="summary-card"><strong>' + L(item.key) + '</strong><div class="summary-value">' + esc(item.value) + '</div></div>').join('') +
+        '</div></section>';
+      return cards('business_overview', [
+        { key: 'gross_income_micros', value: formatDashboardMicros(group.currency, summary.gross_income_micros) },
+        { key: 'commission_micros', value: formatDashboardMicros(group.currency, summary.commission_micros) },
+        { key: 'employee_count', value: formatAdminMoneyForUi(summary.employee_count || 0) }
+      ]) + cards('payroll_overview', [
+        { key: 'net_payroll_micros', value: formatDashboardMicros(group.currency, summary.net_payroll_micros) },
+        { key: 'fine_micros', value: formatDashboardMicros(group.currency, summary.fine_micros) },
+        { key: 'advance_micros', value: formatDashboardMicros(group.currency, summary.advance_micros) },
+        { key: 'paid_salary_micros', value: formatDashboardMicros(group.currency, summary.paid_salary_micros) }
+      ]);
+    }
+
+    function dashboardMonthlyTable(group) {
+      const rows = (group.months || []).map((month) => ({
+        month_key: month.month_key,
+        gross_income_micros: formatDashboardMicros(group.currency, month.gross_income_micros),
+        commission_micros: formatDashboardMicros(group.currency, month.commission_micros),
+        fine_micros: formatDashboardMicros(group.currency, month.fine_micros),
+        advance_micros: formatDashboardMicros(group.currency, month.advance_micros),
+        net_payroll_micros: formatDashboardMicros(group.currency, month.net_payroll_micros),
+        paid_salary_micros: formatDashboardMicros(group.currency, month.paid_salary_micros)
+      }));
+      return dashboardNumericTable(rows, [
+        ['month_key', 'month'],
+        ['gross_income_micros', 'gross_income_micros'],
+        ['commission_micros', 'commission_micros'],
+        ['fine_micros', 'fine_micros'],
+        ['advance_micros', 'advance_micros'],
+        ['net_payroll_micros', 'net_payroll_micros'],
+        ['paid_salary_micros', 'paid_salary_micros']
+      ]);
+    }
+
+    function dashboardCompositionTable(group) {
+      const rows = (group.composition || []).map((item) => ({
+        type: dashboardLedgerType(item.type),
+        amount: formatDashboardMicros(group.currency, item.amount_micros)
+      }));
+      return dashboardNumericTable(rows, [
+        ['type', 'type'],
+        ['amount', 'amount']
+      ]);
+    }
+
+    function dashboardLedgerType(type) {
+      if (type === 'advance') return L('advances');
+      if (type === 'reversal') return L('reversal');
+      return L(type);
+    }
+
+    function dashboardNumericTable(rows, columns) {
+      if (!rows.length) return '<p class="muted">' + L('dashboard_no_data') + '</p>';
+      return '<div class="table-wrap"><table><thead><tr>' +
+        columns.map((column) => '<th scope="col">' + esc(L(column[1])) + '</th>').join('') +
+        '</tr></thead><tbody>' +
+        rows.map((row) => '<tr>' + columns.map((column, index) => '<td' + (index ? ' class="metric-cell"' : '') + '>' + esc(row[column[0]]) + '</td>').join('') + '</tr>').join('') +
+        '</tbody></table></div>';
+    }
+
+    function dashboardEmployeeTable(group) {
+      const columns = [
+        ['display_name', 'display_name'],
+        ['gross_income_micros', 'gross_income_micros'],
+        ['commission_micros', 'commission_micros'],
+        ['fine_micros', 'fine_micros'],
+        ['advance_micros', 'advance_micros'],
+        ['net_payroll_micros', 'net_payroll_micros'],
+        ['paid_salary_micros', 'paid_salary_micros']
+      ];
+      const employees = group.employees || [];
+      if (!employees.length) return '<p class="muted">' + L('dashboard_no_data') + '</p>';
+      return '<div class="table-wrap"><table><thead><tr>' +
+        columns.map((column) => {
+          const mark = dashboardFilters.employeeSort === column[0]
+            ? (dashboardFilters.employeeDir === 'asc' ? ' ↑' : ' ↓')
+            : '';
+          return '<th scope="col"><button type="button" class="sort-btn" data-dashboard-sort="' + esc(column[0]) + '">' + esc(L(column[1]) + mark) + '</button></th>';
+        }).join('') +
+        '<th scope="col">' + L('action') + '</th></tr></thead><tbody>' +
+        employees.map((employee) => '<tr>' +
+          '<th scope="row" class="employee-name-cell">' + esc(employee.display_name || employee.telegram_id) + '</th>' +
+          columns.slice(1).map((column) => '<td class="metric-cell">' + esc(formatDashboardMicros(group.currency, employee[column[0]])) + '</td>').join('') +
+          '<td><button type="button" class="secondary" data-dashboard-employee="' + esc(employee.telegram_id) + '">' + L('view_ledger') + '</button></td>' +
+          '</tr>').join('') +
+        '</tbody></table></div>';
+    }
+
+    function formatDashboardMicros(currency, micros) {
+      return formatCurrencyAmount(currency, Number(micros || 0) / 1_000_000);
+    }
+
+    function bindDashboardControls(root) {
+      root.querySelectorAll('[data-dashboard-store]').forEach((button) => {
+        button.onclick = () => {
+          button.classList.toggle('active');
+          button.setAttribute('aria-pressed', button.classList.contains('active') ? 'true' : 'false');
+        };
+      });
+      const applyButton = root.querySelector('[data-dashboard-apply]');
+      if (applyButton) {
+        applyButton.onclick = () => withBusy(applyButton, async () => {
+          const dateFrom = root.querySelector('[data-dashboard-date-from]');
+          const dateTo = root.querySelector('[data-dashboard-date-to]');
+          const employee = root.querySelector('[data-dashboard-employee-filter]');
+          dashboardFilters.dateFrom = dateFrom ? dateFrom.value : '';
+          dashboardFilters.dateTo = dateTo ? dateTo.value : '';
+          dashboardFilters.employee = employee ? employee.value || 'all' : 'all';
+          dashboardFilters.stores = Array.from(root.querySelectorAll('[data-dashboard-store].active')).map((button) => button.dataset.dashboardStore);
+          dashboardFilters.entriesPage = 1;
+          await renderDashboard();
+        });
+      }
+      root.querySelectorAll('[data-dashboard-sort]').forEach((button) => {
+        button.onclick = () => withBusy(button, async () => {
+          const sort = button.dataset.dashboardSort;
+          if (dashboardFilters.employeeSort === sort) {
+            dashboardFilters.employeeDir = dashboardFilters.employeeDir === 'asc' ? 'desc' : 'asc';
+          } else {
+            dashboardFilters.employeeSort = sort;
+            dashboardFilters.employeeDir = 'asc';
+          }
+          dashboardFilters.entriesPage = 1;
+          await renderDashboard();
+        });
+      });
     }
 
     function renderStores() {
@@ -1175,7 +1434,11 @@ export function adminHtml(env) {
       applyI18n();
       if (!$('app').classList.contains('hidden')) await loadTab();
     };
-    document.querySelectorAll('nav button').forEach((b) => b.onclick = () => { syncFilterInputs(); currentTab = b.dataset.tab; loadTab(); });
+    document.querySelectorAll('nav button').forEach((b) => b.onclick = () => {
+      if (currentTab !== 'dashboard') syncFilterInputs();
+      currentTab = b.dataset.tab;
+      loadTab();
+    });
     boot();
   </script>
 </body>
