@@ -173,6 +173,50 @@ test('generated Dashboard client builds its independent query and formats signed
   assert.equal(formatDashboardMicros('¥', -2_500_000), '¥-2.5');
 });
 
+test('renders every payroll composition type in all four Dashboard languages', async () => {
+  const response = await worker.fetch(
+    new Request('https://staffbot.test/admin'),
+    { ENVIRONMENT: 'staging' },
+    context()
+  );
+  const script = inlineAdminScript(await response.text());
+  const i18nStart = script.indexOf('const I18N = {');
+  const i18nEnd = script.indexOf('\n\n    function L(', i18nStart);
+  const compositionStart = script.indexOf('function dashboardCompositionTable(');
+  const compositionEnd = script.indexOf('\n    function dashboardEmployeeTable', compositionStart);
+  const composition = [
+    'income',
+    'fine',
+    'advance',
+    'bonus',
+    'adjustment',
+    'negative_carry',
+    'reversal'
+  ].map((type) => ({ type, amount_micros: 1_000_000 }));
+  const expected = {
+    zh: ['收入', '罚款', '预支薪资', '奖金', '调整', '负数结转', '冲正'],
+    en: ['Income', 'Fine', 'Salary advances', 'Bonus', 'Adjustment', 'Negative carry', 'Reversal'],
+    vi: ['Thu nhập', 'Phạt', 'Ứng lương', 'Thưởng', 'Điều chỉnh', 'Kết chuyển âm', 'Đảo bút toán'],
+    ru: ['Доход', 'Штраф', 'Авансы зарплаты', 'Бонус', 'Корректировка', 'Перенос отрицательного остатка', 'Сторно']
+  };
+
+  for (const [language, labels] of Object.entries(expected)) {
+    const renderComposition = new Function(
+      'uiLang',
+      `${script.slice(i18nStart, i18nEnd)}
+      function L(key) { return (I18N[uiLang] && I18N[uiLang][key]) || I18N.zh[key] || key; }
+      function esc(value) { return String(value); }
+      function formatDashboardMicros(currency, micros) { return currency + micros; }
+      ${script.slice(compositionStart, compositionEnd)}
+      return dashboardCompositionTable;`
+    )(language);
+    const table = renderComposition({ currency: '¥', composition });
+
+    for (const label of labels) assert.match(table, new RegExp(label));
+    assert.doesNotMatch(table, /bonus|adjustment|negative_carry/);
+  }
+});
+
 test('handles authenticated, unknown, and unauthorized admin API requests directly', async () => {
   const database = new DatabaseSync(':memory:');
   database.exec(schema);
