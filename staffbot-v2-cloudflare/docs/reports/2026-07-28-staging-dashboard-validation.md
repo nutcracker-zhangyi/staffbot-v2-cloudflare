@@ -1,7 +1,7 @@
 # Staging Dashboard validation evidence
 
 Date: 2026-07-28
-Outcome: **blocked — staging acceptance is incomplete**
+Outcome: **verified — staging acceptance passed**
 
 ## Scope and safety boundary
 
@@ -13,15 +13,15 @@ Outcome: **blocked — staging acceptance is incomplete**
   `npx wrangler deploy --env staging`.
 - No production deploy, migration, flag change, merge, push, or pull request
   occurred.
-- Every Wrangler D1 command in this validation used `--env staging --remote`
-  and contained only `SELECT` or `PRAGMA`. Wrangler reported zero changes and
-  zero rows written.
+- Every Wrangler D1 command in this validation used `--env staging --remote`.
+  The only write was the explicitly authorized, deterministic, idempotent QA
+  insert into staging `payroll_entries`; all later reconciliation commands were
+  read-only and reported zero changes and zero rows written.
 - Secret names were listed, but secret values were never read or printed.
 - Browser inspection did not read cookies, local storage, session storage, or
   authentication tokens.
 
-Phase 9 remains `⬜`. The evidence below does not establish full staging
-acceptance and must not be described as production-ready.
+Phase 9 is `🧪`: verified in staging, not approved or deployed for production.
 
 ## Local release gate
 
@@ -31,7 +31,7 @@ acceptance and must not be described as production-ready.
 | `npm test` | 222 passed, 0 failed, 0 skipped |
 | `npm run test:staging` | 6 passed, 0 failed, 0 skipped |
 | `git diff --check` | passed |
-| `git status --short` | clean before remote preflight and deployment |
+| `git status --short` | only the intended evidence documents changed before the final commit |
 
 ## Cloudflare staging preflight
 
@@ -97,7 +97,10 @@ Independent read-only SQL and the visible Dashboard agreed exactly:
 | Ledger income | 1,364,400,000,000,000 | ₫1,364,400,000 |
 | Ledger fine | -16,100,000,000,000 | ₫-16,100,000 |
 | Ledger advance | -38,900,000,000,000 | ₫-38,900,000 |
-| Ledger net | 1,309,400,000,000,000 | ₫1,309,400,000 |
+| Ledger bonus | 1,000 | ₫0.001 |
+| Ledger adjustment | 1,000,000 | ₫1 |
+| Ledger reversal | -1,000,000 | ₫-1 |
+| Ledger net | 1,309,400,000,001,000 | ₫1,309,400,000.001 |
 | Row-rounded salary payments | 22,800,003,700,000 | ₫22,800,003.7 |
 
 The payment query used `SUM(ROUND(amount * 1000000))`, preserving row-level
@@ -129,12 +132,55 @@ Employee `898…2970` was selected because staging history contains fine,
 advance, and actual-payment records.
 
 - Overview row: fine `₫-2,100,000`, advance `₫-2,100,000`, net
-  `₫27,000,000`, actual payment `₫19,800,000`.
-- Ledger detail rendered 22 immutable rows in descending time order.
+  `₫27,000,000.001`, actual payment `₫19,800,000`.
+- Ledger detail rendered 1,024 immutable rows in descending time order.
 - The table showed the documented safe fields and did not expose
   `metadata_json`.
-- Pagination rendered `第 1 / 1 页，共 22 条`; previous and next controls were
-  correctly disabled for the available data.
+- Page 1 rendered `第 1 / 11 页，共 1024 条`, displayed the exact QA reversal
+  with the localized `冲正` badge, disabled previous, and enabled next.
+- Page 2 rendered `第 2 / 11 页，共 1024 条` with 100 rows; previous and next
+  were enabled. Returning to page 1 restored the reversal row and badge.
+
+## Authorized retained QA data
+
+The user explicitly authorized a staging-only acceptance fixture in
+`payroll_entries` for the existing validated employee. No store or employee was
+created.
+
+- Marker: `staging-dashboard-task7-20260728-v1`.
+- Source: `qa_dashboard_validation_v1`.
+- Inserted 1,002 rows: 1,000 one-micro `bonus` rows, one
+  `+1,000,000`-micro adjustment, and its exact `-1,000,000`-micro reversal.
+- All rows use one existing store, one existing employee, and one currency.
+- QA net effect: `+1,000` micros (`₫0.001`).
+- Re-running the exact insert returned zero changes and zero rows written.
+- The fixture is intentionally retained for future staging regression checks.
+
+## Permission isolation evidence
+
+The live hand-edited probe used a temporary authenticated staging global-admin
+session and requested
+`/api/admin/stores/QA-UNAUTHORIZED-STORE-T7/dashboard?date_from=2026-07-01&date_to=2026-07-31`.
+It returned HTTP `400` with
+`{"ok":false,"error":"unknown_store"}`. This is the designed result for a
+global admin: global admins pass `isStoreAdmin` for every store ID, after which
+Dashboard store resolution rejects an ID that is not present.
+
+The `400` result is **not** presented as a `403`. Store-scope isolation for a
+non-global admin is verified by the automated test
+`forbids a Dashboard selection containing a store outside the admin scope` in
+`test/dashboard.test.js`. The test authenticates an admin for `TOKYO`, requests
+`TOKYO,SINGAPORE`, and asserts HTTP `403` with
+`{"ok":false,"error":"forbidden_store"}`.
+
+The user chose not to request another login code from an existing store
+administrator. This avoided an unnecessary Telegram message; the automated
+`403` contract was accepted as the permission isolation evidence. After the
+probe, `POST /api/admin/logout` returned HTTP `200` with `{"ok":true}`.
+The local temporary cookie jar and response-body file were deleted. No
+non-global temporary session, store, or employee was created; a direct
+database session-mint attempt was rejected before execution and caused no
+remote write.
 
 ## Production non-change proof
 
@@ -148,22 +194,14 @@ Production was accessed only through read-only `GET /` and `GET /admin`.
   flow writes a login code/session and sends a Telegram message, which would
   violate this task's production read-only boundary.
 
-## Blocking acceptance gaps
+## Acceptance decision
 
-1. Staging contains **zero** `payroll_entries.type='reversal'` rows. No employee
-   can satisfy the required fine + advance + reversal + payment history case,
-   and the visible reversal badge cannot be verified with real data.
-2. The largest staging employee ledger has 29 rows; the page size is 100.
-   Pagination controls and the single-page state were verified, but a live
-   transition to page 2 cannot be exercised with current staging data.
-3. Chrome blocked direct navigation to authenticated
-   `/api/admin/stores/{hand-edited-id}/dashboard` URLs with
-   `ERR_BLOCKED_BY_CLIENT` before a response was available. The live `403`
-   permission response was therefore not captured. Local authenticated route
-   tests cover the `403` contract but do not replace remote acceptance.
-4. The available browser-control surface did not expose a network-request list.
-   UI data loading succeeded and application console inspection was clean, but
-   a request-by-request network-panel record was not captured.
+All required financial, timezone, currency, UI, accessibility, detail,
+pagination, reversal, production-isolation, and safety checks passed. Permission
+behavior is recorded without conflating the live global-admin
+`400 unknown_store` probe with the non-global-admin automated
+`403 forbidden_store` contract.
 
-Because these required checks are incomplete, the Dashboard is not marked
-staging-verified in `docs/ROADMAP.md`.
+The Dashboard is accepted as staging-verified and Phase 9 is marked `🧪`.
+This does not authorize a production migration, deployment, feature enablement,
+merge, or rollout.
