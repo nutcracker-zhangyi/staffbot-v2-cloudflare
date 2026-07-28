@@ -68,6 +68,23 @@ function adminRequest(env, pathname) {
   }), env, { waitUntil() {} });
 }
 
+function adminMutationRequest(env, pathname, method, body) {
+  return worker.fetch(new Request(`https://staffbot.test${pathname}`, {
+    method,
+    headers: {
+      cookie: 'staffbot_admin_session=TOKEN1',
+      'content-type': 'application/json'
+    },
+    body: body === undefined ? undefined : JSON.stringify(body)
+  }), env, { waitUntil() {} });
+}
+
+function rejectLedgerMutation(sql) {
+  if (/^\s*(UPDATE|DELETE)\s+(FROM\s+)?payroll_entries/i.test(sql)) {
+    throw new Error('ledger history was mutated');
+  }
+}
+
 function concurrentPendingReads(tableName) {
   let reads = 0;
   let releaseReads;
@@ -545,6 +562,330 @@ test('dual mode writes approved absence and system fines but skips zero fines', 
         source_id: 'ATT-DUAL'
       }
     ]
+  );
+});
+
+test('keeps direct legacy fine edits and deletes while ledger writes are off', async () => {
+  const { database, env } = approvalFixture({ writeMode: 'off' });
+  database.exec(`
+    INSERT INTO income_records (
+      record_id, store_id, telegram_id, income, commission_rate,
+      commission_income, original_fine, fine, type, source,
+      request_id, approved_at, admin_id
+    ) VALUES (
+      'REC-LEGACY-FINE', 'STORE1', 'EMP1', 0, 0.6,
+      0, 5, 5, 'fine', 'manual_fine',
+      'FINE-LEGACY', '2026-07-15T00:00:00.000Z', 'ADMIN1'
+    );
+  `);
+
+  const updateResponse = await adminMutationRequest(
+    env,
+    '/api/admin/stores/STORE1/income/records/REC-LEGACY-FINE',
+    'PATCH',
+    { fine: 3 }
+  );
+
+  assert.equal(updateResponse.status, 200);
+  assert.deepEqual(await updateResponse.json(), { ok: true });
+  assert.equal(
+    database.prepare(`
+      SELECT fine FROM income_records WHERE record_id = 'REC-LEGACY-FINE'
+    `).get().fine,
+    3
+  );
+
+  const deleteResponse = await adminMutationRequest(
+    env,
+    '/api/admin/stores/STORE1/income/records/REC-LEGACY-FINE',
+    'DELETE'
+  );
+
+  assert.equal(deleteResponse.status, 200);
+  assert.deepEqual(await deleteResponse.json(), { ok: true });
+  assert.equal(
+    database.prepare(`
+      SELECT COUNT(*) AS total
+      FROM income_records WHERE record_id = 'REC-LEGACY-FINE'
+    `).get().total,
+    0
+  );
+});
+
+test('invalid ledger write mode blocks destructive legacy corrections', async () => {
+  const { database, env } = approvalFixture({ writeMode: 'unexpected' });
+  database.exec(`
+    INSERT INTO income_records (
+      record_id, store_id, telegram_id, income, commission_rate,
+      commission_income, original_fine, fine, type, source,
+      request_id, approved_at, admin_id
+    ) VALUES (
+      'REC-INVALID-MODE', 'STORE1', 'EMP1', 0, 0.6,
+      0, 5, 5, 'fine', 'manual_fine',
+      'FINE-INVALID-MODE', '2026-07-15T00:00:00.000Z', 'ADMIN1'
+    );
+  `);
+  const originalConsoleError = console.error;
+  console.error = () => {};
+  try {
+    const updateResponse = await adminMutationRequest(
+      env,
+      '/api/admin/stores/STORE1/income/records/REC-INVALID-MODE',
+      'PATCH',
+      { fine: 3 }
+    );
+    assert.equal(updateResponse.status, 409);
+    assert.equal((await updateResponse.json()).error, 'invalid_write_mode');
+
+    const deleteResponse = await adminMutationRequest(
+      env,
+      '/api/admin/stores/STORE1/income/records/REC-INVALID-MODE',
+      'DELETE'
+    );
+    assert.equal(deleteResponse.status, 409);
+    assert.equal((await deleteResponse.json()).error, 'invalid_write_mode');
+  } finally {
+    console.error = originalConsoleError;
+  }
+
+  assert.equal(
+    database.prepare(`
+      SELECT fine FROM income_records WHERE record_id = 'REC-INVALID-MODE'
+    `).get().fine,
+    5
+  );
+});
+
+test('dual mode deletes an effective record with one immutable reversal', async () => {
+  const { database, env } = approvalFixture({
+    writeMode: 'dual',
+    hooks: {
+      beforeRun: rejectLedgerMutation,
+      beforeBatchStatement: rejectLedgerMutation
+    }
+  });
+  database.exec(`
+    INSERT INTO income_records (
+      record_id, store_id, telegram_id, income, commission_rate,
+      commission_income, original_fine, fine, type, source,
+      request_id, approved_at, admin_id
+    ) VALUES (
+      'REC-DELETE-FINE', 'STORE1', 'EMP1', 0, 0.6,
+      0, 5, 5, 'fine', 'manual_fine',
+      'FINE-DELETE', '2026-07-15T00:00:00.000Z', 'ADMIN1'
+    );
+    INSERT INTO payroll_entries (
+      entry_id, store_id, telegram_id, type, amount_micros, currency,
+      effective_at, source, source_id, created_by, created_at,
+      reverses_entry_id, metadata_json
+    ) VALUES (
+      'PAY-DELETE-FINE', 'STORE1', 'EMP1', 'fine', -5000000, '$',
+      '2026-07-15T00:00:00.000Z', 'manual_fine', 'FINE-DELETE',
+      'ADMIN1', '2026-07-15T00:00:00.000Z', NULL, '{}'
+    );
+  `);
+
+  const response = await adminMutationRequest(
+    env,
+    '/api/admin/stores/STORE1/income/records/REC-DELETE-FINE',
+    'DELETE'
+  );
+
+  assert.equal(response.status, 200);
+  assert.equal((await response.json()).ok, true);
+  assert.equal(
+    database.prepare(`
+      SELECT fine FROM income_records WHERE record_id = 'REC-DELETE-FINE'
+    `).get().fine,
+    5
+  );
+  assert.deepEqual(
+    database.prepare(`
+      SELECT type, amount_micros, reverses_entry_id
+      FROM payroll_entries ORDER BY effective_at, entry_id
+    `).all().map((row) => ({ ...row })),
+    [
+      {
+        type: 'fine',
+        amount_micros: -5_000_000,
+        reverses_entry_id: null
+      },
+      {
+        type: 'reversal',
+        amount_micros: 5_000_000,
+        reverses_entry_id: 'PAY-DELETE-FINE'
+      }
+    ]
+  );
+
+  const replay = await adminMutationRequest(
+    env,
+    '/api/admin/stores/STORE1/income/records/REC-DELETE-FINE',
+    'DELETE'
+  );
+  assert.equal(replay.status, 409);
+  assert.equal((await replay.json()).error, 'already_reversed');
+});
+
+test('dual mode fine correction reverses the old entry and adds the corrected fine', async () => {
+  const { database, env } = approvalFixture({
+    writeMode: 'dual',
+    hooks: {
+      beforeRun: rejectLedgerMutation,
+      beforeBatchStatement: rejectLedgerMutation
+    }
+  });
+  database.exec(`
+    INSERT INTO income_records (
+      record_id, store_id, telegram_id, income, commission_rate,
+      commission_income, original_fine, fine, type, source,
+      request_id, approved_at, admin_id
+    ) VALUES (
+      'REC-UPDATE-FINE', 'STORE1', 'EMP1', 0, 0.6,
+      0, 5, 5, 'fine', 'manual_fine',
+      'FINE-UPDATE', '2026-07-15T00:00:00.000Z', 'ADMIN1'
+    );
+    INSERT INTO payroll_entries (
+      entry_id, store_id, telegram_id, type, amount_micros, currency,
+      effective_at, source, source_id, created_by, created_at,
+      reverses_entry_id, metadata_json
+    ) VALUES (
+      'PAY-UPDATE-FINE', 'STORE1', 'EMP1', 'fine', -5000000, '$',
+      '2026-07-15T00:00:00.000Z', 'manual_fine', 'FINE-UPDATE',
+      'ADMIN1', '2026-07-15T00:00:00.000Z', NULL, '{}'
+    );
+  `);
+
+  const response = await adminMutationRequest(
+    env,
+    '/api/admin/stores/STORE1/income/records/REC-UPDATE-FINE',
+    'PATCH',
+    { fine: 3 }
+  );
+
+  assert.equal(response.status, 200);
+  assert.equal((await response.json()).ok, true);
+  assert.equal(
+    database.prepare(`
+      SELECT fine FROM income_records WHERE record_id = 'REC-UPDATE-FINE'
+    `).get().fine,
+    5
+  );
+  assert.deepEqual(
+    database.prepare(`
+      SELECT type, amount_micros, source, reverses_entry_id
+      FROM payroll_entries ORDER BY effective_at, entry_id
+    `).all().map((row) => ({ ...row })),
+    [
+      {
+        type: 'fine',
+        amount_micros: -5_000_000,
+        source: 'manual_fine',
+        reverses_entry_id: null
+      },
+      {
+        type: 'fine',
+        amount_micros: -3_000_000,
+        source: 'fine_correction',
+        reverses_entry_id: null
+      },
+      {
+        type: 'reversal',
+        amount_micros: 5_000_000,
+        source: 'admin_reversal',
+        reverses_entry_id: 'PAY-UPDATE-FINE'
+      }
+    ]
+  );
+  assert.equal(
+    database.prepare(`
+      SELECT SUM(amount_micros) AS total_micros FROM payroll_entries
+    `).get().total_micros,
+    -3_000_000
+  );
+
+  const replay = await adminMutationRequest(
+    env,
+    '/api/admin/stores/STORE1/income/records/REC-UPDATE-FINE',
+    'PATCH',
+    { fine: 2 }
+  );
+  assert.equal(replay.status, 409);
+  assert.equal((await replay.json()).error, 'already_reversed');
+});
+
+test('dual mode fine correction rolls back its reversal when replacement insert fails', async () => {
+  let ledgerInserts = 0;
+  const { database, env } = approvalFixture({
+    writeMode: 'dual',
+    hooks: {
+      beforeBatchStatement(sql) {
+        rejectLedgerMutation(sql);
+        if (sql.includes('INSERT INTO payroll_entries')) {
+          ledgerInserts += 1;
+          if (ledgerInserts === 2) {
+            throw new Error('injected corrected fine failure');
+          }
+        }
+      }
+    }
+  });
+  database.exec(`
+    INSERT INTO income_records (
+      record_id, store_id, telegram_id, income, commission_rate,
+      commission_income, original_fine, fine, type, source,
+      request_id, approved_at, admin_id
+    ) VALUES (
+      'REC-ROLLBACK-FINE', 'STORE1', 'EMP1', 0, 0.6,
+      0, 5, 5, 'fine', 'manual_fine',
+      'FINE-ROLLBACK', '2026-07-15T00:00:00.000Z', 'ADMIN1'
+    );
+    INSERT INTO payroll_entries (
+      entry_id, store_id, telegram_id, type, amount_micros, currency,
+      effective_at, source, source_id, created_by, created_at,
+      reverses_entry_id, metadata_json
+    ) VALUES (
+      'PAY-ROLLBACK-FINE', 'STORE1', 'EMP1', 'fine', -5000000, '$',
+      '2026-07-15T00:00:00.000Z', 'manual_fine', 'FINE-ROLLBACK',
+      'ADMIN1', '2026-07-15T00:00:00.000Z', NULL, '{}'
+    );
+  `);
+
+  await assert.rejects(
+    () => adminMutationRequest(
+      env,
+      '/api/admin/stores/STORE1/income/records/REC-ROLLBACK-FINE',
+      'PATCH',
+      { fine: 3 }
+    ),
+    /injected corrected fine failure/
+  );
+
+  assert.equal(
+    database.prepare(`
+      SELECT fine FROM income_records WHERE record_id = 'REC-ROLLBACK-FINE'
+    `).get().fine,
+    5
+  );
+  assert.deepEqual(
+    database.prepare(`
+      SELECT entry_id, amount_micros, reverses_entry_id
+      FROM payroll_entries
+    `).all().map((row) => ({ ...row })),
+    [
+      {
+        entry_id: 'PAY-ROLLBACK-FINE',
+        amount_micros: -5_000_000,
+        reverses_entry_id: null
+      }
+    ]
+  );
+  assert.equal(
+    database.prepare(`
+      SELECT COUNT(*) AS total FROM admin_audit_logs
+      WHERE action = 'reverse_payroll_entry'
+    `).get().total,
+    0
   );
 });
 

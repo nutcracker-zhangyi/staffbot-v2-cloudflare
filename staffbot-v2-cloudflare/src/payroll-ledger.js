@@ -1,3 +1,5 @@
+import { auditStatement } from './audit.js';
+
 export const MICROS_PER_UNIT = 1_000_000;
 
 export const PAYROLL_ENTRY_TYPES = new Set([
@@ -47,12 +49,16 @@ export function legacyPayrollImpactMicros(record) {
   }
 }
 
-export function payrollLedgerWritesEnabled(env) {
+export function payrollLedgerWriteMode(env) {
   const mode = String((env && env.PAYROLL_LEDGER_WRITE_MODE) || '').trim();
-  if (!mode || mode === 'off') return false;
-  if (mode === 'dual') return true;
+  if (!mode || mode === 'off') return 'off';
+  if (mode === 'dual') return 'dual';
   console.error(`Invalid PAYROLL_LEDGER_WRITE_MODE: ${mode}`);
-  return false;
+  return 'invalid';
+}
+
+export function payrollLedgerWritesEnabled(env) {
+  return payrollLedgerWriteMode(env) === 'dual';
 }
 
 export function validatePayrollEntry(entry, originalEntry = null) {
@@ -179,8 +185,31 @@ export function payrollEntryFromIncomeRecordDraft(record, currency, entryId) {
   });
 }
 
-export function payrollEntryInsertStatement(env, entry) {
-  validatePayrollEntry(entry);
+export function createReversalDraft(originalEntry, adminId, effectiveAt, entryId) {
+  return validatePayrollEntry({
+    entry_id: entryId,
+    store_id: originalEntry.store_id,
+    telegram_id: originalEntry.telegram_id,
+    type: 'reversal',
+    amount_micros: -originalEntry.amount_micros,
+    currency: originalEntry.currency,
+    effective_at: effectiveAt,
+    source: 'admin_reversal',
+    source_id: null,
+    created_by: adminId,
+    created_at: effectiveAt,
+    reverses_entry_id: originalEntry.entry_id,
+    metadata_json: JSON.stringify({
+      original_entry_id: originalEntry.entry_id,
+      original_type: originalEntry.type,
+      original_source: originalEntry.source,
+      original_source_id: originalEntry.source_id
+    })
+  }, originalEntry);
+}
+
+export function payrollEntryInsertStatement(env, entry, originalEntry = null) {
+  validatePayrollEntry(entry, originalEntry);
   return env.DB.prepare(`
     INSERT INTO payroll_entries (
       entry_id, store_id, telegram_id, type, amount_micros, currency,
@@ -202,4 +231,89 @@ export function payrollEntryInsertStatement(env, entry) {
     entry.reverses_entry_id,
     entry.metadata_json
   );
+}
+
+async function existingReversal(env, originalEntryId) {
+  return env.DB.prepare(`
+    SELECT entry_id FROM payroll_entries
+    WHERE reverses_entry_id = ?
+  `).bind(originalEntryId).first();
+}
+
+export async function reversePayrollEntry(
+  env,
+  storeId,
+  entryId,
+  adminId,
+  effectiveAt,
+  replacementEntry = null
+) {
+  const originalEntry = await env.DB.prepare(`
+    SELECT * FROM payroll_entries
+    WHERE store_id = ? AND entry_id = ?
+  `).bind(storeId, entryId).first();
+  if (!originalEntry) return { ok: false, error: 'not_found' };
+
+  const alreadyReversed = await existingReversal(env, entryId);
+  if (alreadyReversed) {
+    return {
+      ok: false,
+      error: 'already_reversed',
+      reversalEntryId: alreadyReversed.entry_id
+    };
+  }
+
+  const reversalEntry = createReversalDraft(
+    originalEntry,
+    adminId,
+    effectiveAt,
+    `PAY-REV-${crypto.randomUUID()}`
+  );
+  const statements = [
+    payrollEntryInsertStatement(env, reversalEntry, originalEntry)
+  ];
+  if (replacementEntry) {
+    validatePayrollEntry(replacementEntry);
+    if (
+      replacementEntry.store_id !== originalEntry.store_id
+      || replacementEntry.telegram_id !== originalEntry.telegram_id
+      || replacementEntry.currency !== originalEntry.currency
+    ) {
+      throw new TypeError('replacement entry must use the same store, employee, and currency');
+    }
+    statements.push(payrollEntryInsertStatement(env, replacementEntry));
+  }
+  statements.push(
+    auditStatement(
+      env,
+      storeId,
+      adminId,
+      'reverse_payroll_entry',
+      entryId,
+      {
+        original_entry_id: entryId,
+        reversal_entry_id: reversalEntry.entry_id,
+        amount_micros: reversalEntry.amount_micros,
+        replacement_entry_id: replacementEntry
+          ? replacementEntry.entry_id
+          : null
+      },
+      effectiveAt
+    )
+  );
+
+  try {
+    await env.DB.batch(statements);
+  } catch (error) {
+    const concurrentReversal = await existingReversal(env, entryId);
+    if (concurrentReversal) {
+      return {
+        ok: false,
+        error: 'already_reversed',
+        reversalEntryId: concurrentReversal.entry_id
+      };
+    }
+    throw error;
+  }
+  return { ok: true, originalEntry, reversalEntry, replacementEntry };
 }

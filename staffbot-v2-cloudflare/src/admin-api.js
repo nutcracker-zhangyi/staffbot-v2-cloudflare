@@ -76,6 +76,20 @@ function financialApprovalResponse(result) {
   return json(result);
 }
 
+function financialCorrectionResponse(result) {
+  if (
+    !result.ok
+    && (
+      result.error === 'already_reversed'
+      || result.error === 'ledger_entry_not_found'
+      || result.error === 'invalid_write_mode'
+    )
+  ) {
+    return json(result, 409);
+  }
+  return json(result);
+}
+
 export async function handleAdminApi(request, env, url, ctx) {
   try {
     if (request.method === 'POST' && url.pathname === '/api/admin/login/start') return adminLoginStart(request, env);
@@ -530,13 +544,19 @@ async function handleAdminIncome(request, env, url, storeId, parts, adminId) {
   }
   if (parts.length === 7 && request.method === 'PATCH' && parts[5] === 'records') {
     const body = await readJson(request);
-    return json(await updateIncomeFineRecord(env, storeId, decodeURIComponent(parts[6]), adminId, body.fine));
+    return financialCorrectionResponse(
+      await updateIncomeFineRecord(env, storeId, decodeURIComponent(parts[6]), adminId, body.fine)
+    );
   }
   if (parts.length === 7 && request.method === 'DELETE') {
     const kind = parts[5];
     const id = decodeURIComponent(parts[6]);
     if (kind === 'pending') return json(await deletePendingIncome(env, storeId, id, adminId));
-    if (kind === 'records') return json(await deleteIncomeRecord(env, storeId, id, adminId));
+    if (kind === 'records') {
+      return financialCorrectionResponse(
+        await deleteIncomeRecord(env, storeId, id, adminId)
+      );
+    }
   }
   return json({ ok: false, error: 'not_found' }, 404);
 }

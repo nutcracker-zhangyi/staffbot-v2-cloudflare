@@ -5,11 +5,14 @@ import { DatabaseSync } from 'node:sqlite';
 
 import {
   amountToMicros,
+  createReversalDraft,
   legacyIncomeRecordToPayrollEntry,
   legacyPayrollImpactMicros,
   payrollLedgerWritesEnabled,
+  reversePayrollEntry,
   validatePayrollEntry
 } from '../src/payroll-ledger.js';
+import { createD1 } from './helpers/d1.js';
 
 const schema = readFileSync(
   new URL('../db/schema.sql', import.meta.url),
@@ -297,6 +300,147 @@ test('validates reversals against the exact original entry', () => {
   assert.throws(
     () => validatePayrollEntry(reversal),
     /original entry/
+  );
+});
+
+test('creates an exact immutable reversal draft from the original entry', () => {
+  const original = {
+    entry_id: 'PAY-ORIGINAL',
+    store_id: 'STORE-1',
+    telegram_id: 'EMP-1',
+    type: 'fine',
+    amount_micros: -1_500_000,
+    currency: '₫',
+    effective_at: '2026-07-15T03:10:00.000Z',
+    source: 'attendance_late',
+    source_id: 'ATT-1',
+    created_by: 'ADMIN-1',
+    created_at: '2026-07-15T03:10:01.000Z',
+    reverses_entry_id: null,
+    metadata_json: '{}'
+  };
+
+  const reversal = createReversalDraft(
+    original,
+    'ADMIN-2',
+    '2026-07-16T03:10:00.000Z',
+    'PAY-REVERSAL'
+  );
+
+  assert.deepEqual({
+    ...reversal,
+    metadata_json: JSON.parse(reversal.metadata_json)
+  }, {
+    entry_id: 'PAY-REVERSAL',
+    store_id: 'STORE-1',
+    telegram_id: 'EMP-1',
+    type: 'reversal',
+    amount_micros: 1_500_000,
+    currency: '₫',
+    effective_at: '2026-07-16T03:10:00.000Z',
+    source: 'admin_reversal',
+    source_id: null,
+    created_by: 'ADMIN-2',
+    created_at: '2026-07-16T03:10:00.000Z',
+    reverses_entry_id: 'PAY-ORIGINAL',
+    metadata_json: {
+      original_entry_id: 'PAY-ORIGINAL',
+      original_type: 'fine',
+      original_source: 'attendance_late',
+      original_source_id: 'ATT-1'
+    }
+  });
+});
+
+test('persists one reversal and audit without updating or deleting ledger history', async () => {
+  const database = ledgerFixture();
+  insertLedgerEntry(database, {
+    entry_id: 'PAY-ORIGINAL',
+    store_id: 'STORE-1',
+    telegram_id: 'EMP-1',
+    type: 'fine',
+    amount_micros: -1_500_000,
+    currency: '₫',
+    effective_at: '2026-07-15T03:10:00.000Z',
+    source: 'attendance_late',
+    source_id: 'ATT-1',
+    created_by: 'ADMIN-1',
+    created_at: '2026-07-15T03:10:01.000Z',
+    reverses_entry_id: null,
+    metadata_json: '{}'
+  });
+  const env = {
+    DB: createD1(database, {
+      beforeBatchStatement(sql) {
+        if (/^\s*(UPDATE|DELETE)\s+(FROM\s+)?payroll_entries/i.test(sql)) {
+          throw new Error('ledger history was mutated');
+        }
+      }
+    })
+  };
+
+  const result = await reversePayrollEntry(
+    env,
+    'STORE-1',
+    'PAY-ORIGINAL',
+    'ADMIN-2',
+    '2026-07-16T03:10:00.000Z'
+  );
+
+  assert.equal(result.ok, true);
+  assert.match(result.reversalEntry.entry_id, /^PAY-REV-/);
+  assert.deepEqual(
+    database.prepare(`
+      SELECT entry_id, type, amount_micros, currency, reverses_entry_id
+      FROM payroll_entries ORDER BY effective_at, entry_id
+    `).all().map((row) => ({ ...row })),
+    [
+      {
+        entry_id: 'PAY-ORIGINAL',
+        type: 'fine',
+        amount_micros: -1_500_000,
+        currency: '₫',
+        reverses_entry_id: null
+      },
+      {
+        entry_id: result.reversalEntry.entry_id,
+        type: 'reversal',
+        amount_micros: 1_500_000,
+        currency: '₫',
+        reverses_entry_id: 'PAY-ORIGINAL'
+      }
+    ]
+  );
+  assert.deepEqual(
+    { ...database.prepare(`
+      SELECT store_id, admin_id, action, target_id
+      FROM admin_audit_logs
+    `).get() },
+    {
+      store_id: 'STORE-1',
+      admin_id: 'ADMIN-2',
+      action: 'reverse_payroll_entry',
+      target_id: 'PAY-ORIGINAL'
+    }
+  );
+
+  assert.deepEqual(
+    await reversePayrollEntry(
+      env,
+      'STORE-1',
+      'PAY-ORIGINAL',
+      'ADMIN-3',
+      '2026-07-17T03:10:00.000Z'
+    ),
+    {
+      ok: false,
+      error: 'already_reversed',
+      reversalEntryId: result.reversalEntry.entry_id
+    }
+  );
+  assert.equal(
+    database.prepare(`SELECT COUNT(*) AS total FROM payroll_entries`).get().total,
+    2
   );
 });
 

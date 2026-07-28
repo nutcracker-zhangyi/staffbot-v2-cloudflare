@@ -6,9 +6,12 @@ import {
   checkoutFineRecordDrafts
 } from './money.js';
 import {
+  amountToMicros,
   payrollEntryFromIncomeRecordDraft,
   payrollEntryInsertStatement,
-  payrollLedgerWritesEnabled
+  payrollLedgerWriteMode,
+  payrollLedgerWritesEnabled,
+  reversePayrollEntry
 } from './payroll-ledger.js';
 import { getTotalIncome } from './payroll.js';
 import { getStore } from './stores.js';
@@ -401,9 +404,45 @@ export async function deletePendingIncome(env, storeId, requestId, adminId) {
   return { ok: true };
 }
 
+async function payrollEntryForIncomeRecord(env, record) {
+  const requestId = record.request_id || record.record_id;
+  return env.DB.prepare(`
+    SELECT * FROM payroll_entries
+    WHERE store_id = ?
+      AND source = ?
+      AND source_id IN (?, ?)
+      AND type != 'reversal'
+    ORDER BY CASE WHEN source_id = ? THEN 0 ELSE 1 END
+    LIMIT 1
+  `).bind(
+    record.store_id,
+    record.source,
+    requestId,
+    record.record_id,
+    requestId
+  ).first();
+}
+
 export async function deleteIncomeRecord(env, storeId, recordId, adminId) {
   const found = await env.DB.prepare(`SELECT * FROM income_records WHERE store_id = ? AND record_id = ?`).bind(storeId, recordId).first();
   if (!found) return { ok: false, error: 'not_found' };
+  const writeMode = payrollLedgerWriteMode(env);
+  if (writeMode === 'invalid') {
+    return { ok: false, error: 'invalid_write_mode' };
+  }
+  if (writeMode === 'dual') {
+    const originalEntry = await payrollEntryForIncomeRecord(env, found);
+    if (!originalEntry) {
+      return { ok: false, error: 'ledger_entry_not_found' };
+    }
+    return reversePayrollEntry(
+      env,
+      storeId,
+      originalEntry.entry_id,
+      adminId,
+      nowIso()
+    );
+  }
   await env.DB.prepare(`DELETE FROM income_records WHERE store_id = ? AND record_id = ?`).bind(storeId, recordId).run();
   await audit(env, storeId, adminId, 'delete_income_record', recordId, found);
   return { ok: true };
@@ -415,6 +454,55 @@ export async function updateIncomeFineRecord(env, storeId, recordId, adminId, fi
   const found = await env.DB.prepare(`SELECT * FROM income_records WHERE store_id = ? AND record_id = ?`).bind(storeId, recordId).first();
   if (!found) return { ok: false, error: 'not_found' };
   if (found.type !== 'fine') return { ok: false, error: 'not_fine_record' };
+  const writeMode = payrollLedgerWriteMode(env);
+  if (writeMode === 'invalid') {
+    return { ok: false, error: 'invalid_write_mode' };
+  }
+  if (writeMode === 'dual') {
+    let fineMicros;
+    try {
+      fineMicros = amountToMicros(amount);
+    } catch {
+      return { ok: false, error: 'invalid_fine' };
+    }
+    if (fineMicros < 0) return { ok: false, error: 'invalid_fine' };
+
+    const originalEntry = await payrollEntryForIncomeRecord(env, found);
+    if (!originalEntry) {
+      return { ok: false, error: 'ledger_entry_not_found' };
+    }
+    const effectiveAt = nowIso();
+    const replacementEntryId = makeId('PAY-CORR');
+    const replacementEntry = fineMicros === 0
+      ? null
+      : {
+          entry_id: replacementEntryId,
+          store_id: originalEntry.store_id,
+          telegram_id: originalEntry.telegram_id,
+          type: 'fine',
+          amount_micros: -fineMicros,
+          currency: originalEntry.currency,
+          effective_at: effectiveAt,
+          source: 'fine_correction',
+          source_id: replacementEntryId,
+          created_by: adminId,
+          created_at: effectiveAt,
+          reverses_entry_id: null,
+          metadata_json: JSON.stringify({
+            corrects_entry_id: originalEntry.entry_id,
+            legacy_record_id: recordId,
+            requested_fine: amount
+          })
+        };
+    return reversePayrollEntry(
+      env,
+      storeId,
+      originalEntry.entry_id,
+      adminId,
+      effectiveAt,
+      replacementEntry
+    );
+  }
   await env.DB.prepare(`UPDATE income_records SET fine = ? WHERE store_id = ? AND record_id = ?`).bind(amount, storeId, recordId).run();
   await audit(env, storeId, adminId, 'update_income_fine', recordId, { before: found.fine, after: amount });
   return { ok: true };
