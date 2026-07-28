@@ -9,7 +9,8 @@ import {
   approveIncomeRequest,
   approveSalaryAdvanceRequest,
   approveSalaryRequest,
-  insertSystemFine
+  insertSystemFine,
+  rejectIncomeRequest
 } from '../src/approvals.js';
 import { getTotalIncome } from '../src/payroll.js';
 import { createD1 } from './helpers/d1.js';
@@ -65,6 +66,22 @@ function adminRequest(env, pathname) {
       'content-type': 'application/json'
     }
   }), env, { waitUntil() {} });
+}
+
+function concurrentPendingReads(tableName) {
+  let reads = 0;
+  let releaseReads;
+  const bothRead = new Promise((resolve) => {
+    releaseReads = resolve;
+  });
+  return {
+    async afterFirst(sql) {
+      if (!sql.includes(`SELECT * FROM ${tableName}`)) return;
+      reads += 1;
+      if (reads === 2) releaseReads();
+      await bothRead;
+    }
+  };
 }
 
 test('direct income approval records income and fine in the current payroll total', async () => {
@@ -206,6 +223,114 @@ test('dual income approval rolls back request, legacy, ledger, and audit togethe
   );
 });
 
+test('concurrent dual income approvals produce one winning write set', async () => {
+  const { database, env } = approvalFixture({
+    writeMode: 'dual',
+    hooks: concurrentPendingReads('pending_income')
+  });
+  database.prepare(`
+    INSERT INTO pending_income (
+      request_id, store_id, telegram_id, income, commission_rate,
+      commission_income, fine, status, submitted_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?)
+  `).run(
+    'INC-RACE', 'STORE1', 'EMP1', 100, 0.6, 60, 5,
+    '2026-07-15T00:00:00.000Z'
+  );
+
+  const results = await Promise.all([
+    approveIncomeRequest(env, 'STORE1', 'INC-RACE', 'ADMIN1'),
+    approveIncomeRequest(env, 'STORE1', 'INC-RACE', 'ADMIN2')
+  ]);
+
+  assert.deepEqual(
+    results.map((result) => result.ok).sort(),
+    [false, true]
+  );
+  assert.equal(
+    results.find((result) => !result.ok).error,
+    'already_decided'
+  );
+  assert.equal(
+    database.prepare(`
+      SELECT COUNT(*) AS total FROM income_records WHERE request_id = 'INC-RACE'
+    `).get().total,
+    2
+  );
+  assert.equal(
+    database.prepare(`
+      SELECT COUNT(*) AS total FROM payroll_entries WHERE source_id = 'INC-RACE'
+    `).get().total,
+    2
+  );
+  assert.equal(
+    database.prepare(`
+      SELECT COUNT(*) AS total FROM admin_audit_logs
+      WHERE action = 'approve_income' AND target_id = 'INC-RACE'
+    `).get().total,
+    1
+  );
+});
+
+test('concurrent income approval and rejection produce one final decision', async () => {
+  const { database, env } = approvalFixture({
+    writeMode: 'dual',
+    hooks: concurrentPendingReads('pending_income')
+  });
+  database.prepare(`
+    INSERT INTO pending_income (
+      request_id, store_id, telegram_id, income, commission_rate,
+      commission_income, fine, status, submitted_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?)
+  `).run(
+    'INC-DECISION-RACE', 'STORE1', 'EMP1', 100, 0.6, 60, 5,
+    '2026-07-15T00:00:00.000Z'
+  );
+
+  const results = await Promise.all([
+    approveIncomeRequest(
+      env,
+      'STORE1',
+      'INC-DECISION-RACE',
+      'ADMIN1'
+    ),
+    rejectIncomeRequest(
+      env,
+      'STORE1',
+      'INC-DECISION-RACE',
+      'ADMIN2',
+      'Rejected concurrently'
+    )
+  ]);
+
+  assert.deepEqual(
+    results.map((result) => result.ok).sort(),
+    [false, true]
+  );
+  assert.equal(
+    results.find((result) => !result.ok).error,
+    'already_decided'
+  );
+  assert.equal(
+    database.prepare(`
+      SELECT COUNT(*) AS total FROM admin_audit_logs
+      WHERE target_id = 'INC-DECISION-RACE'
+    `).get().total,
+    1
+  );
+  const status = database.prepare(`
+    SELECT status FROM pending_income WHERE request_id = 'INC-DECISION-RACE'
+  `).get().status;
+  assert.ok(status === 'approved' || status === 'rejected');
+  assert.equal(
+    database.prepare(`
+      SELECT COUNT(*) AS total FROM income_records
+      WHERE request_id = 'INC-DECISION-RACE'
+    `).get().total,
+    status === 'approved' ? 2 : 0
+  );
+});
+
 test('direct salary advance approval writes one payroll deduction', async () => {
   const { database, env } = approvalFixture();
   database.exec(`
@@ -296,6 +421,65 @@ test('dual mode writes an approved salary advance as one negative ledger entry',
       SELECT COUNT(*) AS total
       FROM admin_audit_logs
       WHERE action = 'approve_salary_advance' AND target_id = 'ADV-DUAL'
+    `).get().total,
+    1
+  );
+});
+
+test('concurrent salary advance approvals produce one legacy deduction', async () => {
+  const { database, env } = approvalFixture({
+    writeMode: 'dual',
+    hooks: concurrentPendingReads('salary_advance_requests')
+  });
+  database.exec(`
+    INSERT INTO income_records (
+      record_id, store_id, telegram_id, income, commission_rate,
+      commission_income, original_fine, fine, type, source,
+      request_id, approved_at, admin_id
+    ) VALUES (
+      'REC-RACE-INCOME', 'STORE1', 'EMP1', 100, 0.6,
+      60, 0, 0, 'income', 'manual',
+      'INC-RACE-SEED', '2026-07-15T00:00:00.000Z', 'ADMIN1'
+    );
+    INSERT INTO salary_advance_requests (
+      request_id, store_id, telegram_id, amount, status, requested_at
+    ) VALUES (
+      'ADV-RACE', 'STORE1', 'EMP1', 20, 'pending',
+      '2026-07-16T00:00:00.000Z'
+    );
+  `);
+
+  const results = await Promise.all([
+    approveSalaryAdvanceRequest(env, 'STORE1', 'ADV-RACE', 'ADMIN1'),
+    approveSalaryAdvanceRequest(env, 'STORE1', 'ADV-RACE', 'ADMIN2')
+  ]);
+
+  assert.deepEqual(
+    results.map((result) => result.ok).sort(),
+    [false, true]
+  );
+  assert.equal(
+    results.find((result) => !result.ok).error,
+    'already_decided'
+  );
+  assert.equal(
+    database.prepare(`
+      SELECT COUNT(*) AS total
+      FROM income_records WHERE request_id = 'ADV-RACE'
+    `).get().total,
+    1
+  );
+  assert.equal(
+    database.prepare(`
+      SELECT COUNT(*) AS total
+      FROM payroll_entries WHERE source_id = 'ADV-RACE'
+    `).get().total,
+    1
+  );
+  assert.equal(
+    database.prepare(`
+      SELECT COUNT(*) AS total FROM admin_audit_logs
+      WHERE action = 'approve_salary_advance' AND target_id = 'ADV-RACE'
     `).get().total,
     1
   );
@@ -414,6 +598,57 @@ test('direct salary approval freezes the net total and starts a new cycle', asyn
   );
 });
 
+test('concurrent salary approvals freeze one record and advance the cycle once', async () => {
+  const { database, env } = approvalFixture({
+    hooks: concurrentPendingReads('salary_requests')
+  });
+  database.exec(`
+    INSERT INTO income_records (
+      record_id, store_id, telegram_id, income, commission_rate,
+      commission_income, original_fine, fine, type, source,
+      request_id, approved_at, admin_id
+    ) VALUES (
+      'REC-SALARY-RACE', 'STORE1', 'EMP1', 100, 0.6,
+      60, 0, 0, 'income', 'manual',
+      'INC-SALARY-RACE', '2026-07-15T00:00:00.000Z', 'ADMIN1'
+    );
+    INSERT INTO salary_requests (
+      request_id, store_id, telegram_id, amount_snapshot, status, requested_at
+    ) VALUES (
+      'SALREQ-RACE', 'STORE1', 'EMP1', 60, 'pending',
+      '2026-07-18T00:00:00.000Z'
+    );
+  `);
+
+  const results = await Promise.all([
+    approveSalaryRequest(env, 'STORE1', 'SALREQ-RACE', 'ADMIN1'),
+    approveSalaryRequest(env, 'STORE1', 'SALREQ-RACE', 'ADMIN2')
+  ]);
+
+  assert.deepEqual(
+    results.map((result) => result.ok).sort(),
+    [false, true]
+  );
+  assert.equal(
+    results.find((result) => !result.ok).error,
+    'already_decided'
+  );
+  assert.equal(
+    database.prepare(`
+      SELECT COUNT(*) AS total
+      FROM salary_records WHERE request_id = 'SALREQ-RACE'
+    `).get().total,
+    1
+  );
+  assert.equal(
+    database.prepare(`
+      SELECT COUNT(*) AS total FROM admin_audit_logs
+      WHERE action = 'approve_salary' AND target_id = 'SALREQ-RACE'
+    `).get().total,
+    1
+  );
+});
+
 test('approves income and its linked fine once across sequential replay', async () => {
   const { database, env } = approvalFixture();
   database.prepare(`
@@ -466,8 +701,20 @@ test('approves income and its linked fine once across sequential replay', async 
     '/api/admin/stores/STORE1/income/INC1/approve'
   );
 
-  assert.equal(replay.status, 200);
-  assert.deepEqual(await replay.json(), { ok: false });
+  assert.equal(replay.status, 409);
+  assert.deepEqual(
+    await replay.json(),
+    { ok: false, error: 'already_decided' }
+  );
+  const rejectedReplay = await adminRequest(
+    env,
+    '/api/admin/stores/STORE1/income/INC1/reject'
+  );
+  assert.equal(rejectedReplay.status, 409);
+  assert.deepEqual(
+    await rejectedReplay.json(),
+    { ok: false, error: 'already_decided' }
+  );
   assert.equal(
     database.prepare(`
       SELECT COUNT(*) AS total FROM income_records WHERE request_id = 'INC1'
@@ -524,7 +771,20 @@ test('approves a salary advance as one payroll deduction', async () => {
     '/api/admin/stores/STORE1/advances/ADV1/approve'
   );
 
-  assert.deepEqual(await replay.json(), { ok: false });
+  assert.equal(replay.status, 409);
+  assert.deepEqual(
+    await replay.json(),
+    { ok: false, error: 'already_decided' }
+  );
+  const rejectedReplay = await adminRequest(
+    env,
+    '/api/admin/stores/STORE1/advances/ADV1/reject'
+  );
+  assert.equal(rejectedReplay.status, 409);
+  assert.deepEqual(
+    await rejectedReplay.json(),
+    { ok: false, error: 'already_decided' }
+  );
   assert.equal(
     database.prepare(`
       SELECT COUNT(*) AS total FROM income_records WHERE request_id = 'ADV1'
@@ -598,7 +858,20 @@ test('freezes the current net salary and advances the member cycle once', async 
     '/api/admin/stores/STORE1/salary/SALREQ1/approve'
   );
 
-  assert.deepEqual(await replay.json(), { ok: false });
+  assert.equal(replay.status, 409);
+  assert.deepEqual(
+    await replay.json(),
+    { ok: false, error: 'already_decided' }
+  );
+  const rejectedReplay = await adminRequest(
+    env,
+    '/api/admin/stores/STORE1/salary/SALREQ1/reject'
+  );
+  assert.equal(rejectedReplay.status, 409);
+  assert.deepEqual(
+    await rejectedReplay.json(),
+    { ok: false, error: 'already_decided' }
+  );
   assert.equal(
     database.prepare(`
       SELECT COUNT(*) AS total FROM salary_records

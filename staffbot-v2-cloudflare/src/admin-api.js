@@ -69,6 +69,13 @@ import {
 import { sendMessage } from './telegram-client.js';
 import { normalizePositiveInt, validTime } from './validation.js';
 
+function financialApprovalResponse(result) {
+  if (!result.ok && result.error === 'already_decided') {
+    return json(result, 409);
+  }
+  return json(result);
+}
+
 export async function handleAdminApi(request, env, url, ctx) {
   try {
     if (request.method === 'POST' && url.pathname === '/api/admin/login/start') return adminLoginStart(request, env);
@@ -509,10 +516,16 @@ async function handleAdminIncome(request, env, url, storeId, parts, adminId) {
   }
   if (parts.length >= 7 && request.method === 'POST') {
     const requestId = decodeURIComponent(parts[5]);
-    if (parts[6] === 'approve') return json(await approveIncomeRequest(env, storeId, requestId, adminId));
+    if (parts[6] === 'approve') {
+      return financialApprovalResponse(
+        await approveIncomeRequest(env, storeId, requestId, adminId)
+      );
+    }
     if (parts[6] === 'reject') {
       const body = await readJson(request);
-      return json(await rejectIncomeRequest(env, storeId, requestId, adminId, String(body.reason || 'Rejected from admin page')));
+      return financialApprovalResponse(
+        await rejectIncomeRequest(env, storeId, requestId, adminId, String(body.reason || 'Rejected from admin page'))
+      );
     }
   }
   if (parts.length === 7 && request.method === 'PATCH' && parts[5] === 'records') {
@@ -596,10 +609,16 @@ async function handleAdminSalary(request, env, url, storeId, parts, adminId) {
   }
   if (parts.length >= 7 && request.method === 'POST') {
     const requestId = decodeURIComponent(parts[5]);
-    if (parts[6] === 'approve') return json(await approveSalaryRequest(env, storeId, requestId, adminId));
+    if (parts[6] === 'approve') {
+      return financialApprovalResponse(
+        await approveSalaryRequest(env, storeId, requestId, adminId)
+      );
+    }
     if (parts[6] === 'reject') {
       const body = await readJson(request);
-      return json(await rejectSalaryRequest(env, storeId, requestId, adminId, String(body.reason || 'Rejected from admin page')));
+      return financialApprovalResponse(
+        await rejectSalaryRequest(env, storeId, requestId, adminId, String(body.reason || 'Rejected from admin page'))
+      );
     }
   }
   return json({ ok: false, error: 'not_found' }, 404);
@@ -661,10 +680,16 @@ async function handleAdminSalaryAdvances(request, env, url, storeId, parts, admi
   }
   if (parts.length >= 7 && request.method === 'POST') {
     const requestId = decodeURIComponent(parts[5]);
-    if (parts[6] === 'approve') return json(await approveSalaryAdvanceRequest(env, storeId, requestId, adminId));
+    if (parts[6] === 'approve') {
+      return financialApprovalResponse(
+        await approveSalaryAdvanceRequest(env, storeId, requestId, adminId)
+      );
+    }
     if (parts[6] === 'reject') {
       const body = await readJson(request);
-      return json(await rejectSalaryAdvanceRequest(env, storeId, requestId, adminId, String(body.reason || 'Rejected from admin page')));
+      return financialApprovalResponse(
+        await rejectSalaryAdvanceRequest(env, storeId, requestId, adminId, String(body.reason || 'Rejected from admin page'))
+      );
     }
   }
   return json({ ok: false, error: 'not_found' }, 404);

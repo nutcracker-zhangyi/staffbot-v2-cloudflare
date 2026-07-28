@@ -1,4 +1,4 @@
-import { audit, auditStatement, makeId, nowIso } from './audit.js';
+import { audit, makeId, nowIso } from './audit.js';
 import {
   absenceFineRecordDraft,
   approvedIncomeRecordDrafts,
@@ -79,6 +79,93 @@ export async function hasAttendance(env, storeId, userId, businessDate, type) {
 
 export function mutationCount(result) {
   return Number(result && result.meta ? result.meta.changes : 0);
+}
+
+function pendingRequestIncomeRecordStatement(env, tableName, draft) {
+  return env.DB.prepare(`
+    INSERT INTO income_records (
+      record_id, store_id, telegram_id, income, commission_rate,
+      commission_income, original_fine, fine, type, source,
+      request_id, approved_at, admin_id
+    )
+    SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+    FROM ${tableName}
+    WHERE store_id = ? AND request_id = ? AND status = 'pending'
+  `).bind(
+    draft.record_id,
+    draft.store_id,
+    draft.telegram_id,
+    draft.income,
+    draft.commission_rate,
+    draft.commission_income,
+    draft.original_fine,
+    draft.fine,
+    draft.type,
+    draft.source,
+    draft.request_id,
+    draft.approved_at,
+    draft.admin_id,
+    draft.store_id,
+    draft.request_id
+  );
+}
+
+function pendingRequestLedgerStatement(env, tableName, entry, storeId, requestId) {
+  return env.DB.prepare(`
+    INSERT INTO payroll_entries (
+      entry_id, store_id, telegram_id, type, amount_micros, currency,
+      effective_at, source, source_id, created_by, created_at,
+      reverses_entry_id, metadata_json
+    )
+    SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+    FROM ${tableName}
+    WHERE store_id = ? AND request_id = ? AND status = 'pending'
+  `).bind(
+    entry.entry_id,
+    entry.store_id,
+    entry.telegram_id,
+    entry.type,
+    entry.amount_micros,
+    entry.currency,
+    entry.effective_at,
+    entry.source,
+    entry.source_id,
+    entry.created_by,
+    entry.created_at,
+    entry.reverses_entry_id,
+    entry.metadata_json,
+    storeId,
+    requestId
+  );
+}
+
+function pendingRequestAuditStatement(
+  env,
+  tableName,
+  storeId,
+  requestId,
+  adminId,
+  action,
+  details,
+  createdAt
+) {
+  return env.DB.prepare(`
+    INSERT INTO admin_audit_logs (
+      store_id, admin_id, action, target_id, details_json, created_at
+    )
+    SELECT ?, ?, ?, ?, ?, ?
+    FROM ${tableName}
+    WHERE store_id = ? AND request_id = ? AND status = 'pending'
+  `).bind(
+    storeId,
+    adminId,
+    action,
+    requestId,
+    JSON.stringify(details || {}),
+    createdAt,
+    storeId,
+    requestId
+  );
 }
 
 function pendingAbsenceLedgerStatement(env, entry, requestId, expectedStoreId) {
@@ -218,23 +305,16 @@ export async function rejectAbsenceFineRequest(env, requestId, adminId, reason =
 
 export async function approveIncomeRequest(env, storeId, requestId, adminId) {
   const found = await env.DB.prepare(`SELECT * FROM pending_income WHERE store_id = ? AND request_id = ?`).bind(storeId, requestId).first();
-  if (!found || found.status !== 'pending') return { ok: false };
+  if (!found) return { ok: false };
+  if (found.status !== 'pending') {
+    return { ok: false, error: 'already_decided' };
+  }
   const store = await getStore(env, storeId);
   const approvedAt = nowIso();
   const drafts = approvedIncomeRecordDrafts(found, adminId, approvedAt, [makeId('REC'), makeId('REC')]);
-  const statements = [
-    env.DB.prepare(`UPDATE pending_income SET status = 'approved', decided_at = ?, admin_id = ? WHERE store_id = ? AND request_id = ?`)
-      .bind(approvedAt, adminId, storeId, requestId),
-    ...drafts.map((draft) => env.DB.prepare(`
-      INSERT INTO income_records
-        (record_id, store_id, telegram_id, income, commission_rate, commission_income, original_fine, fine, type, source, request_id, approved_at, admin_id)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `).bind(
-      draft.record_id, draft.store_id, draft.telegram_id, draft.income, draft.commission_rate,
-      draft.commission_income, draft.original_fine, draft.fine, draft.type, draft.source, draft.request_id,
-      draft.approved_at, draft.admin_id
-    ))
-  ];
+  const statements = drafts.map((draft) => (
+    pendingRequestIncomeRecordStatement(env, 'pending_income', draft)
+  ));
   if (payrollLedgerWritesEnabled(env)) {
     for (const draft of drafts) {
       const entry = payrollEntryFromIncomeRecordDraft(
@@ -242,33 +322,74 @@ export async function approveIncomeRequest(env, storeId, requestId, adminId) {
         store.currency,
         makeId('PAY')
       );
-      if (entry) statements.push(payrollEntryInsertStatement(env, entry));
+      if (entry) {
+        statements.push(
+          pendingRequestLedgerStatement(
+            env,
+            'pending_income',
+            entry,
+            storeId,
+            requestId
+          )
+        );
+      }
     }
   }
   statements.push(
-    auditStatement(
+    pendingRequestAuditStatement(
       env,
+      'pending_income',
       storeId,
+      requestId,
       adminId,
       'approve_income',
-      requestId,
       found,
       approvedAt
     )
   );
-  await env.DB.batch(statements);
+  const updateIndex = statements.length;
+  statements.push(
+    env.DB.prepare(`
+      UPDATE pending_income
+      SET status = 'approved', decided_at = ?, admin_id = ?
+      WHERE store_id = ? AND request_id = ? AND status = 'pending'
+    `).bind(approvedAt, adminId, storeId, requestId)
+  );
+  const results = await env.DB.batch(statements);
+  if (mutationCount(results[updateIndex]) !== 1) {
+    return { ok: false, error: 'already_decided' };
+  }
   return { ok: true, row: found, store };
 }
 
 export async function rejectIncomeRequest(env, storeId, requestId, adminId, reason) {
   const found = await env.DB.prepare(`SELECT * FROM pending_income WHERE store_id = ? AND request_id = ?`).bind(storeId, requestId).first();
-  if (!found || found.status !== 'pending') return { ok: false };
-  await env.DB.prepare(`
-    UPDATE pending_income
-    SET status = 'rejected', decided_at = ?, admin_id = ?, reject_reason = ?
-    WHERE store_id = ? AND request_id = ?
-  `).bind(nowIso(), adminId, reason, storeId, requestId).run();
-  await audit(env, storeId, adminId, 'reject_income', requestId, { reason, ...found });
+  if (!found) return { ok: false };
+  if (found.status !== 'pending') {
+    return { ok: false, error: 'already_decided' };
+  }
+  const decidedAt = nowIso();
+  const statements = [
+    pendingRequestAuditStatement(
+      env,
+      'pending_income',
+      storeId,
+      requestId,
+      adminId,
+      'reject_income',
+      { reason, ...found },
+      decidedAt
+    ),
+    env.DB.prepare(`
+      UPDATE pending_income
+      SET status = 'rejected', decided_at = ?, admin_id = ?, reject_reason = ?
+      WHERE store_id = ? AND request_id = ? AND status = 'pending'
+    `).bind(decidedAt, adminId, reason, storeId, requestId)
+  ];
+  const results = await env.DB.batch(statements);
+  if (mutationCount(results[1]) !== 1) {
+    return { ok: false, error: 'already_decided' };
+  }
   return { ok: true, row: found, reason };
 }
 
@@ -301,7 +422,10 @@ export async function updateIncomeFineRecord(env, storeId, recordId, adminId, fi
 
 export async function approveSalaryRequest(env, storeId, requestId, adminId) {
   const found = await env.DB.prepare(`SELECT * FROM salary_requests WHERE store_id = ? AND request_id = ?`).bind(storeId, requestId).first();
-  if (!found || found.status !== 'pending') return { ok: false };
+  if (!found) return { ok: false };
+  if (found.status !== 'pending') {
+    return { ok: false, error: 'already_decided' };
+  }
   const store = await getStore(env, storeId);
   const member = await env.DB.prepare(`SELECT cycle_start, commission_rate FROM store_members WHERE store_id = ? AND telegram_id = ?`).bind(storeId, found.telegram_id).first();
   const periodStart = member ? member.cycle_start : found.requested_at;
@@ -309,37 +433,108 @@ export async function approveSalaryRequest(env, storeId, requestId, adminId) {
   const finalAmount = await getTotalIncome(env, storeId, found.telegram_id);
   const recordId = makeId('SAL');
 
-  await env.DB.batch([
-    env.DB.prepare(`UPDATE salary_requests SET status = 'approved', decided_at = ?, admin_id = ? WHERE store_id = ? AND request_id = ?`)
-      .bind(periodEnd, adminId, storeId, requestId),
+  const statements = [
     env.DB.prepare(`
       INSERT INTO salary_records
-        (record_id, store_id, telegram_id, amount, period_start, period_end, approved_at, admin_id, request_id)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `).bind(recordId, storeId, found.telegram_id, finalAmount, periodStart, periodEnd, periodEnd, adminId, requestId),
-    env.DB.prepare(`UPDATE store_members SET cycle_start = ?, updated_at = ? WHERE store_id = ? AND telegram_id = ?`)
-      .bind(periodEnd, periodEnd, storeId, found.telegram_id)
-  ]);
-
-  await audit(env, storeId, adminId, 'approve_salary', requestId, { amount: finalAmount, ...found });
+        (
+          record_id, store_id, telegram_id, amount, period_start,
+          period_end, approved_at, admin_id, request_id
+        )
+      SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?
+      FROM salary_requests
+      WHERE store_id = ? AND request_id = ? AND status = 'pending'
+    `).bind(
+      recordId,
+      storeId,
+      found.telegram_id,
+      finalAmount,
+      periodStart,
+      periodEnd,
+      periodEnd,
+      adminId,
+      requestId,
+      storeId,
+      requestId
+    ),
+    env.DB.prepare(`
+      UPDATE store_members
+      SET cycle_start = ?, updated_at = ?
+      WHERE store_id = ? AND telegram_id = ?
+        AND EXISTS (
+          SELECT 1 FROM salary_requests
+          WHERE store_id = ? AND request_id = ? AND status = 'pending'
+        )
+    `).bind(
+      periodEnd,
+      periodEnd,
+      storeId,
+      found.telegram_id,
+      storeId,
+      requestId
+    ),
+    pendingRequestAuditStatement(
+      env,
+      'salary_requests',
+      storeId,
+      requestId,
+      adminId,
+      'approve_salary',
+      { amount: finalAmount, ...found },
+      periodEnd
+    )
+  ];
+  const updateIndex = statements.length;
+  statements.push(
+    env.DB.prepare(`
+      UPDATE salary_requests
+      SET status = 'approved', decided_at = ?, admin_id = ?
+      WHERE store_id = ? AND request_id = ? AND status = 'pending'
+    `).bind(periodEnd, adminId, storeId, requestId)
+  );
+  const results = await env.DB.batch(statements);
+  if (mutationCount(results[updateIndex]) !== 1) {
+    return { ok: false, error: 'already_decided' };
+  }
   return { ok: true, row: found, store, amount: finalAmount, periodStart, periodEnd };
 }
 
 export async function rejectSalaryRequest(env, storeId, requestId, adminId, reason) {
   const found = await env.DB.prepare(`SELECT * FROM salary_requests WHERE store_id = ? AND request_id = ?`).bind(storeId, requestId).first();
-  if (!found || found.status !== 'pending') return { ok: false };
-  await env.DB.prepare(`
-    UPDATE salary_requests
-    SET status = 'rejected', decided_at = ?, admin_id = ?, reject_reason = ?
-    WHERE store_id = ? AND request_id = ?
-  `).bind(nowIso(), adminId, reason, storeId, requestId).run();
-  await audit(env, storeId, adminId, 'reject_salary', requestId, { reason, ...found });
+  if (!found) return { ok: false };
+  if (found.status !== 'pending') {
+    return { ok: false, error: 'already_decided' };
+  }
+  const decidedAt = nowIso();
+  const statements = [
+    pendingRequestAuditStatement(
+      env,
+      'salary_requests',
+      storeId,
+      requestId,
+      adminId,
+      'reject_salary',
+      { reason, ...found },
+      decidedAt
+    ),
+    env.DB.prepare(`
+      UPDATE salary_requests
+      SET status = 'rejected', decided_at = ?, admin_id = ?, reject_reason = ?
+      WHERE store_id = ? AND request_id = ? AND status = 'pending'
+    `).bind(decidedAt, adminId, reason, storeId, requestId)
+  ];
+  const results = await env.DB.batch(statements);
+  if (mutationCount(results[1]) !== 1) {
+    return { ok: false, error: 'already_decided' };
+  }
   return { ok: true, row: found, reason };
 }
 
 export async function approveSalaryAdvanceRequest(env, storeId, requestId, adminId) {
   const found = await env.DB.prepare(`SELECT * FROM salary_advance_requests WHERE store_id = ? AND request_id = ?`).bind(storeId, requestId).first();
-  if (!found || found.status !== 'pending') return { ok: false };
+  if (!found) return { ok: false };
+  if (found.status !== 'pending') {
+    return { ok: false, error: 'already_decided' };
+  }
   const store = await getStore(env, storeId);
   const total = await getTotalIncome(env, storeId, found.telegram_id);
   if (Number(found.amount || 0) > total) return { ok: false, error: 'amount_exceeds_salary', store, total };
@@ -361,21 +556,10 @@ export async function approveSalaryAdvanceRequest(env, storeId, requestId, admin
     admin_id: adminId
   };
   const statements = [
-    env.DB.prepare(`UPDATE salary_advance_requests SET status = 'approved', decided_at = ?, admin_id = ? WHERE store_id = ? AND request_id = ?`)
-      .bind(decidedAt, adminId, storeId, requestId),
-    env.DB.prepare(`
-      INSERT INTO income_records
-        (record_id, store_id, telegram_id, income, commission_rate, commission_income, original_fine, fine, type, source, request_id, approved_at, admin_id)
-      VALUES (?, ?, ?, 0, 0.6, 0, ?, ?, 'advance', 'salary_advance', ?, ?, ?)
-    `).bind(
-      draft.record_id,
-      draft.store_id,
-      draft.telegram_id,
-      draft.original_fine,
-      draft.fine,
-      draft.request_id,
-      draft.approved_at,
-      draft.admin_id
+    pendingRequestIncomeRecordStatement(
+      env,
+      'salary_advance_requests',
+      draft
     )
   ];
   if (payrollLedgerWritesEnabled(env)) {
@@ -384,32 +568,73 @@ export async function approveSalaryAdvanceRequest(env, storeId, requestId, admin
       store.currency,
       makeId('PAY')
     );
-    if (entry) statements.push(payrollEntryInsertStatement(env, entry));
+    if (entry) {
+      statements.push(
+        pendingRequestLedgerStatement(
+          env,
+          'salary_advance_requests',
+          entry,
+          storeId,
+          requestId
+        )
+      );
+    }
   }
   statements.push(
-    auditStatement(
+    pendingRequestAuditStatement(
       env,
+      'salary_advance_requests',
       storeId,
+      requestId,
       adminId,
       'approve_salary_advance',
-      requestId,
       found,
       decidedAt
     )
   );
-  await env.DB.batch(statements);
+  const updateIndex = statements.length;
+  statements.push(
+    env.DB.prepare(`
+      UPDATE salary_advance_requests
+      SET status = 'approved', decided_at = ?, admin_id = ?
+      WHERE store_id = ? AND request_id = ? AND status = 'pending'
+    `).bind(decidedAt, adminId, storeId, requestId)
+  );
+  const results = await env.DB.batch(statements);
+  if (mutationCount(results[updateIndex]) !== 1) {
+    return { ok: false, error: 'already_decided' };
+  }
   return { ok: true, row: found, store };
 }
 
 export async function rejectSalaryAdvanceRequest(env, storeId, requestId, adminId, reason) {
   const found = await env.DB.prepare(`SELECT * FROM salary_advance_requests WHERE store_id = ? AND request_id = ?`).bind(storeId, requestId).first();
-  if (!found || found.status !== 'pending') return { ok: false };
-  await env.DB.prepare(`
-    UPDATE salary_advance_requests
-    SET status = 'rejected', decided_at = ?, admin_id = ?, reject_reason = ?
-    WHERE store_id = ? AND request_id = ?
-  `).bind(nowIso(), adminId, reason, storeId, requestId).run();
-  await audit(env, storeId, adminId, 'reject_salary_advance', requestId, { reason, ...found });
+  if (!found) return { ok: false };
+  if (found.status !== 'pending') {
+    return { ok: false, error: 'already_decided' };
+  }
+  const decidedAt = nowIso();
+  const statements = [
+    pendingRequestAuditStatement(
+      env,
+      'salary_advance_requests',
+      storeId,
+      requestId,
+      adminId,
+      'reject_salary_advance',
+      { reason, ...found },
+      decidedAt
+    ),
+    env.DB.prepare(`
+      UPDATE salary_advance_requests
+      SET status = 'rejected', decided_at = ?, admin_id = ?, reject_reason = ?
+      WHERE store_id = ? AND request_id = ? AND status = 'pending'
+    `).bind(decidedAt, adminId, reason, storeId, requestId)
+  ];
+  const results = await env.DB.batch(statements);
+  if (mutationCount(results[1]) !== 1) {
+    return { ok: false, error: 'already_decided' };
+  }
   return { ok: true, row: found, reason };
 }
 
