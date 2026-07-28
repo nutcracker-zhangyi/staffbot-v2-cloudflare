@@ -1,7 +1,54 @@
 import { addIsoDays, dateRange, localDate } from './dates.js';
+import { adminPage } from './admin-query.js';
 import { serviceEnvironment } from './security.js';
+import { isStoreAdmin } from './stores.js';
 
 const ISO_DATE = /^\d{4}-\d{2}-\d{2}$/;
+const EMPLOYEE_SORTS = new Set([
+  'display_name',
+  'gross_income_micros',
+  'commission_micros',
+  'fine_micros',
+  'advance_micros',
+  'net_payroll_micros',
+  'paid_salary_micros'
+]);
+
+const MONEY_FIELDS = [
+  'gross_income_micros',
+  'commission_micros',
+  'fine_micros',
+  'advance_micros',
+  'bonus_micros',
+  'adjustment_micros',
+  'negative_carry_micros',
+  'reversal_micros',
+  'net_payroll_micros',
+  'paid_salary_micros'
+];
+
+const TYPE_FIELD = {
+  income: 'commission_micros',
+  fine: 'fine_micros',
+  advance: 'advance_micros',
+  bonus: 'bonus_micros',
+  adjustment: 'adjustment_micros',
+  negative_carry: 'negative_carry_micros',
+  reversal: 'reversal_micros'
+};
+
+const LEDGER_TYPES = Object.keys(TYPE_FIELD);
+const PERIODS_CTE = `
+  WITH periods AS (
+    SELECT
+      CAST(json_extract(value, '$.store_id') AS TEXT) AS store_id,
+      CAST(json_extract(value, '$.store_currency') AS TEXT) AS store_currency,
+      CAST(json_extract(value, '$.month_key') AS TEXT) AS month_key,
+      CAST(json_extract(value, '$.start_iso') AS TEXT) AS start_iso,
+      CAST(json_extract(value, '$.end_iso') AS TEXT) AS end_iso
+    FROM json_each(?)
+  )
+`;
 
 export class DashboardInputError extends Error {
   constructor(code, status = 400) {
@@ -91,4 +138,290 @@ export function dashboardPeriods(stores, selection) {
 
 export function dashboardPeriodsJson(periods) {
   return JSON.stringify(periods);
+}
+
+function dashboardStoreIds(url, fallbackStoreId) {
+  const selected = String(url.searchParams.get('stores') || '')
+    .split(',')
+    .map((value) => value.trim())
+    .filter(Boolean);
+  const storeIds = [...new Set(selected)];
+  return storeIds.length ? storeIds : [String(fallbackStoreId || '').trim()];
+}
+
+function dashboardEmployeeSort(url) {
+  const sort = url.searchParams.get('employees_sort');
+  const direction = url.searchParams.get('employees_dir');
+  if ((sort && !EMPLOYEE_SORTS.has(sort))
+    || (direction && !['asc', 'desc'].includes(direction))) {
+    throw new DashboardInputError('invalid_sort');
+  }
+  return {
+    employeeSort: sort || 'net_payroll_micros',
+    employeeDir: direction || 'desc'
+  };
+}
+
+export async function resolveDashboardFilters(
+  env,
+  url,
+  fallbackStoreId,
+  adminId,
+  now = new Date()
+) {
+  const storeIds = dashboardStoreIds(url, fallbackStoreId);
+  for (const storeId of storeIds) {
+    if (!await isStoreAdmin(env, adminId, storeId)) {
+      throw new DashboardInputError('forbidden_store', 403);
+    }
+  }
+
+  const storeRows = await env.DB.prepare(`
+    SELECT store_id, timezone, currency
+    FROM stores
+    WHERE status = 'active'
+      AND store_id IN (SELECT value FROM json_each(?))
+    ORDER BY store_id
+  `).bind(JSON.stringify(storeIds)).all();
+  const stores = storeRows.results || [];
+  if (stores.length !== storeIds.length) {
+    throw new DashboardInputError('unknown_store');
+  }
+
+  let fallbackStore = stores.find((store) => store.store_id === fallbackStoreId);
+  if (!fallbackStore) {
+    fallbackStore = await env.DB.prepare(`
+      SELECT timezone FROM stores WHERE store_id = ? AND status = 'active'
+    `).bind(fallbackStoreId).first();
+  }
+  const selection = dashboardSelection(
+    url.searchParams.get('date_from'),
+    url.searchParams.get('date_to'),
+    fallbackStore?.timezone || 'UTC',
+    now
+  );
+  const rawEmployee = String(url.searchParams.get('employee') || '').trim();
+  const employeeId = rawEmployee && rawEmployee !== 'all' ? rawEmployee : '';
+  if (employeeId) {
+    const member = await env.DB.prepare(`
+      SELECT 1 FROM store_members
+      WHERE telegram_id = ?
+        AND store_id IN (SELECT value FROM json_each(?))
+      LIMIT 1
+    `).bind(employeeId, JSON.stringify(storeIds)).first();
+    if (!member) throw new DashboardInputError('unknown_employee');
+  }
+  const { employeeSort, employeeDir } = dashboardEmployeeSort(url);
+
+  return {
+    storeIds,
+    stores,
+    employeeId,
+    dateFrom: selection.date_from,
+    dateTo: selection.date_to,
+    periods: dashboardPeriods(stores, selection),
+    employeeSort,
+    employeeDir
+  };
+}
+
+function zeroMoney() {
+  return Object.fromEntries(MONEY_FIELDS.map((field) => [field, 0]));
+}
+
+function safeMicros(value) {
+  const micros = Number(value);
+  if (!Number.isSafeInteger(micros)) {
+    throw new RangeError('unsafe_micros');
+  }
+  return micros;
+}
+
+function dashboardEmployee(telegramId, displayName, role = '') {
+  return {
+    telegram_id: telegramId,
+    display_name: displayName || telegramId,
+    role,
+    ...zeroMoney()
+  };
+}
+
+function dashboardGroup(currency) {
+  return {
+    currency,
+    summary: { ...zeroMoney(), employee_count: 0 },
+    months: [],
+    employees: [],
+    composition: LEDGER_TYPES.map((type) => ({ type, amount_micros: 0 }))
+  };
+}
+
+function groupMonth(group, monthKey) {
+  let month = group.months.find((item) => item.month_key === monthKey);
+  if (!month) {
+    month = { month_key: monthKey, ...zeroMoney() };
+    group.months.push(month);
+  }
+  return month;
+}
+
+function groupEmployee(group, telegramId, displayName, role = '') {
+  let employee = group.employees.find((item) => item.telegram_id === telegramId);
+  if (!employee) {
+    employee = dashboardEmployee(telegramId, displayName, role);
+    group.employees.push(employee);
+  }
+  return employee;
+}
+
+function addMoney(group, monthKey, telegramId, displayName, role, field, amount) {
+  const micros = safeMicros(amount);
+  group.summary[field] += micros;
+  groupEmployee(group, telegramId, displayName, role)[field] += micros;
+  groupMonth(group, monthKey)[field] += micros;
+}
+
+function assertSafeDashboardMicros(group) {
+  for (const row of [group.summary, ...group.months, ...group.employees]) {
+    for (const field of MONEY_FIELDS) safeMicros(row[field]);
+  }
+  for (const item of group.composition) safeMicros(item.amount_micros);
+}
+
+export function sortDashboardEmployees(rows, sortKey, sortDirection) {
+  return [...rows].sort((left, right) => {
+    const leftValue = left[sortKey];
+    const rightValue = right[sortKey];
+    let comparison;
+    if (sortKey === 'display_name') {
+      comparison = String(leftValue).localeCompare(String(rightValue));
+    } else {
+      comparison = Number(leftValue) - Number(rightValue);
+    }
+    if (comparison) return sortDirection === 'desc' ? -comparison : comparison;
+    return String(left.telegram_id).localeCompare(String(right.telegram_id));
+  });
+}
+
+export async function loadDashboard(env, filters) {
+  const periodsJson = dashboardPeriodsJson(filters.periods);
+  const employee = filters.employeeId;
+  const [memberResult, grossResult, ledgerResult, paymentResult] = await Promise.all([
+    env.DB.prepare(`${PERIODS_CTE}
+      SELECT
+        s.currency AS currency,
+        m.telegram_id,
+        MIN(COALESCE(NULLIF(m.display_name, ''), NULLIF(u.name, ''), NULLIF(u.username, ''), m.telegram_id)) AS display_name,
+        MIN(m.role) AS role
+      FROM store_members m
+      JOIN stores s ON s.store_id = m.store_id
+      JOIN (SELECT DISTINCT store_id FROM periods) p ON p.store_id = m.store_id
+      LEFT JOIN users u ON u.telegram_id = m.telegram_id
+      WHERE s.status = 'active'
+        AND m.status = 'active'
+        AND (? = '' OR m.telegram_id = ?)
+      GROUP BY s.currency, m.telegram_id
+    `).bind(periodsJson, employee, employee).all(),
+    env.DB.prepare(`${PERIODS_CTE}
+      SELECT
+        p.store_currency AS currency,
+        p.month_key,
+        r.telegram_id,
+        MIN(COALESCE(NULLIF(m.display_name, ''), NULLIF(u.name, ''), NULLIF(u.username, ''), r.telegram_id)) AS display_name,
+        MIN(COALESCE(m.role, '')) AS role,
+        SUM(ROUND(r.income * 1000000)) AS gross_income_micros
+      FROM income_records r
+      JOIN periods p ON p.store_id = r.store_id
+      LEFT JOIN store_members m ON m.store_id = r.store_id AND m.telegram_id = r.telegram_id
+      LEFT JOIN users u ON u.telegram_id = r.telegram_id
+      WHERE r.type = 'income'
+        AND r.approved_at >= p.start_iso
+        AND r.approved_at < p.end_iso
+        AND (? = '' OR r.telegram_id = ?)
+      GROUP BY p.store_currency, p.month_key, r.telegram_id
+    `).bind(periodsJson, employee, employee).all(),
+    env.DB.prepare(`${PERIODS_CTE}
+      SELECT
+        e.currency AS currency,
+        p.month_key,
+        e.telegram_id,
+        e.type,
+        MIN(COALESCE(NULLIF(m.display_name, ''), NULLIF(u.name, ''), NULLIF(u.username, ''), e.telegram_id)) AS display_name,
+        MIN(COALESCE(m.role, '')) AS role,
+        SUM(e.amount_micros) AS amount_micros
+      FROM payroll_entries e
+      JOIN periods p ON p.store_id = e.store_id
+      LEFT JOIN store_members m ON m.store_id = e.store_id AND m.telegram_id = e.telegram_id
+      LEFT JOIN users u ON u.telegram_id = e.telegram_id
+      WHERE e.effective_at >= p.start_iso
+        AND e.effective_at < p.end_iso
+        AND (? = '' OR e.telegram_id = ?)
+      GROUP BY e.currency, p.month_key, e.telegram_id, e.type
+    `).bind(periodsJson, employee, employee).all(),
+    env.DB.prepare(`${PERIODS_CTE}
+      SELECT
+        p.store_currency AS currency,
+        p.month_key,
+        s.telegram_id,
+        MIN(COALESCE(NULLIF(m.display_name, ''), NULLIF(u.name, ''), NULLIF(u.username, ''), s.telegram_id)) AS display_name,
+        MIN(COALESCE(m.role, '')) AS role,
+        SUM(ROUND(s.amount * 1000000)) AS paid_salary_micros
+      FROM salary_records s
+      JOIN periods p ON p.store_id = s.store_id
+      LEFT JOIN store_members m ON m.store_id = s.store_id AND m.telegram_id = s.telegram_id
+      LEFT JOIN users u ON u.telegram_id = s.telegram_id
+      WHERE s.approved_at >= p.start_iso
+        AND s.approved_at < p.end_iso
+        AND (? = '' OR s.telegram_id = ?)
+      GROUP BY p.store_currency, p.month_key, s.telegram_id
+    `).bind(periodsJson, employee, employee).all()
+  ]);
+
+  const groups = new Map();
+  const getGroup = (currency) => {
+    if (!groups.has(currency)) groups.set(currency, dashboardGroup(currency));
+    return groups.get(currency);
+  };
+  for (const row of memberResult.results || []) {
+    const group = getGroup(row.currency);
+    groupEmployee(group, row.telegram_id, row.display_name, row.role);
+  }
+  for (const row of grossResult.results || []) {
+    addMoney(getGroup(row.currency), row.month_key, row.telegram_id, row.display_name, row.role,
+      'gross_income_micros', row.gross_income_micros);
+  }
+  for (const row of ledgerResult.results || []) {
+    const field = TYPE_FIELD[row.type];
+    if (!field) continue;
+    const group = getGroup(row.currency);
+    const amount = safeMicros(row.amount_micros);
+    addMoney(group, row.month_key, row.telegram_id, row.display_name, row.role, field, amount);
+    addMoney(group, row.month_key, row.telegram_id, row.display_name, row.role, 'net_payroll_micros', amount);
+    group.composition.find((item) => item.type === row.type).amount_micros += amount;
+  }
+  for (const row of paymentResult.results || []) {
+    addMoney(getGroup(row.currency), row.month_key, row.telegram_id, row.display_name, row.role,
+      'paid_salary_micros', row.paid_salary_micros);
+  }
+
+  for (const group of groups.values()) assertSafeDashboardMicros(group);
+  const orderedGroups = [...groups.values()].sort((left, right) =>
+    left.currency.localeCompare(right.currency)
+  ).map((group) => ({
+    ...group,
+    months: group.months.sort((left, right) => left.month_key.localeCompare(right.month_key)),
+    employees: sortDashboardEmployees(group.employees, filters.employeeSort, filters.employeeDir),
+    summary: { ...group.summary, employee_count: group.employees.length }
+  }));
+
+  return {
+    ok: true,
+    filters: {
+      store_ids: filters.storeIds,
+      date_from: filters.dateFrom,
+      date_to: filters.dateTo,
+      employee: filters.employeeId || null
+    },
+    groups: orderedGroups
+  };
 }
