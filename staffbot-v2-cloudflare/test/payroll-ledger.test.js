@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { DatabaseSync } from 'node:sqlite';
+import { constants, DatabaseSync } from 'node:sqlite';
 
 import {
   amountToMicros,
@@ -635,6 +635,33 @@ test('backfill stops before inserting when a legacy type is unknown', () => {
   assert.equal(
     database.prepare(`SELECT COUNT(*) AS total FROM payroll_entries`).get().total,
     0
+  );
+});
+
+test('backfill succeeds when D1-style authorization rejects temp tables', () => {
+  const database = legacyMigrationFixture();
+  insertLegacyRecord(database, {
+    record_id: 'REC-INCOME',
+    type: 'income',
+    income: 100,
+    commission_income: 60,
+    request_id: 'INC-1'
+  });
+  database.setAuthorizer((actionCode) => {
+    if (
+      actionCode === constants.SQLITE_CREATE_TEMP_TABLE
+      || actionCode === constants.SQLITE_DROP_TEMP_TABLE
+    ) {
+      return constants.SQLITE_DENY;
+    }
+    return constants.SQLITE_OK;
+  });
+
+  database.exec(payrollLedgerBackfill);
+
+  assert.equal(
+    database.prepare(`SELECT COUNT(*) AS total FROM payroll_entries`).get().total,
+    1
   );
 });
 

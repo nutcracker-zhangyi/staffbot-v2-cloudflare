@@ -1,6 +1,6 @@
-DROP TABLE IF EXISTS temp.payroll_backfill_guard;
+DROP TABLE IF EXISTS payroll_backfill_guard;
 
-CREATE TEMP TABLE payroll_backfill_guard (
+CREATE TABLE payroll_backfill_guard (
   valid INTEGER NOT NULL CHECK (valid = 1)
 );
 

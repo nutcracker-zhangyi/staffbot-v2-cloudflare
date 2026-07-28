@@ -37,8 +37,8 @@ bucket_name = "staffbot-v2-payroll-proofs-staging"
 [env.staging.vars]
 CURRENCY = "$"
 ENVIRONMENT = "staging"
-PAYROLL_LEDGER_READ_MODE = "legacy"
-PAYROLL_LEDGER_WRITE_MODE = "off"
+PAYROLL_LEDGER_READ_MODE = "ledger"
+PAYROLL_LEDGER_WRITE_MODE = "dual"
 SCHEDULED_TASKS_ENABLED = "false"
 TELEGRAM_RECIPIENT_MODE = "allowlist"
 
