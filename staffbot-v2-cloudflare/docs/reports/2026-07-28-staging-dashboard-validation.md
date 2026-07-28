@@ -1,7 +1,7 @@
 # Staging Dashboard validation evidence
 
 Date: 2026-07-28
-Outcome: **verified — staging acceptance passed**
+Outcome: **staging evidence recorded; empty-chart claim corrected by local automated regression**
 
 ## Scope and safety boundary
 
@@ -22,6 +22,34 @@ Outcome: **verified — staging acceptance passed**
   authentication tokens.
 
 Phase 9 is `🧪`: verified in staging, not approved or deployed for production.
+
+## Post-validation correction: empty chart rendering
+
+The earlier live-browser observation established that the `$` currency region
+contained the localized `该筛选范围没有数据` text. It did **not** establish that
+all three empty charts suppressed their SVG output. In particular, the API
+retains active employees and returns the fixed seven zero-valued composition
+entries when the selected period has no financial rows, so the composition and
+employee chart helpers still rendered misleading zero-value SVGs.
+
+A generated-client regression now executes the real chart helpers with
+`months: []`, seven zero-valued composition entries, and a non-empty active
+employee list. The initial focused run failed with 14 passed and 1 failed
+because the composition helper returned an SVG. After the minimal UI fix, all
+three helpers return the localized no-data state and none returns an SVG.
+
+Automated evidence after the fix:
+
+| Command | Result |
+| --- | --- |
+| `node --test test/worker-routing.test.js` | 15 passed, 0 failed |
+| `npm test` | 223 passed, 0 failed, 0 skipped |
+| `npm run test:staging` | 6 passed, 0 failed, 0 skipped |
+| `npm run check` | passed |
+
+This correction was **not** deployed and the live staging browser was **not**
+retested. Its evidence is local and automated only. No production content or
+production deployment was changed.
 
 ## Local release gate
 
@@ -115,8 +143,9 @@ rounding independently of ledger totals.
     `[2026-06-30T17:00:00.000Z, 2026-07-31T17:00:00.000Z)`.
 - The browser rendered two distinct currency regions, `$` and `₫`; values were
   never merged.
-- The `$` store had no July financial rows and rendered the localized
-  `该筛选范围没有数据` state.
+- The `$` store had no July financial rows and visibly contained the localized
+  `该筛选范围没有数据` state. As corrected above, that observation did not prove
+  that every empty chart suppressed its SVG.
 - The default populated Dashboard rendered three native SVG charts with
   `role="img"` and valid `aria-labelledby` title/description pairs, plus three
   equivalent data tables.
@@ -196,12 +225,17 @@ Production was accessed only through read-only `GET /` and `GET /admin`.
 
 ## Acceptance decision
 
-All required financial, timezone, currency, UI, accessibility, detail,
-pagination, reversal, production-isolation, and safety checks passed. Permission
-behavior is recorded without conflating the live global-admin
+The original live validation established the financial, timezone, currency,
+populated-chart, accessibility, detail, pagination, reversal,
+production-isolation, and safety evidence recorded above. It did not establish
+the empty-chart SVG-suppression requirement; that requirement is now covered by
+the local automated regression only. Permission behavior is recorded without
+conflating the live global-admin
 `400 unknown_store` probe with the non-global-admin automated
 `403 forbidden_store` contract.
 
-The Dashboard is accepted as staging-verified and Phase 9 is marked `🧪`.
-This does not authorize a production migration, deployment, feature enablement,
+The deployed Dashboard remains the version identified in the scope section.
+The empty-chart fix has not received a new live-browser staging pass. Phase 9
+therefore remains `🧪` evidence rather than production approval, and this report
+does not authorize a production migration, deployment, feature enablement,
 merge, or rollout.

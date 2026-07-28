@@ -363,6 +363,70 @@ test('generated Dashboard client renders labelled signed SVG without truncating 
   assert.match(nameSortedOutput, /net_payroll_micros/);
 });
 
+test('generated Dashboard client hides all charts when active employees have no financial rows', async () => {
+  const response = await worker.fetch(
+    new Request('https://staffbot.test/admin'),
+    { ENVIRONMENT: 'staging' },
+    context()
+  );
+  const script = inlineAdminScript(await response.text());
+  const helperStart = script.indexOf('function dashboardChartRange(');
+  const helperEnd = script.indexOf('\n    function formatDashboardMicros(', helperStart);
+
+  assert.notEqual(helperStart, -1, 'Dashboard SVG helpers should be generated');
+  assert.notEqual(helperEnd, -1, 'Dashboard SVG helper boundary should exist');
+
+  const charts = new Function(
+    'dashboardFilters',
+    'L',
+    'esc',
+    'formatDashboardMicros',
+    `${script.slice(helperStart, helperEnd)}
+    return {
+      line: dashboardLineChart,
+      composition: dashboardCompositionChart,
+      employees: dashboardEmployeeChart
+    };`
+  )(
+    {
+      employeeSort: 'net_payroll_micros',
+      employeeDir: 'desc'
+    },
+    (key) => key === 'dashboard_no_data' ? '该筛选范围没有数据' : key,
+    String,
+    (currency, micros) => `${currency}${Number(micros) / 1_000_000}`
+  );
+  const group = {
+    currency: '¥',
+    months: [],
+    composition: [
+      'income',
+      'fine',
+      'advance',
+      'bonus',
+      'adjustment',
+      'negative_carry',
+      'reversal'
+    ].map((type) => ({ type, amount_micros: 0 })),
+    employees: [{
+      telegram_id: 'ACTIVE-EMPLOYEE',
+      display_name: 'Active Employee',
+      gross_income_micros: 0,
+      commission_micros: 0,
+      fine_micros: 0,
+      advance_micros: 0,
+      net_payroll_micros: 0,
+      paid_salary_micros: 0
+    }]
+  };
+
+  for (const chart of Object.values(charts)) {
+    const output = chart(group);
+    assert.equal(output, '<p class="muted">该筛选范围没有数据</p>');
+    assert.doesNotMatch(output, /<svg\b/);
+  }
+});
+
 test('generated Dashboard ledger interaction keeps comparison filters independent and paginates safely', async () => {
   const response = await worker.fetch(
     new Request('https://staffbot.test/admin'),

@@ -638,7 +638,7 @@ export function adminHtml(env) {
 
     function dashboardCompositionChart(group) {
       const items = group.composition || [];
-      if (!items.length) return '<p class="muted">' + L('dashboard_no_data') + '</p>';
+      if (!(group.months || []).length || !items.length) return '<p class="muted">' + L('dashboard_no_data') + '</p>';
       const range = dashboardChartRange(items.map((item) => item.amount_micros));
       const width = 720;
       const height = 360;
@@ -670,7 +670,7 @@ export function adminHtml(env) {
 
     function dashboardEmployeeChart(group) {
       const employees = group.employees || [];
-      if (!employees.length) return '<p class="muted">' + L('dashboard_no_data') + '</p>';
+      if (!(group.months || []).length || !employees.length) return '<p class="muted">' + L('dashboard_no_data') + '</p>';
       const visibleEmployees = employees.slice(0, 20);
       const metric = dashboardFilters.employeeSort === 'display_name'
         ? 'net_payroll_micros'
