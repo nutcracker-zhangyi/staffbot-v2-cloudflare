@@ -51,7 +51,11 @@ This correction was **not** deployed and the live staging browser was **not**
 retested. Its evidence is local and automated only. No production content or
 production deployment was changed.
 
-## Local release gate
+## Original deployed release gate (before the local empty-chart fix)
+
+The 222-test count below belongs to the code version deployed to staging. The
+post-validation local fix and its 223-test gate are recorded in the preceding
+section.
 
 | Command | Result |
 | --- | --- |
