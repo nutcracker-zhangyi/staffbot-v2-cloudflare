@@ -44,6 +44,18 @@ export async function logEvent(env, level, event, payload) {
   `).bind(storeId, level, event, telegramId, messageText, JSON.stringify(safePayload || {}), nowIso()).run();
 }
 
+export async function logPayrollShadowMismatch(env, comparison) {
+  await logEvent(env, 'warn', 'payroll_shadow_mismatch', {
+    store_id: comparison.store_id,
+    telegram_id: comparison.telegram_id,
+    start: comparison.start,
+    end: comparison.end,
+    legacy_micros: comparison.legacy_micros,
+    ledger_micros: comparison.ledger_micros,
+    difference_micros: comparison.difference_micros
+  });
+}
+
 export async function logError(env, event, error, payload) {
   await logEvent(env, 'error', event, {
     store_id: payload && payload.store_id ? payload.store_id : DEFAULT_STORE_ID,
