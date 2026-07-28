@@ -133,6 +133,22 @@ test('shows Dashboard only in staging and keeps production admin unchanged', asy
   assert.doesNotMatch(stagingDocument, /<link[^>]+cdn/i);
   assert.doesNotMatch(productionDocument, /data-tab="dashboard"/);
   assert.doesNotMatch(productionDocument, /id="tab-dashboard"/);
+  for (const marker of [
+    'data-dashboard-',
+    '.dashboard-',
+    'const dashboardFilters',
+    'function dashboardQuery',
+    'function renderDashboard',
+    'function dashboardChartRange',
+    'function dashboardLineChart',
+    'function dashboardCompositionChart',
+    'function dashboardEmployeeChart',
+    'function renderDashboardEntries',
+    '/dashboard/entries'
+  ]) {
+    assert.doesNotMatch(productionDocument, new RegExp(marker.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
+  }
+  assert.doesNotMatch(productionDocument, /dashboard/i);
 });
 
 test('generated Dashboard client builds its independent query and formats signed micros', async () => {

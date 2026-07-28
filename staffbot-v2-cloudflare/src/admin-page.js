@@ -99,6 +99,7 @@ export function adminHtml(env) {
     .summary-detail { margin-top:4px; font-size:12px; line-height:1.45; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
     .employee-name-cell { min-width:160px; font-weight:600; }
     .metric-cell { text-align:right; font-variant-numeric:tabular-nums; }
+    ${dashboardEnabled ? `
     .dashboard-currency { padding-top:8px; }
     .dashboard-currency + .dashboard-currency { margin-top:24px; border-top:1px solid var(--line-strong); }
     .dashboard-currency .section-title h2 { margin:0; }
@@ -116,6 +117,7 @@ export function adminHtml(env) {
     @media (max-width:720px) {
       .dashboard-chart-grid { grid-template-columns:1fr; }
     }
+    ` : ''}
   </style>
 </head>
 <body>
@@ -189,6 +191,7 @@ export function adminHtml(env) {
     let stores = [];
     let currentTab = ${JSON.stringify(defaultTab)};
     let uiLang = localStorage.getItem('staffbot_admin_lang') || 'zh';
+    ${dashboardEnabled ? `
     const dashboardFilters = {
       dateFrom: '',
       dateTo: '',
@@ -199,6 +202,7 @@ export function adminHtml(env) {
       selectedEmployee: '',
       entriesPage: 1
     };
+    ` : ''}
     const filters = {
       dateFrom: '',
       dateTo: '',
@@ -237,8 +241,10 @@ export function adminHtml(env) {
         logout:'退出', login:'登录', telegram_id:'Telegram ID', code:'验证码', send_code:'发送验证码', verify_login:'验证登录',
         refresh:'刷新', members_csv:'员工 CSV', income_csv:'收入 CSV', salary_csv:'工资 CSV', advances_csv:'预支薪资 CSV', attendance_csv:'考勤 CSV', leave_csv:'请假 CSV',
         stores:'店铺', members:'员工', income:'收入', salary:'工资', advances:'预支薪资', attendance:'考勤', absence_approvals:'缺勤审批', leave:'请假', logs:'日志',
+        ${dashboardEnabled ? `
         dashboard:'数据看板', business_overview:'经营概况', payroll_overview:'工资概况', gross_income_micros:'原始营业额', commission_micros:'员工提成', employee_count:'员工人数', net_payroll_micros:'账本净额', fine_micros:'罚款扣减', advance_micros:'预支扣减', paid_salary_micros:'实际已付款', monthly_trend:'月度趋势', payroll_composition:'工资构成', employee_comparison:'员工对比', view_ledger:'查看流水', ledger_entries:'账本流水', bonus:'奖金', adjustment:'调整', negative_carry:'负数结转', reversal:'冲正', dashboard_no_data:'该筛选范围没有数据',
         back_to_dashboard:'返回总览', entry_id:'流水 ID', amount_micros:'金额', effective_at:'生效时间', source_id:'来源 ID', reverses_entry_id:'冲正流水 ID',
+        ` : ''}
         store_id:'店铺 ID', name:'名称', timezone:'时区', currency:'货币', checkin_time:'签到时间', checkout_time:'签退时间',
         late_fine:'迟到罚款', early_leave_fine:'早退罚款', absence_fine_enabled:'缺勤罚款', absence_fine:'缺勤罚款金额', leave_min_notice_days:'最早提前天数', leave_max_notice_days:'最晚提前天数', leave_monthly_limit:'每月请假上限', leave_daily_limit:'同日请假人数上限', leave_same_day_cutoff_hour:'当天请假截止小时', status:'状态', save_store:'保存店铺', clear:'清空', edit:'编辑',
         disable:'禁用', enable:'启用', delete:'删除', action:'操作', new_store:'新建店铺', employee_name:'姓名',
@@ -260,8 +266,10 @@ export function adminHtml(env) {
         logout:'Log out', login:'Login', telegram_id:'Telegram ID', code:'Code', send_code:'Send code', verify_login:'Verify login',
         refresh:'Refresh', members_csv:'Members CSV', income_csv:'Income CSV', salary_csv:'Salary CSV', advances_csv:'Salary advances CSV', attendance_csv:'Attendance CSV', leave_csv:'Leave CSV',
         stores:'Stores', members:'Members', income:'Income', salary:'Salary', advances:'Salary advances', attendance:'Attendance', absence_approvals:'Absence approvals', leave:'Leave', logs:'Logs',
+        ${dashboardEnabled ? `
         dashboard:'Dashboard', business_overview:'Business overview', payroll_overview:'Payroll overview', gross_income_micros:'Gross sales', commission_micros:'Employee commission', employee_count:'Employees', net_payroll_micros:'Ledger net', fine_micros:'Fine deductions', advance_micros:'Advance deductions', paid_salary_micros:'Actually paid', monthly_trend:'Monthly trend', payroll_composition:'Payroll composition', employee_comparison:'Employee comparison', view_ledger:'View ledger', ledger_entries:'Ledger entries', bonus:'Bonus', adjustment:'Adjustment', negative_carry:'Negative carry', reversal:'Reversal', dashboard_no_data:'No data in this range',
         back_to_dashboard:'Back to Dashboard', entry_id:'Entry ID', amount_micros:'Amount', effective_at:'Effective at', source_id:'Source ID', reverses_entry_id:'Reversed entry ID',
+        ` : ''}
         store_id:'Store ID', name:'Name', timezone:'Timezone', currency:'Currency', checkin_time:'Check-in time', checkout_time:'Check-out time',
         late_fine:'Late fine', early_leave_fine:'Early leave fine', absence_fine_enabled:'Absence fine', absence_fine:'Absence fine amount', leave_min_notice_days:'Earliest leave days', leave_max_notice_days:'Latest leave days', leave_monthly_limit:'Monthly leave limit', leave_daily_limit:'Daily leave limit', leave_same_day_cutoff_hour:'Same-day leave cutoff hour', status:'Status', save_store:'Save store', clear:'Clear', edit:'Edit',
         disable:'Disable', enable:'Enable', delete:'Delete', action:'Action', new_store:'New store', employee_name:'Employee name',
@@ -283,8 +291,10 @@ export function adminHtml(env) {
         logout:'Đăng xuất', login:'Đăng nhập', telegram_id:'Telegram ID', code:'Mã', send_code:'Gửi mã', verify_login:'Xác minh',
         refresh:'Làm mới', members_csv:'Nhân viên CSV', income_csv:'Thu nhập CSV', salary_csv:'Lương CSV', advances_csv:'Ứng lương CSV', attendance_csv:'Chấm công CSV',
         stores:'Cửa hàng', members:'Nhân viên', income:'Thu nhập', salary:'Lương', advances:'Ứng lương', attendance:'Chấm công', absence_approvals:'Duyệt vắng mặt', logs:'Nhật ký',
+        ${dashboardEnabled ? `
         dashboard:'Bảng dữ liệu', business_overview:'Tổng quan kinh doanh', payroll_overview:'Tổng quan lương', gross_income_micros:'Doanh thu gốc', commission_micros:'Hoa hồng nhân viên', employee_count:'Số nhân viên', net_payroll_micros:'Số ròng sổ lương', fine_micros:'Khấu trừ phạt', advance_micros:'Khấu trừ ứng lương', paid_salary_micros:'Đã thanh toán', monthly_trend:'Xu hướng theo tháng', payroll_composition:'Cơ cấu lương', employee_comparison:'So sánh nhân viên', view_ledger:'Xem sổ cái', ledger_entries:'Bút toán sổ lương', bonus:'Thưởng', adjustment:'Điều chỉnh', negative_carry:'Kết chuyển âm', reversal:'Đảo bút toán', dashboard_no_data:'Không có dữ liệu trong phạm vi này',
         back_to_dashboard:'Quay lại tổng quan', entry_id:'ID bút toán', amount_micros:'Số tiền', effective_at:'Thời điểm hiệu lực', source_id:'ID nguồn', reverses_entry_id:'ID bút toán bị đảo',
+        ` : ''}
         store_id:'ID cửa hàng', name:'Tên', timezone:'Múi giờ', currency:'Tiền tệ', checkin_time:'Giờ vào ca', checkout_time:'Giờ ra ca',
         late_fine:'Phạt đi muộn', early_leave_fine:'Phạt về sớm', absence_fine_enabled:'Phạt vắng mặt', absence_fine:'Mức phạt vắng mặt', status:'Trạng thái', save_store:'Lưu cửa hàng', clear:'Xóa form', edit:'Sửa',
         disable:'Tắt', enable:'Bật', delete:'Xóa', action:'Thao tác', new_store:'Cửa hàng mới', employee_name:'Tên nhân viên',
@@ -306,8 +316,10 @@ export function adminHtml(env) {
         logout:'Выйти', login:'Вход', telegram_id:'Telegram ID', code:'Код', send_code:'Отправить код', verify_login:'Проверить вход',
         refresh:'Обновить', members_csv:'Сотрудники CSV', income_csv:'Доход CSV', salary_csv:'Зарплата CSV', advances_csv:'Авансы CSV', attendance_csv:'Посещаемость CSV',
         stores:'Магазины', members:'Сотрудники', income:'Доход', salary:'Зарплата', advances:'Авансы зарплаты', attendance:'Посещаемость', absence_approvals:'Проверка отсутствий', logs:'Журналы',
+        ${dashboardEnabled ? `
         dashboard:'Панель данных', business_overview:'Обзор бизнеса', payroll_overview:'Обзор зарплаты', gross_income_micros:'Валовая выручка', commission_micros:'Комиссия сотрудников', employee_count:'Сотрудники', net_payroll_micros:'Чистая сумма книги', fine_micros:'Удержания штрафов', advance_micros:'Удержания авансов', paid_salary_micros:'Фактически выплачено', monthly_trend:'Помесячная динамика', payroll_composition:'Состав зарплаты', employee_comparison:'Сравнение сотрудников', view_ledger:'Открыть книгу', ledger_entries:'Записи книги', bonus:'Бонус', adjustment:'Корректировка', negative_carry:'Перенос отрицательного остатка', reversal:'Сторно', dashboard_no_data:'Нет данных за выбранный период',
         back_to_dashboard:'Вернуться к обзору', entry_id:'ID записи', amount_micros:'Сумма', effective_at:'Время действия', source_id:'ID источника', reverses_entry_id:'ID сторнируемой записи',
+        ` : ''}
         store_id:'ID магазина', name:'Название', timezone:'Часовой пояс', currency:'Валюта', checkin_time:'Начало смены', checkout_time:'Конец смены',
         late_fine:'Штраф за опоздание', early_leave_fine:'Штраф за ранний уход', absence_fine_enabled:'Штраф за отсутствие', absence_fine:'Размер штрафа за отсутствие', status:'Статус', save_store:'Сохранить магазин', clear:'Очистить', edit:'Редактировать',
         disable:'Отключить', enable:'Включить', delete:'Удалить', action:'Действие', new_store:'Новый магазин', employee_name:'Имя сотрудника',
@@ -464,7 +476,9 @@ export function adminHtml(env) {
       document.querySelectorAll('nav button').forEach((b) => b.classList.toggle('active', b.dataset.tab === currentTab));
       document.querySelectorAll('[id^="tab-"]').forEach((el) => el.classList.add('hidden'));
       $('tab-' + currentTab).classList.remove('hidden');
+      ${dashboardEnabled ? `
       if (currentTab === 'dashboard') return renderDashboard();
+      ` : ''}
       if (currentTab === 'stores') return renderStores();
       if (currentTab === 'members') return renderMembers();
       if (currentTab === 'income') return renderIncome();
@@ -476,6 +490,7 @@ export function adminHtml(env) {
       if (currentTab === 'logs') return renderRows('logs', '/api/admin/stores/' + encodeURIComponent(storeId()) + '/logs');
     }
 
+    ${dashboardEnabled ? `
     function dashboardQuery({
       includeEntries = false,
       detailEmployeeId = ''
@@ -946,6 +961,7 @@ export function adminHtml(env) {
         });
       });
     }
+    ` : ''}
 
     function renderStores() {
       const rows = (window.storeRows || stores).map((store) => ({
@@ -1691,7 +1707,9 @@ export function adminHtml(env) {
       if (!$('app').classList.contains('hidden')) await loadTab();
     };
     document.querySelectorAll('nav button').forEach((b) => b.onclick = () => {
-      if (currentTab !== 'dashboard') syncFilterInputs();
+      ${dashboardEnabled
+        ? `if (currentTab !== 'dashboard') syncFilterInputs();`
+        : 'syncFilterInputs();'}
       currentTab = b.dataset.tab;
       loadTab();
     });
