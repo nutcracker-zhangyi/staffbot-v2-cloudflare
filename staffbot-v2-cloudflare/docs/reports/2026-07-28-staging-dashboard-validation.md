@@ -1,7 +1,7 @@
 # Staging Dashboard validation evidence
 
 Date: 2026-07-28
-Outcome: **staging evidence recorded; empty-chart claim corrected by local automated regression**
+Outcome: **follow-up live empty-chart failure recorded; second local fix awaits live retest**
 
 ## Scope and safety boundary
 
@@ -32,7 +32,7 @@ retains active employees and returns the fixed seven zero-valued composition
 entries when the selected period has no financial rows, so the composition and
 employee chart helpers still rendered misleading zero-value SVGs.
 
-A generated-client regression now executes the real chart helpers with
+A generated-client regression executed the real chart helpers with
 `months: []`, seven zero-valued composition entries, and a non-empty active
 employee list. The initial focused run failed with 14 passed and 1 failed
 because the composition helper returned an SVG. After the minimal UI fix, all
@@ -47,9 +47,44 @@ Automated evidence after the fix:
 | `npm run test:staging` | 6 passed, 0 failed, 0 skipped |
 | `npm run check` | passed |
 
-This correction was **not** deployed and the live staging browser was **not**
-retested. Its evidence is local and automated only. No production content or
-production deployment was changed.
+At that point, this correction had not been deployed or retested in the live
+staging browser. The later live retest and the payload gap it exposed are
+recorded below. No production content or production deployment was changed.
+
+## Follow-up live failure and second local correction
+
+The first empty-chart fix was deployed to staging Worker version
+`9d5a75a1-a78a-42c9-bf59-37ff4a952e42` and retested for
+`2027-01-01..2027-01-31`. The Dashboard had active employees and zero amounts.
+The monthly trend showed the localized no-data state, but the composition and
+employee sections still rendered zero-value SVGs. This live result disproved
+the first fix's assumption that no financial rows always meant `months: []`;
+an all-zero month bucket can still be present.
+
+The generated-client regression was updated to the API-realistic shape:
+
+- one `2027-01` month containing zero for all ten money fields;
+- the fixed seven zero-valued composition entries;
+- a non-empty active employee list whose money fields are all zero.
+
+RED returned 14 passed and 1 failed; the current generated monthly helper
+returned an all-zero SVG for that payload. The second minimal fix adds one
+shared client predicate that treats the group as financially populated only
+when any of the ten month money fields is nonzero. All three chart helpers now
+use that predicate.
+
+Automated evidence after the second fix:
+
+| Command | Result |
+| --- | --- |
+| `node --test test/worker-routing.test.js` | 15 passed, 0 failed |
+| `npm test` | 223 passed, 0 failed, 0 skipped |
+| `npm run test:staging` | 6 passed, 0 failed, 0 skipped |
+| `npm run check` | passed |
+
+The second fix has **not** been deployed and has **not** received a live-browser
+retest. The table above is local automated evidence, not a claim of live
+acceptance.
 
 ## Original deployed release gate (before the local empty-chart fix)
 
@@ -231,15 +266,15 @@ Production was accessed only through read-only `GET /` and `GET /admin`.
 
 The original live validation established the financial, timezone, currency,
 populated-chart, accessibility, detail, pagination, reversal,
-production-isolation, and safety evidence recorded above. It did not establish
-the empty-chart SVG-suppression requirement; that requirement is now covered by
-the local automated regression only. Permission behavior is recorded without
-conflating the live global-admin
+production-isolation, and safety evidence recorded above. The later live retest
+of Worker version `9d5a75a1-a78a-42c9-bf59-37ff4a952e42` failed the empty-chart
+SVG-suppression requirement. The second fix currently has local automated
+evidence only. Permission behavior is recorded without conflating the live
+global-admin
 `400 unknown_store` probe with the non-global-admin automated
 `403 forbidden_store` contract.
 
-The deployed Dashboard remains the version identified in the scope section.
-The empty-chart fix has not received a new live-browser staging pass. Phase 9
-therefore remains `🧪` evidence rather than production approval, and this report
-does not authorize a production migration, deployment, feature enablement,
-merge, or rollout.
+The first empty-chart fix received a live staging pass and failed as described
+above; the second fix has not yet received one. Phase 9 therefore remains `🧪`
+evidence rather than production approval, and this report does not authorize a
+production migration, deployment, feature enablement, merge, or rollout.

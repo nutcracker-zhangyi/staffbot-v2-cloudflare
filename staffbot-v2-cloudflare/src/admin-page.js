@@ -597,9 +597,24 @@ export function adminHtml(env) {
       return prefix + '-' + text.replace(/[^a-z0-9_-]/gi, '-') + '-' + codepoints;
     }
 
+    function dashboardHasFinancialData(group) {
+      return (group.months || []).some((month) => [
+        month.gross_income_micros,
+        month.commission_micros,
+        month.fine_micros,
+        month.advance_micros,
+        month.bonus_micros,
+        month.adjustment_micros,
+        month.negative_carry_micros,
+        month.reversal_micros,
+        month.net_payroll_micros,
+        month.paid_salary_micros
+      ].some((value) => Number(value || 0) !== 0));
+    }
+
     function dashboardLineChart(group) {
       const months = group.months || [];
-      if (!months.length) return '<p class="muted">' + L('dashboard_no_data') + '</p>';
+      if (!dashboardHasFinancialData(group)) return '<p class="muted">' + L('dashboard_no_data') + '</p>';
       const series = [
         ['gross_income_micros', 'gross_income_micros', '#828fff'],
         ['commission_micros', 'commission_micros', '#27a644'],
@@ -638,7 +653,7 @@ export function adminHtml(env) {
 
     function dashboardCompositionChart(group) {
       const items = group.composition || [];
-      if (!(group.months || []).length || !items.length) return '<p class="muted">' + L('dashboard_no_data') + '</p>';
+      if (!dashboardHasFinancialData(group) || !items.length) return '<p class="muted">' + L('dashboard_no_data') + '</p>';
       const range = dashboardChartRange(items.map((item) => item.amount_micros));
       const width = 720;
       const height = 360;
@@ -670,7 +685,7 @@ export function adminHtml(env) {
 
     function dashboardEmployeeChart(group) {
       const employees = group.employees || [];
-      if (!(group.months || []).length || !employees.length) return '<p class="muted">' + L('dashboard_no_data') + '</p>';
+      if (!dashboardHasFinancialData(group) || !employees.length) return '<p class="muted">' + L('dashboard_no_data') + '</p>';
       const visibleEmployees = employees.slice(0, 20);
       const metric = dashboardFilters.employeeSort === 'display_name'
         ? 'net_payroll_micros'

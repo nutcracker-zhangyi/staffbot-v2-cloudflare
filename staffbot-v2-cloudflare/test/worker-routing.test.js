@@ -363,7 +363,7 @@ test('generated Dashboard client renders labelled signed SVG without truncating 
   assert.match(nameSortedOutput, /net_payroll_micros/);
 });
 
-test('generated Dashboard client hides all charts when active employees have no financial rows', async () => {
+test('generated Dashboard client hides all charts when active employees have only an all-zero month', async () => {
   const response = await worker.fetch(
     new Request('https://staffbot.test/admin'),
     { ENVIRONMENT: 'staging' },
@@ -398,7 +398,19 @@ test('generated Dashboard client hides all charts when active employees have no 
   );
   const group = {
     currency: '¥',
-    months: [],
+    months: [{
+      month_key: '2027-01',
+      gross_income_micros: 0,
+      commission_micros: 0,
+      fine_micros: 0,
+      advance_micros: 0,
+      bonus_micros: 0,
+      adjustment_micros: 0,
+      negative_carry_micros: 0,
+      reversal_micros: 0,
+      net_payroll_micros: 0,
+      paid_salary_micros: 0
+    }],
     composition: [
       'income',
       'fine',
