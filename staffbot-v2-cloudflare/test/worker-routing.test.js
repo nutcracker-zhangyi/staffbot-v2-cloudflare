@@ -118,6 +118,19 @@ test('shows Dashboard only in staging and keeps production admin unchanged', asy
   assert.match(stagingDocument, /id="tab-dashboard"/);
   assert.match(stagingDocument, /data-dashboard-filter/);
   assert.match(stagingDocument, /data-dashboard-employee/);
+  for (const marker of [
+    'data-dashboard-chart="monthly"',
+    'data-dashboard-chart="composition"',
+    'data-dashboard-chart="employees"',
+    'role="img"',
+    'data-dashboard-table',
+    'data-dashboard-entries',
+    'data-dashboard-entry-page'
+  ]) {
+    assert.match(stagingDocument, new RegExp(marker));
+  }
+  assert.doesNotMatch(stagingDocument, /<script[^>]+src=/);
+  assert.doesNotMatch(stagingDocument, /<link[^>]+cdn/i);
   assert.doesNotMatch(productionDocument, /data-tab="dashboard"/);
   assert.doesNotMatch(productionDocument, /id="tab-dashboard"/);
 });
@@ -215,6 +228,336 @@ test('renders every payroll composition type in all four Dashboard languages', a
     for (const label of labels) assert.match(table, new RegExp(label));
     assert.doesNotMatch(table, /bonus|adjustment|negative_carry/);
   }
+});
+
+test('generated Dashboard client renders labelled signed SVG without truncating its data table', async () => {
+  const response = await worker.fetch(
+    new Request('https://staffbot.test/admin'),
+    { ENVIRONMENT: 'staging' },
+    context()
+  );
+  const script = inlineAdminScript(await response.text());
+  const helperStart = script.indexOf('function dashboardChartRange(');
+  const helperEnd = script.indexOf('\n    function formatDashboardMicros(', helperStart);
+
+  assert.notEqual(helperStart, -1, 'Dashboard SVG helpers should be generated');
+  assert.notEqual(helperEnd, -1, 'Dashboard SVG helper boundary should exist');
+
+  const chartFilters = {
+    employeeSort: 'net_payroll_micros',
+    employeeDir: 'desc'
+  };
+  const renderCurrencySection = new Function(
+    'dashboardFilters',
+    'L',
+    'esc',
+    'formatDashboardMicros',
+    'formatAdminMoneyForUi',
+    'sectionTitle',
+    `${script.slice(helperStart, helperEnd)}
+    return dashboardCurrencySection;`
+  )(
+    chartFilters,
+    (key) => key,
+    (value) => String(value ?? '').replace(/[&<>"']/g, (character) => ({
+      '&': '&amp;',
+      '<': '&lt;',
+      '>': '&gt;',
+      '"': '&quot;',
+      "'": '&#39;'
+    })[character]),
+    (currency, micros) => `${currency}${Number(micros) / 1_000_000}`,
+    String,
+    (key) => `<div class="section-title"><h2>${key}</h2></div>`
+  );
+  const employees = Array.from({ length: 25 }, (_, index) => ({
+    telegram_id: `EMP-${index}`,
+    display_name: index === 24 ? '<Employee 24>' : `Employee ${index}`,
+    gross_income_micros: index * 1_000_000,
+    commission_micros: index * 500_000,
+    fine_micros: -index * 10_000,
+    advance_micros: 0,
+    net_payroll_micros: (25 - index) * 1_000_000,
+    paid_salary_micros: index * 250_000
+  }));
+  const output = renderCurrencySection({
+    currency: '¥<unsafe>',
+    summary: {},
+    months: [
+      {
+        month_key: '2026-06<script>',
+        gross_income_micros: 10_000_000,
+        commission_micros: 4_000_000,
+        fine_micros: -1_000_000,
+        advance_micros: 0,
+        net_payroll_micros: 3_000_000,
+        paid_salary_micros: 2_000_000
+      },
+      {
+        month_key: '2026-07',
+        gross_income_micros: 12_000_000,
+        commission_micros: 5_000_000,
+        fine_micros: -2_000_000,
+        advance_micros: 0,
+        net_payroll_micros: 4_000_000,
+        paid_salary_micros: 3_000_000
+      }
+    ],
+    composition: [
+      { type: 'income', amount_micros: 5_000_000 },
+      { type: 'fine', amount_micros: -2_000_000 },
+      { type: 'advance', amount_micros: -1_000_000 },
+      { type: 'bonus', amount_micros: 500_000 },
+      { type: 'adjustment', amount_micros: 0 },
+      { type: 'negative_carry', amount_micros: -250_000 },
+      { type: 'reversal', amount_micros: 250_000 }
+    ],
+    employees
+  });
+
+  assert.equal((output.match(/data-dashboard-series=/g) || []).length, 3);
+  assert.equal((output.match(/data-dashboard-composition-bar=/g) || []).length, 7);
+  assert.equal((output.match(/data-dashboard-employee-bar=/g) || []).length, 20);
+  assert.match(output, /class="dashboard-negative"/);
+  assert.match(output, /<title[^>]*>monthly_trend ¥&lt;unsafe&gt;<\/title>/);
+  assert.match(output, /<desc[^>]*>/);
+  assert.match(output, /&lt;Employee 24&gt;/);
+  assert.doesNotMatch(output, /<Employee 24>|<script>/);
+
+  chartFilters.employeeSort = 'display_name';
+  const nameSortedOutput = renderCurrencySection({
+    currency: '¥',
+    summary: {
+      gross_income_micros: 0,
+      commission_micros: 0,
+      employee_count: 0,
+      net_payroll_micros: 0,
+      fine_micros: 0,
+      advance_micros: 0,
+      paid_salary_micros: 0
+    },
+    months: [],
+    composition: [],
+    employees
+  });
+  assert.doesNotMatch(nameSortedOutput, /NaN/);
+  assert.match(nameSortedOutput, /net_payroll_micros/);
+});
+
+test('generated Dashboard ledger interaction keeps comparison filters independent and paginates safely', async () => {
+  const response = await worker.fetch(
+    new Request('https://staffbot.test/admin'),
+    { ENVIRONMENT: 'staging' },
+    context()
+  );
+  const script = inlineAdminScript(await response.text());
+  const queryStart = script.indexOf('function dashboardQuery(');
+  const queryEnd = script.indexOf('\n    async function renderDashboard(', queryStart);
+  const entriesStart = script.indexOf('async function renderDashboardEntries(');
+  const entriesEnd = script.indexOf('\n    function bindDashboardControls(', entriesStart);
+
+  assert.notEqual(entriesStart, -1, 'Dashboard ledger renderer should be generated');
+  assert.notEqual(entriesEnd, -1, 'Dashboard ledger renderer boundary should exist');
+
+  const dashboardFilters = {
+    dateFrom: '2026-07-01',
+    dateTo: '2026-07-31',
+    employee: 'MAIN-FILTER',
+    stores: ['TOKYO'],
+    employeeSort: 'net_payroll_micros',
+    employeeDir: 'desc',
+    selectedEmployee: 'DETAIL-EMP',
+    entriesPage: 1
+  };
+  const requested = [];
+  const root = {
+    innerHTML: '',
+    querySelector() {
+      return null;
+    },
+    querySelectorAll() {
+      return [];
+    }
+  };
+  const payload = {
+    entries: [{
+      entry_id: 'ENTRY-<1>',
+      store_id: 'TOKYO',
+      telegram_id: 'DETAIL-EMP',
+      display_name: '<Alice>',
+      type: 'reversal',
+      amount_micros: -2_500_000,
+      currency: '¥',
+      effective_at: '2026-07-20T00:00:00.000Z',
+      source: 'manual',
+      source_id: 'SOURCE-1',
+      created_at: '2026-07-20T01:00:00.000Z',
+      reverses_entry_id: 'ENTRY-0',
+      metadata_json: '<must-not-render>'
+    }],
+    pagination: {
+      entries: {
+        page: 1,
+        total_pages: 2,
+        total: 101,
+        has_prev: false,
+        has_next: true
+      }
+    }
+  };
+  const renderDashboardEntries = new Function(
+    '$',
+    'api',
+    'storeId',
+    'dashboardFilters',
+    'L',
+    'esc',
+    'formatDashboardMicros',
+    'dashboardLedgerType',
+    'renderDashboard',
+    'withBusy',
+    `${script.slice(queryStart, queryEnd)}
+    ${script.slice(entriesStart, entriesEnd)}
+    return renderDashboardEntries;`
+  )(
+    () => root,
+    async (path) => {
+      requested.push(path);
+      return payload;
+    },
+    () => 'TOKYO',
+    dashboardFilters,
+    (key) => ({
+      ledger_entries: 'Ledger entries',
+      refresh: 'Refresh',
+      back_to_dashboard: 'Back to Dashboard',
+      reversal: 'Reversal',
+      page_status: 'Page {page} / {total_pages}, total {total}',
+      prev_page: 'Previous',
+      next_page: 'Next',
+      dashboard_no_data: 'No data'
+    })[key] || key,
+    (value) => String(value ?? '').replace(/[&<>"']/g, (character) => ({
+      '&': '&amp;',
+      '<': '&lt;',
+      '>': '&gt;',
+      '"': '&quot;',
+      "'": '&#39;'
+    })[character]),
+    (currency, micros) => `${currency}${Number(micros) / 1_000_000}`,
+    (type) => type,
+    async () => {},
+    async (_button, task) => task()
+  );
+
+  await renderDashboardEntries('DETAIL-EMP');
+
+  assert.match(requested[0], /\/dashboard\/entries\?/);
+  assert.deepEqual(
+    Object.fromEntries(new URL(requested[0], 'https://staffbot.test').searchParams),
+    {
+      stores: 'TOKYO',
+      date_from: '2026-07-01',
+      date_to: '2026-07-31',
+      employee: 'DETAIL-EMP',
+      employees_sort: 'net_payroll_micros',
+      employees_dir: 'desc',
+      entries_page: '1'
+    }
+  );
+  assert.equal(dashboardFilters.employee, 'MAIN-FILTER');
+  assert.match(root.innerHTML, /class="badge dashboard-reversal">Reversal<\/span>/);
+  assert.match(root.innerHTML, /¥-2\.5/);
+  assert.match(root.innerHTML, /ENTRY-&lt;1&gt;/);
+  assert.match(root.innerHTML, /&lt;Alice&gt;/);
+  assert.match(root.innerHTML, /data-dashboard-entry-page="prev" disabled/);
+  assert.match(root.innerHTML, /data-dashboard-entry-page="next"/);
+  assert.doesNotMatch(root.innerHTML, /must-not-render|metadata_json|<Alice>/);
+});
+
+test('generated Dashboard detail controls update independent state and return to the overview', async () => {
+  const response = await worker.fetch(
+    new Request('https://staffbot.test/admin'),
+    { ENVIRONMENT: 'staging' },
+    context()
+  );
+  const script = inlineAdminScript(await response.text());
+  const controlsStart = script.indexOf('function bindDashboardEntryControls(');
+  const controlsEnd = script.indexOf('\n    function bindDashboardControls(', controlsStart);
+
+  assert.notEqual(controlsStart, -1, 'Dashboard ledger controls should be generated');
+  assert.notEqual(controlsEnd, -1, 'Dashboard ledger controls boundary should exist');
+
+  const dashboardFilters = {
+    employee: 'MAIN-FILTER',
+    selectedEmployee: 'DETAIL-EMP',
+    entriesPage: 1
+  };
+  const renderedPages = [];
+  let overviewRenders = 0;
+  const previous = { dataset: { dashboardEntryPage: 'prev' }, onclick: null };
+  const next = { dataset: { dashboardEntryPage: 'next' }, onclick: null };
+  const back = { onclick: null };
+  const root = {
+    querySelector(selector) {
+      return selector === '[data-dashboard-back]' ? back : null;
+    },
+    querySelectorAll(selector) {
+      return selector === '[data-dashboard-entry-page]' ? [previous, next] : [];
+    }
+  };
+  const bindDashboardEntryControls = new Function(
+    'dashboardFilters',
+    'renderDashboardEntries',
+    'renderDashboard',
+    'withBusy',
+    `${script.slice(controlsStart, controlsEnd)}
+    return bindDashboardEntryControls;`
+  )(
+    dashboardFilters,
+    async (employeeId) => {
+      renderedPages.push([employeeId, dashboardFilters.entriesPage]);
+    },
+    async () => {
+      overviewRenders += 1;
+    },
+    async (_button, task) => task()
+  );
+
+  bindDashboardEntryControls(root);
+  await next.onclick();
+  assert.deepEqual(renderedPages, [['DETAIL-EMP', 2]]);
+  assert.equal(dashboardFilters.employee, 'MAIN-FILTER');
+
+  await previous.onclick();
+  assert.deepEqual(renderedPages.at(-1), ['DETAIL-EMP', 1]);
+
+  await back.onclick();
+  assert.equal(dashboardFilters.selectedEmployee, '');
+  assert.equal(dashboardFilters.entriesPage, 1);
+  assert.equal(dashboardFilters.employee, 'MAIN-FILTER');
+  assert.equal(overviewRenders, 1);
+});
+
+test('Dashboard source keeps signed ledger values safe and retains full employee data', async () => {
+  const response = await worker.fetch(
+    new Request('https://staffbot.test/admin'),
+    { ENVIRONMENT: 'staging' },
+    context()
+  );
+  const script = inlineAdminScript(await response.text());
+  const dashboardStart = script.indexOf('function dashboardQuery(');
+  const dashboardEnd = script.indexOf('\n    function renderStores(', dashboardStart);
+  const dashboardSource = script.slice(dashboardStart, dashboardEnd);
+  const microsDivisions = [...dashboardSource.matchAll(/\/\s*1_000_000/g)];
+
+  assert.equal(microsDivisions.length, 1);
+  assert.match(dashboardSource, /function formatDashboardMicros[\s\S]*\/\s*1_000_000/);
+  assert.doesNotMatch(dashboardSource, /metadata_json/);
+  assert.match(dashboardSource, /entry\.type === 'reversal'/);
+  assert.match(dashboardSource, /data-dashboard-entry-page/);
+  assert.match(dashboardSource, /employees\.slice\(0,\s*20\)/);
+  assert.match(dashboardSource, /employees\.map\(\(employee\) => '<tr>'/);
 });
 
 test('handles authenticated, unknown, and unauthorized admin API requests directly', async () => {

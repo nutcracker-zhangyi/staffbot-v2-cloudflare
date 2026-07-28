@@ -102,8 +102,20 @@ export function adminHtml(env) {
     .dashboard-currency { padding-top:8px; }
     .dashboard-currency + .dashboard-currency { margin-top:24px; border-top:1px solid var(--line-strong); }
     .dashboard-currency .section-title h2 { margin:0; }
+    .dashboard-currency-group { display:grid; gap:14px; margin-bottom:20px; }
+    .dashboard-chart-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(320px,1fr)); gap:14px; }
+    .dashboard-chart { overflow:auto; border:1px solid var(--line); border-radius:12px; padding:12px; background:var(--panel-2); }
+    .dashboard-chart svg { display:block; width:100%; min-width:560px; height:auto; }
+    .dashboard-chart text { fill:var(--muted); font-size:11px; }
+    .dashboard-chart .dashboard-axis { stroke:var(--line-strong); }
+    .dashboard-negative { color:var(--bad); }
+    .badge { display:inline-flex; align-items:center; min-height:22px; border:1px solid var(--line); border-radius:999px; padding:2px 8px; font-size:12px; }
+    .dashboard-reversal { color:var(--bad); border-color:rgba(255,107,107,.5); background:var(--bad-soft); }
     .staging-banner { padding:10px 24px; background:#7f1d1d; color:#fff; font-weight:700; text-align:center; letter-spacing:.04em; }
     @media (max-width: 720px) { main { padding:12px; } table { min-width:820px; } header { align-items:flex-start; flex-direction:column; padding:14px 12px; } .toolbar, .member-filter { align-items:stretch; } .member-filter > * { width:100%; } input, select, button { min-height:44px; } nav button { min-height:40px; } }
+    @media (max-width:720px) {
+      .dashboard-chart-grid { grid-template-columns:1fr; }
+    }
   </style>
 </head>
 <body>
@@ -226,6 +238,7 @@ export function adminHtml(env) {
         refresh:'刷新', members_csv:'员工 CSV', income_csv:'收入 CSV', salary_csv:'工资 CSV', advances_csv:'预支薪资 CSV', attendance_csv:'考勤 CSV', leave_csv:'请假 CSV',
         stores:'店铺', members:'员工', income:'收入', salary:'工资', advances:'预支薪资', attendance:'考勤', absence_approvals:'缺勤审批', leave:'请假', logs:'日志',
         dashboard:'数据看板', business_overview:'经营概况', payroll_overview:'工资概况', gross_income_micros:'原始营业额', commission_micros:'员工提成', employee_count:'员工人数', net_payroll_micros:'账本净额', fine_micros:'罚款扣减', advance_micros:'预支扣减', paid_salary_micros:'实际已付款', monthly_trend:'月度趋势', payroll_composition:'工资构成', employee_comparison:'员工对比', view_ledger:'查看流水', ledger_entries:'账本流水', bonus:'奖金', adjustment:'调整', negative_carry:'负数结转', reversal:'冲正', dashboard_no_data:'该筛选范围没有数据',
+        back_to_dashboard:'返回总览', entry_id:'流水 ID', amount_micros:'金额', effective_at:'生效时间', source_id:'来源 ID', reverses_entry_id:'冲正流水 ID',
         store_id:'店铺 ID', name:'名称', timezone:'时区', currency:'货币', checkin_time:'签到时间', checkout_time:'签退时间',
         late_fine:'迟到罚款', early_leave_fine:'早退罚款', absence_fine_enabled:'缺勤罚款', absence_fine:'缺勤罚款金额', leave_min_notice_days:'最早提前天数', leave_max_notice_days:'最晚提前天数', leave_monthly_limit:'每月请假上限', leave_daily_limit:'同日请假人数上限', leave_same_day_cutoff_hour:'当天请假截止小时', status:'状态', save_store:'保存店铺', clear:'清空', edit:'编辑',
         disable:'禁用', enable:'启用', delete:'删除', action:'操作', new_store:'新建店铺', employee_name:'姓名',
@@ -248,6 +261,7 @@ export function adminHtml(env) {
         refresh:'Refresh', members_csv:'Members CSV', income_csv:'Income CSV', salary_csv:'Salary CSV', advances_csv:'Salary advances CSV', attendance_csv:'Attendance CSV', leave_csv:'Leave CSV',
         stores:'Stores', members:'Members', income:'Income', salary:'Salary', advances:'Salary advances', attendance:'Attendance', absence_approvals:'Absence approvals', leave:'Leave', logs:'Logs',
         dashboard:'Dashboard', business_overview:'Business overview', payroll_overview:'Payroll overview', gross_income_micros:'Gross sales', commission_micros:'Employee commission', employee_count:'Employees', net_payroll_micros:'Ledger net', fine_micros:'Fine deductions', advance_micros:'Advance deductions', paid_salary_micros:'Actually paid', monthly_trend:'Monthly trend', payroll_composition:'Payroll composition', employee_comparison:'Employee comparison', view_ledger:'View ledger', ledger_entries:'Ledger entries', bonus:'Bonus', adjustment:'Adjustment', negative_carry:'Negative carry', reversal:'Reversal', dashboard_no_data:'No data in this range',
+        back_to_dashboard:'Back to Dashboard', entry_id:'Entry ID', amount_micros:'Amount', effective_at:'Effective at', source_id:'Source ID', reverses_entry_id:'Reversed entry ID',
         store_id:'Store ID', name:'Name', timezone:'Timezone', currency:'Currency', checkin_time:'Check-in time', checkout_time:'Check-out time',
         late_fine:'Late fine', early_leave_fine:'Early leave fine', absence_fine_enabled:'Absence fine', absence_fine:'Absence fine amount', leave_min_notice_days:'Earliest leave days', leave_max_notice_days:'Latest leave days', leave_monthly_limit:'Monthly leave limit', leave_daily_limit:'Daily leave limit', leave_same_day_cutoff_hour:'Same-day leave cutoff hour', status:'Status', save_store:'Save store', clear:'Clear', edit:'Edit',
         disable:'Disable', enable:'Enable', delete:'Delete', action:'Action', new_store:'New store', employee_name:'Employee name',
@@ -270,6 +284,7 @@ export function adminHtml(env) {
         refresh:'Làm mới', members_csv:'Nhân viên CSV', income_csv:'Thu nhập CSV', salary_csv:'Lương CSV', advances_csv:'Ứng lương CSV', attendance_csv:'Chấm công CSV',
         stores:'Cửa hàng', members:'Nhân viên', income:'Thu nhập', salary:'Lương', advances:'Ứng lương', attendance:'Chấm công', absence_approvals:'Duyệt vắng mặt', logs:'Nhật ký',
         dashboard:'Bảng dữ liệu', business_overview:'Tổng quan kinh doanh', payroll_overview:'Tổng quan lương', gross_income_micros:'Doanh thu gốc', commission_micros:'Hoa hồng nhân viên', employee_count:'Số nhân viên', net_payroll_micros:'Số ròng sổ lương', fine_micros:'Khấu trừ phạt', advance_micros:'Khấu trừ ứng lương', paid_salary_micros:'Đã thanh toán', monthly_trend:'Xu hướng theo tháng', payroll_composition:'Cơ cấu lương', employee_comparison:'So sánh nhân viên', view_ledger:'Xem sổ cái', ledger_entries:'Bút toán sổ lương', bonus:'Thưởng', adjustment:'Điều chỉnh', negative_carry:'Kết chuyển âm', reversal:'Đảo bút toán', dashboard_no_data:'Không có dữ liệu trong phạm vi này',
+        back_to_dashboard:'Quay lại tổng quan', entry_id:'ID bút toán', amount_micros:'Số tiền', effective_at:'Thời điểm hiệu lực', source_id:'ID nguồn', reverses_entry_id:'ID bút toán bị đảo',
         store_id:'ID cửa hàng', name:'Tên', timezone:'Múi giờ', currency:'Tiền tệ', checkin_time:'Giờ vào ca', checkout_time:'Giờ ra ca',
         late_fine:'Phạt đi muộn', early_leave_fine:'Phạt về sớm', absence_fine_enabled:'Phạt vắng mặt', absence_fine:'Mức phạt vắng mặt', status:'Trạng thái', save_store:'Lưu cửa hàng', clear:'Xóa form', edit:'Sửa',
         disable:'Tắt', enable:'Bật', delete:'Xóa', action:'Thao tác', new_store:'Cửa hàng mới', employee_name:'Tên nhân viên',
@@ -292,6 +307,7 @@ export function adminHtml(env) {
         refresh:'Обновить', members_csv:'Сотрудники CSV', income_csv:'Доход CSV', salary_csv:'Зарплата CSV', advances_csv:'Авансы CSV', attendance_csv:'Посещаемость CSV',
         stores:'Магазины', members:'Сотрудники', income:'Доход', salary:'Зарплата', advances:'Авансы зарплаты', attendance:'Посещаемость', absence_approvals:'Проверка отсутствий', logs:'Журналы',
         dashboard:'Панель данных', business_overview:'Обзор бизнеса', payroll_overview:'Обзор зарплаты', gross_income_micros:'Валовая выручка', commission_micros:'Комиссия сотрудников', employee_count:'Сотрудники', net_payroll_micros:'Чистая сумма книги', fine_micros:'Удержания штрафов', advance_micros:'Удержания авансов', paid_salary_micros:'Фактически выплачено', monthly_trend:'Помесячная динамика', payroll_composition:'Состав зарплаты', employee_comparison:'Сравнение сотрудников', view_ledger:'Открыть книгу', ledger_entries:'Записи книги', bonus:'Бонус', adjustment:'Корректировка', negative_carry:'Перенос отрицательного остатка', reversal:'Сторно', dashboard_no_data:'Нет данных за выбранный период',
+        back_to_dashboard:'Вернуться к обзору', entry_id:'ID записи', amount_micros:'Сумма', effective_at:'Время действия', source_id:'ID источника', reverses_entry_id:'ID сторнируемой записи',
         store_id:'ID магазина', name:'Название', timezone:'Часовой пояс', currency:'Валюта', checkin_time:'Начало смены', checkout_time:'Конец смены',
         late_fine:'Штраф за опоздание', early_leave_fine:'Штраф за ранний уход', absence_fine_enabled:'Штраф за отсутствие', absence_fine:'Размер штрафа за отсутствие', status:'Статус', save_store:'Сохранить магазин', clear:'Очистить', edit:'Редактировать',
         disable:'Отключить', enable:'Включить', delete:'Удалить', action:'Действие', new_store:'Новый магазин', employee_name:'Имя сотрудника',
@@ -545,17 +561,145 @@ export function adminHtml(env) {
         '</div>';
     }
 
+    function dashboardChartRange(values) {
+      const numeric = values.map((value) => Number(value || 0)).filter(Number.isFinite);
+      let min = Math.min(0, ...numeric);
+      let max = Math.max(0, ...numeric);
+      if (min === max) {
+        min -= 1;
+        max += 1;
+      }
+      return { min, max };
+    }
+
+    function dashboardChartY(value, range, top, height) {
+      return top + ((range.max - Number(value || 0)) / (range.max - range.min)) * height;
+    }
+
+    function dashboardChartId(prefix, currency) {
+      const text = String(currency || 'currency');
+      const codepoints = Array.from(text).map((character) => character.codePointAt(0).toString(16)).join('-');
+      return prefix + '-' + text.replace(/[^a-z0-9_-]/gi, '-') + '-' + codepoints;
+    }
+
+    function dashboardLineChart(group) {
+      const months = group.months || [];
+      if (!months.length) return '<p class="muted">' + L('dashboard_no_data') + '</p>';
+      const series = [
+        ['gross_income_micros', 'gross_income_micros', '#828fff'],
+        ['commission_micros', 'commission_micros', '#27a644'],
+        ['net_payroll_micros', 'net_payroll_micros', '#f59e0b']
+      ];
+      const range = dashboardChartRange(series.flatMap((item) => months.map((month) => month[item[0]])));
+      const width = 720;
+      const height = 330;
+      const left = 72;
+      const top = 48;
+      const plotWidth = 620;
+      const plotHeight = 210;
+      const zeroY = dashboardChartY(0, range, top, plotHeight);
+      const chartId = dashboardChartId('dashboard-monthly', group.currency);
+      const pointX = (index) => left + (months.length === 1 ? plotWidth / 2 : index * plotWidth / (months.length - 1));
+      return '<svg data-dashboard-chart="monthly" role="img" aria-labelledby="' + esc(chartId + '-title ' + chartId + '-desc') + '" viewBox="0 0 ' + width + ' ' + height + '">' +
+        '<title id="' + esc(chartId + '-title') + '">' + esc(L('monthly_trend') + ' ' + group.currency) + '</title>' +
+        '<desc id="' + esc(chartId + '-desc') + '">' + esc(series.map((item) => L(item[1])).join(', ') + ' · ' + group.currency) + '</desc>' +
+        '<line class="dashboard-axis" x1="' + left + '" y1="' + zeroY + '" x2="' + (left + plotWidth) + '" y2="' + zeroY + '"></line>' +
+        series.map((item, seriesIndex) => {
+          const points = months.map((month, index) => pointX(index) + ',' + dashboardChartY(month[item[0]], range, top, plotHeight)).join(' ');
+          return '<g data-dashboard-series="' + esc(item[0]) + '">' +
+            '<polyline points="' + esc(points) + '" fill="none" stroke="' + item[2] + '" stroke-width="3"></polyline>' +
+            months.map((month, index) => {
+              const x = pointX(index);
+              const y = dashboardChartY(month[item[0]], range, top, plotHeight);
+              return '<circle cx="' + x + '" cy="' + y + '" r="4" fill="' + item[2] + '"><title>' + esc(L(item[1]) + ': ' + formatDashboardMicros(group.currency, month[item[0]])) + '</title></circle>' +
+                '<text x="' + x + '" y="' + Math.max(14, y - 8 - seriesIndex * 12) + '" text-anchor="middle">' + esc(formatDashboardMicros(group.currency, month[item[0]])) + '</text>';
+            }).join('') +
+            '<text x="' + (left + seriesIndex * 200) + '" y="22" fill="' + item[2] + '">' + esc(L(item[1])) + '</text>' +
+            '</g>';
+        }).join('') +
+        months.map((month, index) => '<text x="' + pointX(index) + '" y="' + (top + plotHeight + 30) + '" text-anchor="middle">' + esc(month.month_key) + '</text>').join('') +
+        '</svg>';
+    }
+
+    function dashboardCompositionChart(group) {
+      const items = group.composition || [];
+      if (!items.length) return '<p class="muted">' + L('dashboard_no_data') + '</p>';
+      const range = dashboardChartRange(items.map((item) => item.amount_micros));
+      const width = 720;
+      const height = 360;
+      const left = 54;
+      const top = 46;
+      const plotWidth = 640;
+      const plotHeight = 220;
+      const zeroY = dashboardChartY(0, range, top, plotHeight);
+      const band = plotWidth / items.length;
+      const chartId = dashboardChartId('dashboard-composition', group.currency);
+      return '<svg data-dashboard-chart="composition" role="img" aria-labelledby="' + esc(chartId + '-title ' + chartId + '-desc') + '" viewBox="0 0 ' + width + ' ' + height + '">' +
+        '<title id="' + esc(chartId + '-title') + '">' + esc(L('payroll_composition') + ' ' + group.currency) + '</title>' +
+        '<desc id="' + esc(chartId + '-desc') + '">' + esc(items.map((item) => dashboardLedgerType(item.type) + ' ' + formatDashboardMicros(group.currency, item.amount_micros)).join(', ')) + '</desc>' +
+        '<line class="dashboard-axis" x1="' + left + '" y1="' + zeroY + '" x2="' + (left + plotWidth) + '" y2="' + zeroY + '"></line>' +
+        items.map((item, index) => {
+          const valueY = dashboardChartY(item.amount_micros, range, top, plotHeight);
+          const negative = Number(item.amount_micros || 0) < 0;
+          const barY = Math.min(valueY, zeroY);
+          const barHeight = Math.max(1, Math.abs(zeroY - valueY));
+          const x = left + index * band + band * 0.18;
+          return '<g data-dashboard-composition-bar="' + esc(item.type) + '"' + (negative ? ' class="dashboard-negative"' : '') + '>' +
+            '<rect x="' + x + '" y="' + barY + '" width="' + (band * 0.64) + '" height="' + barHeight + '" fill="' + (negative ? 'currentColor' : '#828fff') + '"><title>' + esc(dashboardLedgerType(item.type) + ': ' + formatDashboardMicros(group.currency, item.amount_micros)) + '</title></rect>' +
+            '<text x="' + (x + band * 0.32) + '" y="' + (negative ? barY + barHeight + 16 : Math.max(14, barY - 8)) + '" text-anchor="middle">' + esc(formatDashboardMicros(group.currency, item.amount_micros)) + '</text>' +
+            '<text x="' + (x + band * 0.32) + '" y="' + (top + plotHeight + 30) + '" text-anchor="middle">' + esc(dashboardLedgerType(item.type)) + '</text>' +
+            '</g>';
+        }).join('') +
+        '</svg>';
+    }
+
+    function dashboardEmployeeChart(group) {
+      const employees = group.employees || [];
+      if (!employees.length) return '<p class="muted">' + L('dashboard_no_data') + '</p>';
+      const visibleEmployees = employees.slice(0, 20);
+      const metric = dashboardFilters.employeeSort === 'display_name'
+        ? 'net_payroll_micros'
+        : dashboardFilters.employeeSort;
+      const range = dashboardChartRange(visibleEmployees.map((employee) => employee[metric]));
+      const width = 720;
+      const height = 380;
+      const left = 54;
+      const top = 46;
+      const plotWidth = 640;
+      const plotHeight = 220;
+      const zeroY = dashboardChartY(0, range, top, plotHeight);
+      const band = plotWidth / visibleEmployees.length;
+      const chartId = dashboardChartId('dashboard-employees', group.currency);
+      return '<svg data-dashboard-chart="employees" role="img" aria-labelledby="' + esc(chartId + '-title ' + chartId + '-desc') + '" viewBox="0 0 ' + width + ' ' + height + '">' +
+        '<title id="' + esc(chartId + '-title') + '">' + esc(L('employee_comparison') + ' ' + group.currency) + '</title>' +
+        '<desc id="' + esc(chartId + '-desc') + '">' + esc(L(metric) + ' · ' + group.currency) + '</desc>' +
+        '<line class="dashboard-axis" x1="' + left + '" y1="' + zeroY + '" x2="' + (left + plotWidth) + '" y2="' + zeroY + '"></line>' +
+        visibleEmployees.map((employee, index) => {
+          const valueY = dashboardChartY(employee[metric], range, top, plotHeight);
+          const negative = Number(employee[metric] || 0) < 0;
+          const barY = Math.min(valueY, zeroY);
+          const barHeight = Math.max(1, Math.abs(zeroY - valueY));
+          const x = left + index * band + band * 0.16;
+          const name = employee.display_name || employee.telegram_id;
+          return '<g data-dashboard-employee-bar="' + esc(employee.telegram_id) + '"' + (negative ? ' class="dashboard-negative"' : '') + '>' +
+            '<rect x="' + x + '" y="' + barY + '" width="' + (band * 0.68) + '" height="' + barHeight + '" fill="' + (negative ? 'currentColor' : '#828fff') + '"><title>' + esc(name + ': ' + formatDashboardMicros(group.currency, employee[metric])) + '</title></rect>' +
+            '<text x="' + (x + band * 0.34) + '" y="' + (negative ? barY + barHeight + 16 : Math.max(14, barY - 8)) + '" text-anchor="middle">' + esc(formatDashboardMicros(group.currency, employee[metric])) + '</text>' +
+            '<text x="' + (x + band * 0.34) + '" y="' + (top + plotHeight + 26) + '" text-anchor="end" transform="rotate(-45 ' + (x + band * 0.34) + ' ' + (top + plotHeight + 26) + ')">' + esc(name) + '</text>' +
+            '</g>';
+        }).join('') +
+        '</svg>';
+    }
+
     function dashboardCurrencySection(group) {
       const currencyId = 'dashboard-currency-' + String(group.currency || 'currency').replace(/[^a-z0-9_-]/gi, '-');
-      return '<section class="dashboard-currency" aria-labelledby="' + esc(currencyId) + '">' +
+      return '<section class="dashboard-currency dashboard-currency-group" aria-labelledby="' + esc(currencyId) + '">' +
         '<div class="section-title"><h2 id="' + esc(currencyId) + '">' + esc(group.currency) + '</h2></div>' +
         dashboardSummaryCards(group) +
-        sectionTitle('monthly_trend') +
-        dashboardMonthlyTable(group) +
-        sectionTitle('payroll_composition') +
-        dashboardCompositionTable(group) +
-        sectionTitle('employee_comparison') +
-        dashboardEmployeeTable(group) +
+        '<div class="dashboard-chart-grid">' +
+        '<section class="dashboard-chart">' + sectionTitle('monthly_trend') + dashboardLineChart(group) + dashboardMonthlyTable(group) + '</section>' +
+        '<section class="dashboard-chart">' + sectionTitle('payroll_composition') + dashboardCompositionChart(group) + dashboardCompositionTable(group) + '</section>' +
+        '</div>' +
+        '<section class="dashboard-chart">' + sectionTitle('employee_comparison') + dashboardEmployeeChart(group) + dashboardEmployeeTable(group) + '</section>' +
         '</section>';
     }
 
@@ -616,7 +760,7 @@ export function adminHtml(env) {
 
     function dashboardNumericTable(rows, columns) {
       if (!rows.length) return '<p class="muted">' + L('dashboard_no_data') + '</p>';
-      return '<div class="table-wrap"><table><thead><tr>' +
+      return '<div class="table-wrap"><table data-dashboard-table><thead><tr>' +
         columns.map((column) => '<th scope="col">' + esc(L(column[1])) + '</th>').join('') +
         '</tr></thead><tbody>' +
         rows.map((row) => '<tr>' + columns.map((column, index) => '<td' + (index ? ' class="metric-cell"' : '') + '>' + esc(row[column[0]]) + '</td>').join('') + '</tr>').join('') +
@@ -635,7 +779,7 @@ export function adminHtml(env) {
       ];
       const employees = group.employees || [];
       if (!employees.length) return '<p class="muted">' + L('dashboard_no_data') + '</p>';
-      return '<div class="table-wrap"><table><thead><tr>' +
+      return '<div class="table-wrap"><table data-dashboard-table><thead><tr>' +
         columns.map((column) => {
           const mark = dashboardFilters.employeeSort === column[0]
             ? (dashboardFilters.employeeDir === 'asc' ? ' ↑' : ' ↓')
@@ -653,6 +797,111 @@ export function adminHtml(env) {
 
     function formatDashboardMicros(currency, micros) {
       return formatCurrencyAmount(currency, Number(micros || 0) / 1_000_000);
+    }
+
+    async function renderDashboardEntries(employeeId) {
+      const root = $('tab-dashboard');
+      dashboardFilters.selectedEmployee = employeeId;
+      root.innerHTML = '<h2>' + L('ledger_entries') + '</h2>' +
+        '<p class="status" role="status" aria-live="polite">' + L('refresh') + '…</p>';
+      try {
+        const data = await api('/api/admin/stores/' + encodeURIComponent(storeId()) + '/dashboard/entries?' + dashboardQuery({
+          includeEntries: true,
+          detailEmployeeId: employeeId
+        }));
+        const entries = data.entries || [];
+        root.innerHTML = '<div class="section-title"><h2>' + L('ledger_entries') + '</h2>' +
+          '<button type="button" class="secondary" data-dashboard-back>' + L('back_to_dashboard') + '</button></div>' +
+          '<div data-dashboard-entries>' +
+          (entries.length
+            ? dashboardEntriesTable(entries)
+            : '<p class="muted" role="status">' + L('dashboard_no_data') + '</p>') +
+          dashboardEntriesPager(data.pagination && data.pagination.entries) +
+          '</div>';
+        bindDashboardEntryControls(root);
+      } catch (error) {
+        root.innerHTML = '<div class="section-title"><h2>' + L('ledger_entries') + '</h2>' +
+          '<button type="button" class="secondary" data-dashboard-back>' + L('back_to_dashboard') + '</button></div>' +
+          '<p class="status" role="alert">' + esc(error.message || 'request_failed') + '</p>';
+        bindDashboardEntryControls(root);
+      }
+    }
+
+    function dashboardEntriesTable(entries) {
+      const columns = [
+        'entry_id',
+        'store_id',
+        'telegram_id',
+        'display_name',
+        'type',
+        'amount_micros',
+        'currency',
+        'effective_at',
+        'source',
+        'source_id',
+        'created_at',
+        'reverses_entry_id'
+      ];
+      return '<div class="table-wrap"><table data-dashboard-table><thead><tr>' +
+        columns.map((column) => '<th scope="col">' + esc(L(column)) + '</th>').join('') +
+        '</tr></thead><tbody>' +
+        entries.map((entry) => {
+          const values = {
+            entry_id: entry.entry_id,
+            store_id: entry.store_id,
+            telegram_id: entry.telegram_id,
+            display_name: entry.display_name,
+            type: entry.type === 'reversal'
+              ? '<span class="badge dashboard-reversal">' + esc(L('reversal')) + '</span>'
+              : esc(dashboardLedgerType(entry.type)),
+            amount_micros: formatDashboardMicros(entry.currency, entry.amount_micros),
+            currency: entry.currency,
+            effective_at: entry.effective_at,
+            source: entry.source,
+            source_id: entry.source_id,
+            created_at: entry.created_at,
+            reverses_entry_id: entry.reverses_entry_id
+          };
+          return '<tr>' + columns.map((column) =>
+            '<td' + (column === 'amount_micros' ? ' class="metric-cell"' : '') + '>' +
+            (column === 'type' ? values[column] : esc(values[column])) +
+            '</td>'
+          ).join('') + '</tr>';
+        }).join('') +
+        '</tbody></table></div>';
+    }
+
+    function dashboardEntriesPager(meta) {
+      if (!meta) return '';
+      const status = L('page_status')
+        .replace('{page}', meta.page)
+        .replace('{total_pages}', meta.total_pages)
+        .replace('{total}', meta.total);
+      return '<div class="pager">' +
+        '<span>' + esc(status) + '</span>' +
+        '<button type="button" class="secondary" data-dashboard-entry-page="prev"' + (!meta.has_prev ? ' disabled' : '') + '>' + L('prev_page') + '</button>' +
+        '<button type="button" class="secondary" data-dashboard-entry-page="next"' + (!meta.has_next ? ' disabled' : '') + '>' + L('next_page') + '</button>' +
+        '</div>';
+    }
+
+    function bindDashboardEntryControls(root) {
+      const back = root.querySelector('[data-dashboard-back]');
+      if (back) {
+        back.onclick = () => withBusy(back, async () => {
+          dashboardFilters.selectedEmployee = '';
+          dashboardFilters.entriesPage = 1;
+          await renderDashboard();
+        });
+      }
+      root.querySelectorAll('[data-dashboard-entry-page]').forEach((button) => {
+        button.onclick = () => withBusy(button, async () => {
+          dashboardFilters.entriesPage = Math.max(
+            1,
+            dashboardFilters.entriesPage + (button.dataset.dashboardEntryPage === 'next' ? 1 : -1)
+          );
+          await renderDashboardEntries(dashboardFilters.selectedEmployee);
+        });
+      });
     }
 
     function bindDashboardControls(root) {
@@ -687,6 +936,13 @@ export function adminHtml(env) {
           }
           dashboardFilters.entriesPage = 1;
           await renderDashboard();
+        });
+      });
+      root.querySelectorAll('[data-dashboard-employee]').forEach((button) => {
+        button.onclick = () => withBusy(button, async () => {
+          dashboardFilters.selectedEmployee = button.dataset.dashboardEmployee;
+          dashboardFilters.entriesPage = 1;
+          await renderDashboardEntries(dashboardFilters.selectedEmployee);
         });
       });
     }
