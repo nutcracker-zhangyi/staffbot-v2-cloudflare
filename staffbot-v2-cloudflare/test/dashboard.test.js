@@ -72,6 +72,8 @@ function dashboardFixture(hooks = {}) {
     recordId, storeId, telegramId, amount, approvedAt
   );
   income('tokyo-income', 'TOKYO', 'EMP-1', 1000, '2026-06-30T15:00:00.000Z');
+  income('tokyo-income-rounding-a', 'TOKYO', 'EMP-1', 0.0000006, '2026-06-30T15:00:00.000Z');
+  income('tokyo-income-rounding-b', 'TOKYO', 'EMP-1', 0.0000006, '2026-06-30T15:00:00.000Z');
   income('tokyo-before-start', 'TOKYO', 'EMP-1', 999, '2026-06-30T14:59:59.999999Z');
   income('ny-income', 'NEW_YORK', 'EMP-2', 200, '2026-07-01T04:00:00.000Z');
   income('ny-before-start', 'NEW_YORK', 'EMP-2', 999, '2026-07-01T03:59:59.999999Z');
@@ -99,6 +101,8 @@ function dashboardFixture(hooks = {}) {
     recordId, storeId, telegramId, amount, approvedAt
   );
   payment('tokyo-payment', 'TOKYO', 'EMP-1', 400, now);
+  payment('tokyo-payment-rounding-a', 'TOKYO', 'EMP-1', 0.0000006, now);
+  payment('tokyo-payment-rounding-b', 'TOKYO', 'EMP-1', 0.0000006, now);
   payment('tokyo-payment-before-start', 'TOKYO', 'EMP-1', 999, '2026-06-30T14:59:59.999999Z');
   payment('ny-payment', 'NEW_YORK', 'EMP-2', 100, '2026-07-01T04:00:00.000Z');
   payment('ny-payment-before-start', 'NEW_YORK', 'EMP-2', 999, '2026-07-01T03:59:59.999999Z');
@@ -239,7 +243,7 @@ test('aggregates gross sales, ledger types, payments, and currencies exactly', a
 
   const yen = result.groups.find((group) => group.currency === '¥');
   assert.deepEqual(yen.summary, {
-    gross_income_micros: 1_000_000_000,
+    gross_income_micros: 1_000_000_002,
     commission_micros: 600_000_000,
     fine_micros: -50_000_000,
     advance_micros: -100_000_000,
@@ -248,9 +252,18 @@ test('aggregates gross sales, ledger types, payments, and currencies exactly', a
     negative_carry_micros: 0,
     reversal_micros: 50_000_000,
     net_payroll_micros: 525_000_000,
-    paid_salary_micros: 400_000_000,
+    paid_salary_micros: 400_000_002,
     employee_count: 2
   });
+  assert.deepEqual(yen.composition, [
+    { type: 'income', amount_micros: 600_000_000 },
+    { type: 'fine', amount_micros: -50_000_000 },
+    { type: 'advance', amount_micros: -100_000_000 },
+    { type: 'bonus', amount_micros: 0 },
+    { type: 'adjustment', amount_micros: 25_000_000 },
+    { type: 'negative_carry', amount_micros: 0 },
+    { type: 'reversal', amount_micros: 50_000_000 }
+  ]);
 
   const dollars = result.groups.find((group) => group.currency === '$');
   assert.equal(dollars.summary.gross_income_micros, 200_000_000);
@@ -330,7 +343,7 @@ test('excludes records one microsecond before each store local July start', asyn
   const dollars = result.groups.find((group) => group.currency === '$').summary;
   assert.deepEqual(
     [yen.gross_income_micros, yen.commission_micros, yen.paid_salary_micros],
-    [1_000_000_000, 600_000_000, 400_000_000]
+    [1_000_000_002, 600_000_000, 400_000_002]
   );
   assert.deepEqual(
     [dollars.gross_income_micros, dollars.commission_micros, dollars.paid_salary_micros],
@@ -408,7 +421,7 @@ test('merges a third selected store with the same currency into one group', asyn
   assert.equal(result.groups.filter((group) => group.currency === '¥').length, 1);
   assert.equal(
     result.groups.find((group) => group.currency === '¥').summary.gross_income_micros,
-    1_010_000_000
+    1_010_000_002
   );
 });
 
@@ -433,4 +446,66 @@ test('returns active-member currency groups with zero money for an empty range',
       assert.equal(group.summary[field], 0);
     }
   }
+});
+
+test('keeps disabled historical employees visible without counting them as active', async () => {
+  const { database, env } = dashboardFixture();
+  const now = '2026-07-01T00:00:00.000Z';
+  database.prepare(`
+    INSERT INTO users (telegram_id, name, cycle_start, created_at, updated_at)
+    VALUES ('FORMER-1', 'Former Alice', '2026-07-01', ?, ?)
+  `).run(now, now);
+  database.prepare(`
+    INSERT INTO store_members (
+      store_id, telegram_id, display_name, status, cycle_start, joined_at, updated_at
+    ) VALUES ('TOKYO', 'FORMER-1', 'Former Alice', 'disabled', '2026-07-01', ?, ?)
+  `).run(now, now);
+  database.prepare(`
+    INSERT INTO income_records (
+      record_id, store_id, telegram_id, income, type, approved_at, admin_id
+    ) VALUES ('former-income', 'TOKYO', 'FORMER-1', 10, 'income', ?, 'ADMIN-1')
+  `).run(now);
+  const url = new URL(
+    'https://staffbot.test/api/admin/stores/TOKYO/dashboard'
+      + '?stores=TOKYO'
+      + '&date_from=2026-07-01'
+      + '&date_to=2026-07-31'
+      + '&employee=FORMER-1'
+  );
+  const result = await loadDashboard(
+    env,
+    await resolveDashboardFilters(env, url, 'TOKYO', 'ADMIN-1')
+  );
+
+  assert.deepEqual(result.groups[0].employees.map((employee) => employee.display_name), ['Former Alice']);
+  assert.equal(result.groups[0].summary.employee_count, 0);
+});
+
+test('rejects an intermediate unsafe payroll accumulation before cancellation can hide it', async () => {
+  const { database, env } = dashboardFixture();
+  const now = '2026-07-01T00:00:00.000Z';
+  database.exec('DELETE FROM payroll_entries');
+  for (const [entryId, type, amountMicros] of [
+    ['overflow-adjustment', 'adjustment', Number.MAX_SAFE_INTEGER],
+    ['overflow-bonus', 'bonus', 2],
+    ['overflow-fine', 'fine', -Number.MAX_SAFE_INTEGER]
+  ]) {
+    database.prepare(`
+      INSERT INTO payroll_entries (
+        entry_id, store_id, telegram_id, type, amount_micros, currency, effective_at,
+        source, source_id, created_by, created_at
+      ) VALUES (?, 'TOKYO', 'EMP-1', ?, ?, '¥', ?, 'test', ?, 'ADMIN-1', ?)
+    `).run(entryId, type, amountMicros, now, entryId, now);
+  }
+  const url = new URL(
+    'https://staffbot.test/api/admin/stores/TOKYO/dashboard'
+      + '?stores=TOKYO'
+      + '&date_from=2026-07-01'
+      + '&date_to=2026-07-31'
+  );
+
+  await assert.rejects(
+    async () => loadDashboard(env, await resolveDashboardFilters(env, url, 'TOKYO', 'ADMIN-1')),
+    RangeError
+  );
 });

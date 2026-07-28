@@ -252,6 +252,7 @@ function dashboardGroup(currency) {
     summary: { ...zeroMoney(), employee_count: 0 },
     months: [],
     employees: [],
+    activeEmployeeIds: new Set(),
     composition: LEDGER_TYPES.map((type) => ({ type, amount_micros: 0 }))
   };
 }
@@ -276,9 +277,15 @@ function groupEmployee(group, telegramId, displayName, role = '') {
 
 function addMoney(group, monthKey, telegramId, displayName, role, field, amount) {
   const micros = safeMicros(amount);
-  group.summary[field] += micros;
-  groupEmployee(group, telegramId, displayName, role)[field] += micros;
-  groupMonth(group, monthKey)[field] += micros;
+  const employee = groupEmployee(group, telegramId, displayName, role);
+  const month = groupMonth(group, monthKey);
+  group.summary[field] = safeAdd(group.summary[field], micros);
+  employee[field] = safeAdd(employee[field], micros);
+  month[field] = safeAdd(month[field], micros);
+}
+
+function safeAdd(left, right) {
+  return safeMicros(safeMicros(left) + safeMicros(right));
 }
 
 function assertSafeDashboardMicros(group) {
@@ -384,6 +391,7 @@ export async function loadDashboard(env, filters) {
   };
   for (const row of memberResult.results || []) {
     const group = getGroup(row.currency);
+    group.activeEmployeeIds.add(row.telegram_id);
     groupEmployee(group, row.telegram_id, row.display_name, row.role);
   }
   for (const row of grossResult.results || []) {
@@ -397,7 +405,8 @@ export async function loadDashboard(env, filters) {
     const amount = safeMicros(row.amount_micros);
     addMoney(group, row.month_key, row.telegram_id, row.display_name, row.role, field, amount);
     addMoney(group, row.month_key, row.telegram_id, row.display_name, row.role, 'net_payroll_micros', amount);
-    group.composition.find((item) => item.type === row.type).amount_micros += amount;
+    const composition = group.composition.find((item) => item.type === row.type);
+    composition.amount_micros = safeAdd(composition.amount_micros, amount);
   }
   for (const row of paymentResult.results || []) {
     addMoney(getGroup(row.currency), row.month_key, row.telegram_id, row.display_name, row.role,
@@ -407,11 +416,11 @@ export async function loadDashboard(env, filters) {
   for (const group of groups.values()) assertSafeDashboardMicros(group);
   const orderedGroups = [...groups.values()].sort((left, right) =>
     left.currency.localeCompare(right.currency)
-  ).map((group) => ({
+  ).map(({ activeEmployeeIds, ...group }) => ({
     ...group,
     months: group.months.sort((left, right) => left.month_key.localeCompare(right.month_key)),
     employees: sortDashboardEmployees(group.employees, filters.employeeSort, filters.employeeDir),
-    summary: { ...group.summary, employee_count: group.employees.length }
+    summary: { ...group.summary, employee_count: activeEmployeeIds.size }
   }));
 
   return {
