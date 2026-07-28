@@ -1,126 +1,178 @@
-# StaffBot V2 架构
+# 系统架构
 
-## 当前阶段
+## 当前状态
 
-本文件记录模块化重构完成后的实际结构。当前阶段只拆分代码所有权，
-不改变业务规则、数据库结构、API 响应、Telegram 文案或回调数据。
+系统已完成两项基础改造：
 
-> The source of truth is still income_records during this phase.
-> payroll_entries and amount_micros begin only in the next approved phase.
+1. 模块化重构已经完成，主要业务不再集中在单一 Worker 文件中。
+2. 统一工资账本已在 staging 完成迁移、历史回填、双写、影子对账和账本读取验证。
 
-统一账本、金额整数化、个人第 16/30 天发薪流程、付款凭证和 Dashboard
-仍属于下一阶段，必须在本阶段 staging 验收通过并获得批准后才能开始。
+production 目前尚未切换到统一账本读取。production 切换、dashboard 和员工个人发薪流程都是后续独立评审的阶段。
 
-## 运行结构
+## 整体结构
 
 ```text
-Telegram / Admin Browser / Cron
-               |
-               v
-           router.js
-        /       |       \
-telegram.js  admin-api.js  absence.js
-     |            |           |
-     +------------+-----------+
-                  |
-       approvals.js / payroll.js
-                  |
-             Cloudflare D1
+Telegram / Admin Web
+        |
+        v
+Cloudflare Worker 路由与鉴权
+        |
+        +--> 申请与审批模块
+        |      |
+        |      +--> 旧兼容写入 income_records
+        |      +--> 新账本写入 payroll_entries
+        |
+        +--> payroll.js
+        |      |
+        |      +--> legacy 旧表计算
+        |      +--> shadow 双路径对账
+        |      +--> ledger 账本计算
+        |
+        +--> salary_records / store_members.cycle_start
+        |
+        +--> admin_audit_logs / bot_logs
 ```
 
-`src/index.js` 仅作为 Wrangler 和既有测试的兼容入口，默认导出
-`router.js`，并重新导出既有公共函数。业务代码不得重新写回入口文件。
+## 模块职责
 
-## 模块所有权
-
-| Module | Owns | Must not own |
-| --- | --- | --- |
-| router.js | Worker entrypoints and dispatch | business calculations |
-| telegram.js | bot state and interaction flow | raw admin HTML |
-| telegram-client.js | Telegram HTTP delivery and staging fence | business decisions |
-| admin-api.js | authenticated admin routes | browser rendering logic |
-| admin-page.js | admin HTML/CSS/JS | payroll SQL |
-| approvals.js | existing approval state transitions | Telegram copy |
-| payroll.js | current payroll queries | payment UI |
-| absence.js | absence scan and delivery lifecycle | general admin routing |
-| money.js | pure legacy money calculations | D1 access |
-| dates.js | pure timezone/date calculations | D1 access |
-
-辅助模块：
-
-| Module | Responsibility |
+| 模块 | 主要职责 |
 | --- | --- |
-| `admin-query.js` | 后台分页、排序白名单、筛选和 CSV 纯辅助逻辑 |
-| `audit.js` | 审计、运行日志、ID 和时间戳 |
-| `http.js` | JSON、HTML、CSV 响应与会话 Cookie |
-| `security.js` | 环境识别、管理员和 staging 安全策略 |
-| `stores.js` | 店铺、成员和管理员权限查询 |
-| `i18n.js` | Telegram 与后台共用的多语言文本 |
-| `validation.js` | 无数据库访问的输入规范化 |
-| `constants.js` | 跨模块常量 |
+| `src/index.js` | Wrangler 和既有测试的兼容入口 |
+| `src/router.js` | Worker 请求入口、鉴权前置检查和路由调度 |
+| `src/telegram.js` | Telegram 会话状态和员工交互流程 |
+| `src/telegram-client.js` | Telegram HTTP 发送和 staging 收件人隔离 |
+| `src/admin-api.js` | 管理员 API、查询和操作路由 |
+| `src/admin-page.js` | 管理员页面 HTML、CSS 和浏览器端交互 |
+| `src/approvals.js` | 收入、罚款、预支和工资审批状态转换 |
+| `src/payroll-ledger.js` | 账本转换、写入、查询、冲正和幂等契约 |
+| `src/payroll.js` | 工资周期聚合及读模式切换 |
+| `src/absence.js` | 缺勤扫描和通知生命周期 |
+| `src/stores.js` | 店铺、成员和管理员权限查询 |
+| `src/audit.js` | 管理审计和运行日志 |
 
-## 允许的依赖方向
+申请表负责工作流状态，`payroll_entries` 负责已生效金额，
+`salary_records` 负责实际付款结果。模块之间不得用申请金额代替账本事实，也不得用账本余额代替付款历史。
+
+## 统一工资账本
+
+工资计算的目标公式是：
 
 ```text
-index.js
-  -> router.js and compatibility exports
-
-router.js
-  -> telegram.js / admin-api.js / admin-page.js / absence.js
-
-interaction modules
-  -> approvals.js / payroll.js / stores.js / telegram-client.js
-
-business and query modules
-  -> money.js / dates.js / validation.js / audit.js / constants.js
+payable = SUM(payroll_entries.amount_micros)
 ```
 
-约束：
+查询必须按店铺、员工和左闭右开时间区间过滤。金额以整数 micros 保存，不再把多个 `REAL` 字段在查询时临时组合为权威结果。
 
-- 所有模块不得导入 `index.js`。
-- `router.js` 只负责路由、鉴权前置检查和调度，不计算工资。
-- `admin-page.js` 不直接访问 D1，也不包含后台 API SQL。
-- `telegram-client.js` 只负责发送和 staging 收件人隔离，不决定业务结果。
-- `money.js`、`dates.js` 和 `validation.js` 保持纯函数，不访问 D1。
-- 数据写入和审批状态转换集中在所有者模块，页面与路由不得复制实现。
+账本是追加式结构：
 
-## 当前数据边界
+- 正常业务只新增事实；
+- 已生效记录不直接更新或删除；
+- 错误通过反向 `reversal` 记录纠正；
+- 同一来源通过唯一键保证幂等；
+- 业务写入、兼容写入和审批状态更新在同一原子批次内完成。
 
-- 工资统计的当前事实来源仍是 `income_records`。
-- 收入、罚款和预支仍遵循现有字段与计算语义。
-- `salary_records` 保存现有工资审批快照。
-- 本阶段没有 `payroll_entries`，也没有 `amount_micros`。
-- 本阶段不执行历史财务迁移或对账。
+详细字段和约束见 [DATA_MODEL.md](./DATA_MODEL.md)。
 
-## 验证命令
+## 写入模式
 
-本地完整门禁：
+环境变量 `PAYROLL_LEDGER_WRITE_MODE` 只有两个有效值：
 
-```bash
-for file in src/*.js; do node --check "$file"; done
-npm run check
-npm test
-git diff --check
+| 值 | 行为 |
+| --- | --- |
+| `off` | 只执行旧兼容写入，不创建新账本记录 |
+| `dual` | 在同一原子操作中同时写入旧兼容表和 `payroll_entries` |
+
+双写不能退化成“旧表成功、账本失败但仍批准”。任一必要写入失败时，整个业务操作必须失败，避免两个来源产生无法解释的差异。
+
+无效写入模式不能在更正等破坏性路径中静默回退，因为这可能造成只改旧表而没有对应账本轨迹。
+
+## 读取模式
+
+环境变量 `PAYROLL_LEDGER_READ_MODE` 有三个有效值：
+
+| 值 | 返回结果 | 额外行为 |
+| --- | --- | --- |
+| `legacy` | 旧 `income_records` 计算结果 | 无 |
+| `shadow` | 旧计算结果 | 同时计算账本结果；不一致时记录 `payroll_shadow_mismatch` |
+| `ledger` | `payroll_entries.amount_micros` 求和结果 | 旧表不参与返回金额 |
+
+`shadow` 模式故意返回旧结果，使 staging 可以先观察差异而不改变用户看到的工资。无效读取模式记录配置错误并回退到 `legacy`，确保只读故障不会直接阻断现有工资查询。
+
+## 来源权威性
+
+来源权威性取决于当前读取模式：
+
+| 阶段 | 权威工资金额 | 旧表角色 |
+| --- | --- | --- |
+| `legacy` / `shadow` | `income_records` | 当前读取来源 |
+| `ledger` | `payroll_entries.amount_micros` | 兼容、回滚和审计 |
+
+申请表从来不是已生效工资金额的权威来源。`salary_records` 也不是工资收入账本；它记录实际支付了多少以及支付覆盖的周期。
+
+## 发布顺序
+
+推荐环境切换顺序：
+
+```text
+off + legacy
+    -> dual + legacy
+    -> dual + shadow
+    -> dual + ledger
 ```
 
-只允许部署 staging：
+每一步都必须先确认：
 
-```bash
-npx wrangler deploy --env staging
-```
+- 数据库迁移已经应用；
+- 历史回填可重复执行且第二次写入为零；
+- 旧路径与账本路径对账无差异；
+- 双写审批具备幂等性；
+- 类型检查和全量测试通过。
 
-禁止在本阶段执行不带 `--env staging` 的部署命令。production Worker、D1、
-Telegram bot 和 Cron 必须保持不变。详细步骤见
-[`STAGING_RUNBOOK.md`](./STAGING_RUNBOOK.md)。
+staging 已完成以上验证，目前运行于 `dual + ledger`。这只是 staging 证据，不代表 production 已经切换。
 
-## 下一阶段交接门槛
+## 回滚语义
 
-只有以下条件全部满足后，才能申请开始统一账本阶段：
+### 读取回滚
 
-1. 所有既有测试与模块边界测试通过。
-2. `src/index.js` 保持为少于 120 行的兼容入口。
-3. staging Worker 成功运行当前提交。
-4. staging Telegram 只向允许名单发送消息。
-5. staging Cron 保持禁用。
-6. production 健康检查与部署前一致。
-7. 用户明确批准开始 `payroll_entries` 和 `amount_micros` 阶段。
+从 `ledger` 回滚读取只需把 `PAYROLL_LEDGER_READ_MODE` 改为
+`legacy`。不需要删除或修改任何账本记录。
+
+### 写入回滚
+
+把 `PAYROLL_LEDGER_WRITE_MODE` 从 `dual` 改为 `off` 后，新业务停止写入账本，但已有 `payroll_entries` 必须完整保留。
+
+写入回滚不会“撤销”历史账本，也不会删除迁移或回填结果。以后重新启用双写时，来源唯一键负责阻止重复记录；重新切回账本读取前必须再次对账。
+
+## 工资周期和付款边界
+
+- `store_members.cycle_start` 决定员工在某店铺的当前工资周期起点。
+- 工资计算区间统一为 `[period_start, period_end)`。
+- 管理员批准工资时，付款金额及区间写入 `salary_records`。
+- 同一事务把 `cycle_start` 推进到 `period_end`。
+- 工资预支只新增负数 `advance` 账本事实，不推进工资周期。
+
+因此“账本里产生了多少钱”和“管理员实际支付了多少钱”始终可以分别审计。
+
+## 可观察性与审计
+
+- 影子读取不一致时记录 `payroll_shadow_mismatch`。
+- 管理员冲正记录 `reverse_payroll_entry` 审计事件。
+- 双写、迁移、回填和对账失败必须保留结构化日志。
+- 不在日志中保存敏感凭据或完整支付证明文件内容。
+
+## staging 验证证据
+
+本次统一账本 staging 验证记录见：
+
+[2026-07-28 staging payroll ledger migration report](./reports/2026-07-28-staging-payroll-ledger-migration.md)
+
+该报告包括迁移预检、历史回填、重复执行、对账、影子读取、双写审批、账本读取和回滚演练结果。
+
+## 后续架构边界
+
+下面两项不包含在本次账本改造中：
+
+- dashboard：只读取经过评审的数据接口，不改变账本写入契约；
+- 员工个人发薪流程：需要单独确认提醒、截止点、付款确认和凭证存储流程。
+
+它们必须分别形成计划、测试和发布方案后再实施。
