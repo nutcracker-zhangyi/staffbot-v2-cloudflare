@@ -1,7 +1,7 @@
 # Staging Dashboard validation evidence
 
 Date: 2026-07-28
-Outcome: **follow-up live empty-chart failure recorded; second local fix awaits live retest**
+Outcome: **verified — second empty-chart fix passed live staging retest**
 
 ## Scope and safety boundary
 
@@ -51,7 +51,7 @@ At that point, this correction had not been deployed or retested in the live
 staging browser. The later live retest and the payload gap it exposed are
 recorded below. No production content or production deployment was changed.
 
-## Follow-up live failure and second local correction
+## Follow-up live failure, second correction, and live proof
 
 The first empty-chart fix was deployed to staging Worker version
 `9d5a75a1-a78a-42c9-bf59-37ff4a952e42` and retested for
@@ -82,9 +82,22 @@ Automated evidence after the second fix:
 | `npm run test:staging` | 6 passed, 0 failed, 0 skipped |
 | `npm run check` | passed |
 
-The second fix has **not** been deployed and has **not** received a live-browser
-retest. The table above is local automated evidence, not a claim of live
-acceptance.
+The second fix was then deployed to staging Worker version
+`9f13d681-0bf8-40fa-9c3e-69fcf2733123`. A fresh Chrome tab with a cache-busting
+URL authenticated to the Dashboard and queried `2027-01-01..2027-01-31` using
+the existing active employees and all-zero financial data.
+
+The live accessibility snapshot showed:
+
+- the `月度趋势` heading followed by localized `该筛选范围没有数据`;
+- the `工资构成` heading followed by localized `该筛选范围没有数据`;
+- the `员工对比` heading followed by localized `该筛选范围没有数据`;
+- the equivalent composition and employee data tables still present;
+- no `img` node for any of the three charts.
+
+This live retest passed the empty-chart requirement while preserving the
+equivalent tabular data. The earlier failure on Worker version
+`9d5a75a1-a78a-42c9-bf59-37ff4a952e42` remains recorded above.
 
 ## Original deployed release gate (before the local empty-chart fix)
 
@@ -268,13 +281,16 @@ The original live validation established the financial, timezone, currency,
 populated-chart, accessibility, detail, pagination, reversal,
 production-isolation, and safety evidence recorded above. The later live retest
 of Worker version `9d5a75a1-a78a-42c9-bf59-37ff4a952e42` failed the empty-chart
-SVG-suppression requirement. The second fix currently has local automated
-evidence only. Permission behavior is recorded without conflating the live
-global-admin
+SVG-suppression requirement. The second fix then passed the same live scenario
+on Worker version `9f13d681-0bf8-40fa-9c3e-69fcf2733123`: all three localized
+no-data states were present, the equivalent tables remained, and no chart
+`img` nodes were exposed. Permission behavior is recorded without conflating
+the live global-admin
 `400 unknown_store` probe with the non-global-admin automated
 `403 forbidden_store` contract.
 
-The first empty-chart fix received a live staging pass and failed as described
-above; the second fix has not yet received one. Phase 9 therefore remains `🧪`
-evidence rather than production approval, and this report does not authorize a
-production migration, deployment, feature enablement, merge, or rollout.
+The first empty-chart fix failed live as described above; the second fix passed
+the fresh-tab, cache-busted live staging retest. Phase 9 remains `🧪`
+staging evidence rather than production approval, and this report does not
+authorize a production migration, deployment, feature enablement, merge, or
+rollout.
