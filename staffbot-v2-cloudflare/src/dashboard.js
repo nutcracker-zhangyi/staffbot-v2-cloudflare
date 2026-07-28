@@ -434,3 +434,66 @@ export async function loadDashboard(env, filters) {
     groups: orderedGroups
   };
 }
+
+export async function loadDashboardEntries(env, url, filters) {
+  const periodsJson = dashboardPeriodsJson(filters.periods);
+  const employee = filters.employeeId;
+  const count = await env.DB.prepare(`${PERIODS_CTE}
+    SELECT COUNT(*) AS total
+    FROM payroll_entries e
+    JOIN periods p
+      ON p.store_id = e.store_id
+     AND e.effective_at >= p.start_iso
+     AND e.effective_at < p.end_iso
+    WHERE (? = '' OR e.telegram_id = ?)
+  `).bind(periodsJson, employee, employee).first();
+  const pagination = adminPage(url.searchParams.get('entries_page'), count?.total);
+  const entryResult = await env.DB.prepare(`${PERIODS_CTE}
+    SELECT
+      e.entry_id,
+      e.store_id,
+      e.telegram_id,
+      COALESCE(
+        NULLIF(m.display_name, ''),
+        NULLIF(u.name, ''),
+        NULLIF(u.username, ''),
+        e.telegram_id
+      ) AS display_name,
+      e.type,
+      e.amount_micros,
+      e.currency,
+      e.effective_at,
+      e.source,
+      e.source_id,
+      e.created_at,
+      e.reverses_entry_id
+    FROM payroll_entries e
+    JOIN periods p
+      ON p.store_id = e.store_id
+     AND e.effective_at >= p.start_iso
+     AND e.effective_at < p.end_iso
+    LEFT JOIN store_members m
+      ON m.store_id = e.store_id
+     AND m.telegram_id = e.telegram_id
+    LEFT JOIN users u ON u.telegram_id = e.telegram_id
+    WHERE (? = '' OR e.telegram_id = ?)
+    ORDER BY e.effective_at DESC, e.entry_id DESC
+    LIMIT ? OFFSET ?
+  `).bind(
+    periodsJson,
+    employee,
+    employee,
+    pagination.limit,
+    pagination.offset
+  ).all();
+  const entries = (entryResult.results || []).map((entry) => ({
+    ...entry,
+    amount_micros: safeMicros(entry.amount_micros)
+  }));
+
+  return {
+    ok: true,
+    entries,
+    pagination: { entries: pagination }
+  };
+}

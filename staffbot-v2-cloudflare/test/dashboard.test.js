@@ -12,6 +12,7 @@ import {
   dashboardPeriodsJson,
   dashboardSelection,
   loadDashboard,
+  loadDashboardEntries,
   resolveDashboardFilters
 } from '../src/dashboard.js';
 
@@ -108,6 +109,39 @@ function dashboardFixture(hooks = {}) {
   payment('ny-payment-before-start', 'NEW_YORK', 'EMP-2', 999, '2026-07-01T03:59:59.999999Z');
 
   return { database, env: { DB: createD1(database, hooks) } };
+}
+
+function dashboardFixtureWithManyEntries() {
+  const { database, env } = dashboardFixture();
+  const now = '2026-07-01T00:00:00.000Z';
+  database.exec('DELETE FROM payroll_entries');
+  database.prepare(`
+    INSERT INTO store_members (
+      store_id, telegram_id, display_name, role, cycle_start, joined_at, updated_at
+    ) VALUES ('TOKYO', 'EMP-2', 'Bob', 'employee', '2026-07-01', ?, ?)
+  `).run(now, now);
+  const ledger = (entryId, telegramId, type, amountMicros, effectiveAt, reverses = null) => {
+    database.prepare(`
+      INSERT INTO payroll_entries (
+        entry_id, store_id, telegram_id, type, amount_micros, currency, effective_at,
+        source, source_id, created_by, created_at, reverses_entry_id, metadata_json
+      ) VALUES (?, 'TOKYO', ?, ?, ?, '¥', ?, 'test', ?, 'ADMIN-1', ?, ?, '{"private":"excluded"}')
+    `).run(entryId, telegramId, type, amountMicros, effectiveAt, entryId, now, reverses);
+  };
+  ledger('PAY-BEFORE-1', 'EMP-1', 'income', 1_000_000, '2026-06-30T14:59:59.999999Z');
+  ledger('PAY-FINE-1', 'EMP-1', 'fine', -1_000_000, now);
+  ledger('PAY-REVERSAL-1', 'EMP-1', 'reversal', 1_000_000, now, 'PAY-FINE-1');
+  for (let index = 1; index <= 99; index += 1) {
+    ledger(
+      `PAY-ENTRY-${String(index).padStart(3, '0')}`,
+      'EMP-1',
+      'income',
+      index * 1_000_000,
+      now
+    );
+  }
+  ledger('PAY-OTHER-1', 'EMP-2', 'income', 2_000_000, now);
+  return { database, env };
 }
 
 const stores = [
@@ -508,4 +542,134 @@ test('rejects an intermediate unsafe payroll accumulation before cancellation ca
     async () => loadDashboard(env, await resolveDashboardFilters(env, url, 'TOKYO', 'ADMIN-1')),
     RangeError
   );
+});
+
+test('returns immutable ledger detail with reversal and stable pagination', async () => {
+  const { env } = dashboardFixtureWithManyEntries();
+  const url = new URL(
+    'https://staffbot.test/api/admin/stores/TOKYO/dashboard/entries'
+      + '?stores=TOKYO'
+      + '&date_from=2026-07-01'
+      + '&date_to=2026-07-31'
+      + '&employee=EMP-1'
+      + '&entries_page=1'
+  );
+  const filters = await resolveDashboardFilters(env, url, 'TOKYO', 'ADMIN-1');
+  const result = await loadDashboardEntries(env, url, filters);
+
+  assert.equal(result.ok, true);
+  assert.equal(result.entries.length, 100);
+  assert.deepEqual(result.pagination.entries, {
+    page: 1,
+    page_size: 100,
+    total: 101,
+    total_pages: 2,
+    has_prev: false,
+    has_next: true,
+    limit: 100,
+    offset: 0
+  });
+  assert.deepEqual(
+    result.entries.slice(0, 3).map((entry) => entry.entry_id),
+    ['PAY-REVERSAL-1', 'PAY-FINE-1', 'PAY-ENTRY-099']
+  );
+  assert.equal(result.entries.at(-1).entry_id, 'PAY-ENTRY-002');
+  assert.ok(result.entries.some((entry) =>
+    entry.type === 'reversal'
+      && entry.reverses_entry_id === 'PAY-FINE-1'
+  ));
+  assert.ok(result.entries.every((entry) => entry.currency === '¥'));
+  assert.equal(
+    Object.prototype.hasOwnProperty.call(result.entries[0], 'metadata_json'),
+    false
+  );
+});
+
+test('returns the final stable entry on page two', async () => {
+  const { env } = dashboardFixtureWithManyEntries();
+  const url = new URL(
+    'https://staffbot.test/api/admin/stores/TOKYO/dashboard/entries'
+      + '?stores=TOKYO'
+      + '&date_from=2026-07-01'
+      + '&date_to=2026-07-31'
+      + '&employee=EMP-1'
+      + '&entries_page=2'
+  );
+  const result = await loadDashboardEntries(
+    env,
+    url,
+    await resolveDashboardFilters(env, url, 'TOKYO', 'ADMIN-1')
+  );
+
+  assert.deepEqual(result.entries.map((entry) => entry.entry_id), ['PAY-ENTRY-001']);
+  assert.deepEqual(result.pagination.entries, {
+    page: 2,
+    page_size: 100,
+    total: 101,
+    total_pages: 2,
+    has_prev: true,
+    has_next: false,
+    limit: 100,
+    offset: 100
+  });
+});
+
+test('returns an empty immutable ledger page for a selected range with no entries', async () => {
+  const { env } = dashboardFixtureWithManyEntries();
+  const url = new URL(
+    'https://staffbot.test/api/admin/stores/TOKYO/dashboard/entries'
+      + '?stores=TOKYO'
+      + '&date_from=2026-08-01'
+      + '&date_to=2026-08-31'
+      + '&employee=EMP-1'
+      + '&entries_page=2'
+  );
+  const result = await loadDashboardEntries(
+    env,
+    url,
+    await resolveDashboardFilters(env, url, 'TOKYO', 'ADMIN-1')
+  );
+
+  assert.deepEqual(result.entries, []);
+  assert.deepEqual(result.pagination.entries, {
+    page: 1,
+    page_size: 100,
+    total: 0,
+    total_pages: 1,
+    has_prev: false,
+    has_next: false,
+    limit: 100,
+    offset: 0
+  });
+});
+
+test('rejects an unknown ledger employee before running the detail query', async () => {
+  const { env } = dashboardFixtureWithManyEntries();
+  const url = new URL(
+    'https://staffbot.test/api/admin/stores/TOKYO/dashboard/entries?employee=UNKNOWN'
+  );
+
+  await assert.rejects(
+    () => resolveDashboardFilters(env, url, 'TOKYO', 'ADMIN-1'),
+    (error) => error instanceof DashboardInputError && error.code === 'unknown_employee'
+  );
+});
+
+test('keeps other employees out of a selected employee ledger drill-down', async () => {
+  const { env } = dashboardFixtureWithManyEntries();
+  const url = new URL(
+    'https://staffbot.test/api/admin/stores/TOKYO/dashboard/entries'
+      + '?stores=TOKYO'
+      + '&date_from=2026-07-01'
+      + '&date_to=2026-07-31'
+      + '&employee=EMP-1'
+  );
+  const result = await loadDashboardEntries(
+    env,
+    url,
+    await resolveDashboardFilters(env, url, 'TOKYO', 'ADMIN-1')
+  );
+
+  assert.equal(result.pagination.entries.total, 101);
+  assert.ok(result.entries.every((entry) => entry.telegram_id === 'EMP-1'));
 });
