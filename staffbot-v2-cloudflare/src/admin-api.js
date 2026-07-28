@@ -44,6 +44,13 @@ import {
   localTime
 } from './dates.js';
 import {
+  DashboardInputError,
+  dashboardAvailable,
+  loadDashboard,
+  loadDashboardEntries,
+  resolveDashboardFilters
+} from './dashboard.js';
+import {
   CSV_HEADERS,
   clearSessionCookie,
   json,
@@ -129,6 +136,16 @@ export async function handleAdminApi(request, env, url, ctx) {
     if (parts[4] === 'attendance') return handleAdminAttendance(request, env, url, storeId, parts, session.telegram_id);
     if (parts[4] === 'absence') return handleAdminAbsence(request, env, url, storeId, parts, session.telegram_id);
     if (parts[4] === 'leave') return handleAdminLeave(request, env, url, storeId, parts, session.telegram_id);
+    if (parts[4] === 'dashboard') {
+      return handleAdminDashboard(
+        request,
+        env,
+        url,
+        storeId,
+        parts,
+        session.telegram_id
+      );
+    }
     if (parts[4] === 'logs' && request.method === 'GET') {
       const result = await listPagedRows(
         env,
@@ -149,6 +166,42 @@ export async function handleAdminApi(request, env, url, ctx) {
   } catch (error) {
     await logError(env, 'admin_api_error', error, { path: url.pathname });
     return json({ ok: false, error: 'server_error' }, 500);
+  }
+}
+
+async function handleAdminDashboard(
+  request,
+  env,
+  url,
+  storeId,
+  parts,
+  adminId
+) {
+  if (!dashboardAvailable(env) || request.method !== 'GET') {
+    return json({ ok: false, error: 'not_found' }, 404);
+  }
+  try {
+    const filters = await resolveDashboardFilters(
+      env,
+      url,
+      storeId,
+      adminId
+    );
+    if (parts.length === 5) {
+      return json(await loadDashboard(env, filters));
+    }
+    if (parts.length === 6 && parts[5] === 'entries') {
+      return json(await loadDashboardEntries(env, url, filters));
+    }
+    return json({ ok: false, error: 'not_found' }, 404);
+  } catch (error) {
+    if (error instanceof DashboardInputError) {
+      return json(
+        { ok: false, error: error.code },
+        error.status || 400
+      );
+    }
+    throw error;
   }
 }
 

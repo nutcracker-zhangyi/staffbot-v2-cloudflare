@@ -4,6 +4,7 @@ import { readFileSync } from 'node:fs';
 import { DatabaseSync } from 'node:sqlite';
 
 import { createD1 } from './helpers/d1.js';
+import { handleAdminApi } from '../src/admin-api.js';
 
 import {
   DashboardInputError,
@@ -143,6 +144,35 @@ function dashboardFixtureWithManyEntries() {
   ledger('PAY-OTHER-1', 'EMP-2', 'income', 2_000_000, now);
   return { database, env };
 }
+
+function dashboardApiFixture(environment = 'staging') {
+  const { database, env } = dashboardFixture();
+  database.prepare(`
+    INSERT INTO admin_sessions (token, telegram_id, expires_at, created_at)
+    VALUES ('dashboard-session', 'ADMIN-1', '2099-01-01T00:00:00.000Z', '2026-07-01T00:00:00.000Z')
+  `).run();
+  return {
+    database,
+    env: {
+      ...env,
+      ENVIRONMENT: environment
+    }
+  };
+}
+
+async function dashboardApiRequest(env, path, options = {}) {
+  const request = new Request(`https://staffbot.test${path}`, options);
+  return handleAdminApi(
+    request,
+    env,
+    new URL(request.url),
+    { waitUntil() {} }
+  );
+}
+
+const authenticatedHeaders = {
+  cookie: 'staffbot_admin_session=dashboard-session'
+};
 
 const stores = [
   {
@@ -672,4 +702,120 @@ test('keeps other employees out of a selected employee ledger drill-down', async
 
   assert.equal(result.pagination.entries.total, 101);
   assert.ok(result.entries.every((entry) => entry.telegram_id === 'EMP-1'));
+});
+
+test('returns Dashboard currency groups to an authenticated staging admin', async () => {
+  const { env } = dashboardApiFixture();
+  const response = await dashboardApiRequest(
+    env,
+    '/api/admin/stores/TOKYO/dashboard?stores=TOKYO,NEW_YORK&date_from=2026-07-01&date_to=2026-07-31',
+    { headers: authenticatedHeaders }
+  );
+
+  assert.equal(response.status, 200);
+  assert.deepEqual(
+    (await response.json()).groups.map((group) => group.currency),
+    ['$', '¥']
+  );
+});
+
+test('hides Dashboard from an authenticated production admin', async () => {
+  const { env } = dashboardApiFixture('production');
+  const response = await dashboardApiRequest(
+    env,
+    '/api/admin/stores/TOKYO/dashboard',
+    { headers: authenticatedHeaders }
+  );
+
+  assert.equal(response.status, 404);
+  assert.deepEqual(await response.json(), { ok: false, error: 'not_found' });
+});
+
+test('requires an admin session before Dashboard availability is checked', async () => {
+  const { env } = dashboardApiFixture();
+  const response = await dashboardApiRequest(
+    env,
+    '/api/admin/stores/TOKYO/dashboard'
+  );
+
+  assert.equal(response.status, 401);
+  assert.deepEqual(await response.json(), { ok: false, error: 'unauthorized' });
+});
+
+test('forbids a Dashboard selection containing a store outside the admin scope', async () => {
+  const { database, env } = dashboardApiFixture();
+  database.prepare(`
+    INSERT INTO stores (store_id, name, timezone, currency, created_at, updated_at)
+    VALUES ('SINGAPORE', 'Singapore', 'Asia/Singapore', 'S$', '2026-07-01T00:00:00.000Z', '2026-07-01T00:00:00.000Z')
+  `).run();
+  const response = await dashboardApiRequest(
+    env,
+    '/api/admin/stores/TOKYO/dashboard?stores=TOKYO,SINGAPORE',
+    { headers: authenticatedHeaders }
+  );
+
+  assert.equal(response.status, 403);
+  assert.deepEqual(await response.json(), { ok: false, error: 'forbidden_store' });
+});
+
+test('maps invalid Dashboard dates to invalid_date_range', async () => {
+  const { env } = dashboardApiFixture();
+  const response = await dashboardApiRequest(
+    env,
+    '/api/admin/stores/TOKYO/dashboard?date_from=2026-07-31&date_to=2026-07-01',
+    { headers: authenticatedHeaders }
+  );
+
+  assert.equal(response.status, 400);
+  assert.deepEqual(await response.json(), { ok: false, error: 'invalid_date_range' });
+});
+
+test('maps an invalid Dashboard employee sort to invalid_sort', async () => {
+  const { env } = dashboardApiFixture();
+  const response = await dashboardApiRequest(
+    env,
+    '/api/admin/stores/TOKYO/dashboard?employees_sort=not-a-sort',
+    { headers: authenticatedHeaders }
+  );
+
+  assert.equal(response.status, 400);
+  assert.deepEqual(await response.json(), { ok: false, error: 'invalid_sort' });
+});
+
+test('returns Dashboard entries pagination under pagination.entries', async () => {
+  const { env } = dashboardApiFixture();
+  const response = await dashboardApiRequest(
+    env,
+    '/api/admin/stores/TOKYO/dashboard/entries?stores=TOKYO&date_from=2026-07-01&date_to=2026-07-31&entries_page=1',
+    { headers: authenticatedHeaders }
+  );
+  const result = await response.json();
+
+  assert.equal(response.status, 200);
+  assert.deepEqual(result.pagination.entries, {
+    page: 1,
+    page_size: 100,
+    total: 5,
+    total_pages: 1,
+    has_prev: false,
+    has_next: false,
+    limit: 100,
+    offset: 0
+  });
+});
+
+test('does not expose Dashboard routes to POST requests', async () => {
+  const { env } = dashboardApiFixture();
+  for (const path of [
+    '/api/admin/stores/TOKYO/dashboard',
+    '/api/admin/stores/TOKYO/dashboard/entries'
+  ]) {
+    const response = await dashboardApiRequest(env, path, {
+      method: 'POST',
+      headers: authenticatedHeaders
+    });
+
+    assert.equal(response.status, 404);
+    assert.deepEqual(await response.json(), { ok: false, error: 'not_found' });
+  }
 });
