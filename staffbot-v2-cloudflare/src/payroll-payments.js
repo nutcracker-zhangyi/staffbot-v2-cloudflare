@@ -288,6 +288,25 @@ export function paymentMethodKeyboard(payrollId, profile, language) {
   };
 }
 
+export function usdtDetailModeKeyboard(payrollId, language) {
+  return {
+    inline_keyboard: [
+      [{
+        text: t(language, 'btn_usdt_address'),
+        callback_data: `pay:um:a:${payrollId}`
+      }],
+      [{
+        text: t(language, 'btn_usdt_qr'),
+        callback_data: `pay:um:q:${payrollId}`
+      }],
+      [{
+        text: t(language, 'btn_usdt_both'),
+        callback_data: `pay:um:b:${payrollId}`
+      }]
+    ]
+  };
+}
+
 export function validatePaymentSplit(payroll, input) {
   const split = {
     bank_micros: input && input.bank_micros,

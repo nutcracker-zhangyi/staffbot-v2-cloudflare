@@ -4,6 +4,7 @@ import { readFileSync } from 'node:fs';
 import { DatabaseSync } from 'node:sqlite';
 
 import { handleUpdate as facadeHandleUpdate } from '../src/index.js';
+import { usdtDetailModeKeyboard } from '../src/payroll-payments.js';
 import { handleUpdate } from '../src/telegram.js';
 import { createD1 } from './helpers/d1.js';
 
@@ -38,7 +39,7 @@ const welcomeText = [
   '/ping - 测试机器人'
 ].join('\n');
 
-function flowFixture() {
+function flowFixture(fixtureOptions = {}) {
   const database = new DatabaseSync(':memory:');
   database.exec(schema);
   database.exec(`
@@ -81,6 +82,16 @@ function flowFixture() {
         json: async () => ({
           ok: true,
           result: { file_path: `proofs/${payload.file_id}.jpg` }
+        })
+      };
+    }
+    if (fixtureOptions.failQrDelivery
+      && String(url).endsWith('/sendPhoto')) {
+      return {
+        json: async () => ({
+          ok: false,
+          error_code: 500,
+          description: 'test QR delivery failure'
         })
       };
     }
@@ -168,6 +179,29 @@ async function sendPhoto(env, fileId, user = {
       }]
     }
   }, env);
+}
+
+function insertFlowPayroll(
+  database,
+  payrollId,
+  amountMicros = 60_000_000
+) {
+  database.prepare(`
+    INSERT INTO payroll_disbursements (
+      payroll_id, store_id, telegram_id, payroll_start_date,
+      scheduled_date, cycle_day, period_start, cutoff_at,
+      amount_snapshot_micros, currency, status,
+      created_at, updated_at
+    ) VALUES (
+      ?, 'STORE1', '1001', '2026-07-01',
+      '2026-07-16', 16,
+      '2026-07-01T00:00:00.000Z',
+      '2026-07-16T03:00:00.000Z',
+      ?, '$', 'awaiting_employee_details',
+      '2026-07-16T03:00:00.000Z',
+      '2026-07-16T03:00:00.000Z'
+    )
+  `).run(payrollId, amountMicros);
 }
 
 test('keeps the Telegram workflow available through the Worker facade', () => {
@@ -573,6 +607,267 @@ test('cash-only payroll details require no free-text answer', async () => {
         accepts_cash: 1
       }
     );
+  } finally {
+    fixture.restore();
+  }
+});
+
+test('offers address QR and both USDT detail modes with safe callbacks', () => {
+  const payrollId = 'PAYROLL-USDT';
+  const callbacks = usdtDetailModeKeyboard(
+    payrollId,
+    'zh'
+  ).inline_keyboard.flat().map((button) => button.callback_data);
+
+  assert.deepEqual(callbacks, [
+    `pay:um:a:${payrollId}`,
+    `pay:um:q:${payrollId}`,
+    `pay:um:b:${payrollId}`
+  ]);
+  assert.ok(callbacks.every((callback) =>
+    Buffer.byteLength(callback, 'utf8') <= 64
+  ));
+});
+
+test('collects address-only QR-only and combined USDT profiles', async (context) => {
+  await context.test('address-only finishes after text', async () => {
+    const fixture = flowFixture();
+    try {
+      insertFlowPayroll(fixture.database, 'PAYROLL-USDT-ADDRESS');
+      await sendCallback(
+        fixture.env,
+        'pay:d:PAYROLL-USDT-ADDRESS',
+        1001
+      );
+      await sendCallback(
+        fixture.env,
+        'pay:m:u:PAYROLL-USDT-ADDRESS',
+        1001
+      );
+      await sendCallback(
+        fixture.env,
+        'pay:c:PAYROLL-USDT-ADDRESS',
+        1001
+      );
+      assert.equal(
+        fixture.database.prepare(`
+          SELECT state FROM user_states WHERE telegram_id = '1001'
+        `).get().state,
+        'WAIT_PAYROLL_USDT_MODE'
+      );
+
+      await sendCallback(
+        fixture.env,
+        'pay:um:a:PAYROLL-USDT-ADDRESS',
+        1001
+      );
+      await sendText(fixture.env, 'TADDRESS');
+
+      const saved = fixture.database.prepare(`
+        SELECT
+          usdt_details_snapshot,
+          usdt_qr_id_snapshot
+        FROM payroll_disbursements
+        WHERE payroll_id = 'PAYROLL-USDT-ADDRESS'
+      `).get();
+      assert.equal(saved.usdt_details_snapshot, 'TADDRESS');
+      assert.equal(saved.usdt_qr_id_snapshot, null);
+      assert.equal(
+        fixture.database.prepare(`
+          SELECT 1 FROM user_states WHERE telegram_id = '1001'
+        `).get(),
+        undefined
+      );
+    } finally {
+      fixture.restore();
+    }
+  });
+
+  await context.test('QR-only finishes after one photo', async () => {
+    const fixture = flowFixture();
+    try {
+      insertFlowPayroll(
+        fixture.database,
+        'PAYROLL-USDT-QR',
+        8_000_000_000_000
+      );
+      await sendCallback(
+        fixture.env,
+        'pay:d:PAYROLL-USDT-QR',
+        1001
+      );
+      await sendCallback(
+        fixture.env,
+        'pay:m:u:PAYROLL-USDT-QR',
+        1001
+      );
+      await sendCallback(
+        fixture.env,
+        'pay:c:PAYROLL-USDT-QR',
+        1001
+      );
+      await sendCallback(
+        fixture.env,
+        'pay:um:q:PAYROLL-USDT-QR',
+        1001
+      );
+
+      await sendText(fixture.env, 'not a photo');
+      assert.equal(
+        fixture.database.prepare(`
+          SELECT state FROM user_states WHERE telegram_id = '1001'
+        `).get().state,
+        'WAIT_PAYROLL_USDT_QR'
+      );
+      await sendPhoto(fixture.env, 'EMPLOYEE-USDT-QR', {
+        id: 1001,
+        first_name: 'Alice',
+        username: 'alice'
+      });
+
+      const saved = fixture.database.prepare(`
+        SELECT
+          amount_snapshot_micros,
+          cutoff_at,
+          usdt_details_snapshot,
+          usdt_qr_id_snapshot
+        FROM payroll_disbursements
+        WHERE payroll_id = 'PAYROLL-USDT-QR'
+      `).get();
+      assert.equal(saved.amount_snapshot_micros, 8_000_000_000_000);
+      assert.equal(saved.cutoff_at, '2026-07-16T03:00:00.000Z');
+      assert.equal(saved.usdt_details_snapshot, null);
+      assert.match(saved.usdt_qr_id_snapshot, /^QR-/);
+      assert.ok(fixture.payloads.some((payload) =>
+        payload.chat_id === '9001'
+        && payload.photo === 'EMPLOYEE-USDT-QR'
+        && payload.caption.includes('PAYROLL-USDT-QR')
+      ));
+    } finally {
+      fixture.restore();
+    }
+  });
+
+  await context.test('both asks for address then QR after bank details', async () => {
+    const fixture = flowFixture();
+    try {
+      insertFlowPayroll(fixture.database, 'PAYROLL-USDT-BOTH');
+      await sendCallback(
+        fixture.env,
+        'pay:d:PAYROLL-USDT-BOTH',
+        1001
+      );
+      await sendCallback(
+        fixture.env,
+        'pay:m:b:PAYROLL-USDT-BOTH',
+        1001
+      );
+      await sendCallback(
+        fixture.env,
+        'pay:m:u:PAYROLL-USDT-BOTH',
+        1001
+      );
+      await sendCallback(
+        fixture.env,
+        'pay:c:PAYROLL-USDT-BOTH',
+        1001
+      );
+      await sendText(fixture.env, 'BANK-1234');
+      assert.equal(
+        fixture.database.prepare(`
+          SELECT state FROM user_states WHERE telegram_id = '1001'
+        `).get().state,
+        'WAIT_PAYROLL_USDT_MODE'
+      );
+
+      await sendCallback(
+        fixture.env,
+        'pay:um:b:PAYROLL-USDT-BOTH',
+        1001
+      );
+      await sendText(fixture.env, 'TADDRESS-BOTH');
+      assert.equal(
+        fixture.database.prepare(`
+          SELECT state FROM user_states WHERE telegram_id = '1001'
+        `).get().state,
+        'WAIT_PAYROLL_USDT_QR'
+      );
+      await sendPhoto(fixture.env, 'EMPLOYEE-USDT-BOTH', {
+        id: 1001,
+        first_name: 'Alice',
+        username: 'alice'
+      });
+
+      const saved = fixture.database.prepare(`
+        SELECT
+          bank_details_snapshot,
+          usdt_details_snapshot,
+          usdt_qr_id_snapshot
+        FROM payroll_disbursements
+        WHERE payroll_id = 'PAYROLL-USDT-BOTH'
+      `).get();
+      assert.equal(saved.bank_details_snapshot, 'BANK-1234');
+      assert.equal(saved.usdt_details_snapshot, 'TADDRESS-BOTH');
+      assert.match(saved.usdt_qr_id_snapshot, /^QR-/);
+    } finally {
+      fixture.restore();
+    }
+  });
+});
+
+test('a failed admin QR delivery does not undo the saved profile', async () => {
+  const fixture = flowFixture({ failQrDelivery: true });
+  try {
+    insertFlowPayroll(fixture.database, 'PAYROLL-USDT-DELIVERY');
+    await sendCallback(
+      fixture.env,
+      'pay:d:PAYROLL-USDT-DELIVERY',
+      1001
+    );
+    await sendCallback(
+      fixture.env,
+      'pay:m:u:PAYROLL-USDT-DELIVERY',
+      1001
+    );
+    await sendCallback(
+      fixture.env,
+      'pay:c:PAYROLL-USDT-DELIVERY',
+      1001
+    );
+    await sendCallback(
+      fixture.env,
+      'pay:um:q:PAYROLL-USDT-DELIVERY',
+      1001
+    );
+    await sendPhoto(fixture.env, 'PRIVATE-QR-FILE-ID', {
+      id: 1001,
+      first_name: 'Alice',
+      username: 'alice'
+    });
+
+    const payroll = fixture.database.prepare(`
+      SELECT status, usdt_qr_id_snapshot
+      FROM payroll_disbursements
+      WHERE payroll_id = 'PAYROLL-USDT-DELIVERY'
+    `).get();
+    assert.equal(payroll.status, 'awaiting_admin_payment');
+    assert.match(payroll.usdt_qr_id_snapshot, /^QR-/);
+
+    const log = fixture.database.prepare(`
+      SELECT payload_json
+      FROM bot_logs
+      WHERE event = 'payroll_usdt_qr_delivery_failed'
+    `).get();
+    assert.ok(
+      log,
+      JSON.stringify(
+        fixture.database.prepare(`
+          SELECT event, payload_json FROM bot_logs
+        `).all()
+      )
+    );
+    assert.doesNotMatch(log.payload_json, /PRIVATE-QR-FILE-ID/);
+    assert.doesNotMatch(log.payload_json, /payroll-payment-qr/);
   } finally {
     fixture.restore();
   }
