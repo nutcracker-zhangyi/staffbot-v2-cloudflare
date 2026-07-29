@@ -436,7 +436,6 @@ export async function confirmPayrollReceipt(
     throw new Error('already_processed');
   }
   const recipient = String(financeEmail || '').trim();
-  if (!recipient) throw new Error('payroll finance email is not configured');
   const confirmedAt = now.toISOString();
   const salaryRecordId = `SAL-AUTO-${payroll.payroll_id}`;
   const results = await env.DB.batch([

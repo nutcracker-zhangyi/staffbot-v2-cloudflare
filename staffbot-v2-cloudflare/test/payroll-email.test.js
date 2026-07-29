@@ -179,6 +179,49 @@ test('missing email configuration leaves the row pending with a safe error', asy
   }
 });
 
+test('a pending blank recipient adopts the verified email configuration', async () => {
+  const fixture = emailFixture();
+  const messages = [];
+  try {
+    fixture.database.prepare(`
+      UPDATE payroll_email_outbox
+      SET recipient = ''
+      WHERE payroll_id = 'PAYROLL-1'
+    `).run();
+    fixture.env.PAYROLL_EMAIL = {
+      async send(message) {
+        messages.push(message);
+      }
+    };
+
+    const result = await deliverPayrollEmailOutbox(
+      fixture.env,
+      new Date('2026-07-16T06:10:00.000Z')
+    );
+
+    assert.deepEqual(result, { scanned: 1, sent: 1, failed: 0 });
+    assert.equal(messages.length, 1);
+    assert.equal(messages[0].to, 'finance@example.test');
+    assert.deepEqual(
+      {
+        ...fixture.database.prepare(`
+          SELECT recipient, status, attempt_count, last_error
+          FROM payroll_email_outbox
+          WHERE payroll_id = 'PAYROLL-1'
+        `).get()
+      },
+      {
+        recipient: 'finance@example.test',
+        status: 'sent',
+        attempt_count: 1,
+        last_error: null
+      }
+    );
+  } finally {
+    fixture.database.close();
+  }
+});
+
 test('email failure retries without changing the confirmed payroll', async () => {
   const fixture = emailFixture();
   const messages = [];

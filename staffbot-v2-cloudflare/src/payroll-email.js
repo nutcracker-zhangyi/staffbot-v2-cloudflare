@@ -178,6 +178,23 @@ export async function deliverPayrollEmailOutbox(
       summary.failed += 1;
       continue;
     }
+    if (!payroll.recipient) {
+      await env.DB.prepare(`
+        UPDATE payroll_email_outbox
+        SET recipient = ?,
+            updated_at = ?
+        WHERE payroll_id = ?
+          AND status = 'sending'
+          AND claimed_at = ?
+          AND recipient = ''
+      `).bind(
+        config.recipient,
+        nowIso,
+        payroll.payroll_id,
+        nowIso
+      ).run();
+      payroll.recipient = config.recipient;
+    }
     if (String(payroll.recipient) !== config.recipient) {
       await releaseOutboxRow(
         env,

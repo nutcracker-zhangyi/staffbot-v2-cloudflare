@@ -686,6 +686,55 @@ test('employee confirmation creates one formal salary record and email row', asy
   }
 });
 
+test('employee confirmation succeeds before finance email is configured', async () => {
+  const database = databaseFixture();
+  try {
+    insertPayroll(database, payroll({
+      status: 'awaiting_employee_confirmation',
+      bank_micros: 70_000_000,
+      cash_micros: 30_000_000
+    }));
+    database.prepare(`
+      UPDATE payroll_disbursements
+      SET current_admin_id = 'ADMIN-1'
+      WHERE payroll_id = 'PAYROLL-1'
+    `).run();
+
+    const confirmed = await confirmPayrollReceipt(
+      { DB: createD1(database) },
+      'EMP-1',
+      'PAYROLL-1',
+      undefined,
+      new Date('2026-07-16T06:00:00.000Z')
+    );
+
+    assert.equal(confirmed.status, 'confirmed');
+    assert.equal(
+      database.prepare(`
+        SELECT COUNT(*) AS count FROM salary_records
+        WHERE request_id = 'PAYROLL-1'
+      `).get().count,
+      1
+    );
+    assert.deepEqual(
+      {
+        ...database.prepare(`
+          SELECT recipient, status, attempt_count
+          FROM payroll_email_outbox
+          WHERE payroll_id = 'PAYROLL-1'
+        `).get()
+      },
+      {
+        recipient: '',
+        status: 'pending',
+        attempt_count: 0
+      }
+    );
+  } finally {
+    database.close();
+  }
+});
+
 test('only the payroll employee can dispute an awaiting confirmation', async () => {
   const database = databaseFixture();
   try {
