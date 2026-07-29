@@ -183,7 +183,7 @@
 - `skipped_zero`：截止时工资为 0，没有待付款工资。
 - `carried_negative`：截止时工资为负数，没有待付款工资，余额继续结转。
 
-负数结转复用当前工资汇总来源 `income_records`：在新周期固定截止点写入一条 `type='adjustment'`、`source='payroll_negative_carry'` 的扣减记录，`fine` 等于负数余额的绝对值，`request_id` 关联本次计划发薪结果。该来源与请求 ID 必须唯一，确保重试不会重复结转。
+负数结转使用统一工资账本 `payroll_entries`：在新周期固定截止点写入一条 `type='negative_carry'`、`source='payroll_negative_carry'` 的记录，`amount_micros` 等于本次负数余额，`source_id` 关联本次计划发薪结果。该来源与 `source_id` 必须唯一，确保重试不会重复结转。不得为新的负数结转写入 `income_records`。
 
 现有 `salary_records` 继续作为已经实际收款的正式工资台账。员工点击“确认收到”时，系统以工资快照的 `period_start`、`cutoff_at` 和 `amount_snapshot` 写入一条 `salary_records`，`request_id` 关联自动工资 ID；同一自动工资只能生成一条正式工资记录。
 
