@@ -24,6 +24,21 @@ export async function editCallbackMessage(env, callback, text) {
   });
 }
 
+export function telegramErrorSummary(result, error = null) {
+  const errorCode = Number(result && result.error_code);
+  const description = String(
+    result && result.description
+      ? result.description
+      : error && error.message
+        ? error.message
+        : 'telegram_delivery_failed'
+  ).slice(0, 300);
+  return {
+    error_code: Number.isFinite(errorCode) ? errorCode : 0,
+    description
+  };
+}
+
 export async function telegram(env, method, payload) {
   if (!isTelegramRecipientAllowed(env, payload)) {
     await logEvent(env, 'warn', 'staging_telegram_recipient_blocked', {

@@ -6,6 +6,7 @@ import { DatabaseSync } from 'node:sqlite';
 
 import { handleAdminApi } from '../src/admin-api.js';
 import worker from '../src/index.js';
+import { processScheduledWork } from '../src/router.js';
 import { createD1 } from './helpers/d1.js';
 
 const schema = readFileSync(
@@ -826,4 +827,92 @@ test('does not queue scheduled work when staging automation is disabled', async 
   );
 
   assert.equal(ctx.promises.length, 0);
+});
+
+test('runs scheduled work in accounting and delivery order when enabled', async () => {
+  const database = new DatabaseSync(':memory:');
+  database.exec(schema);
+  database.exec(`
+    INSERT INTO stores (
+      store_id, name, status, timezone, currency, created_at, updated_at
+    ) VALUES (
+      'PAY-STORE', 'Payroll Store', 'active', 'Asia/Tokyo', '¥',
+      '2026-07-01T00:00:00.000Z', '2026-07-01T00:00:00.000Z'
+    );
+    INSERT INTO store_members (
+      store_id, telegram_id, display_name, role, status,
+      commission_rate, cycle_start, joined_at,
+      absence_check_enabled, absence_check_enabled_at,
+      payroll_start_date, payroll_automation_started_at, updated_at
+    ) VALUES (
+      'PAY-STORE', 'EMP-1', 'Alice', 'employee', 'active',
+      0.6, '2026-06-30T15:00:00.000Z',
+      '2026-06-30T15:00:00.000Z',
+      1, '2026-06-30T15:00:00.000Z',
+      '2026-07-01', '2026-06-30T15:00:00.000Z',
+      '2026-07-01T00:00:00.000Z'
+    );
+    INSERT INTO payroll_entries (
+      entry_id, store_id, telegram_id, type, amount_micros, currency,
+      effective_at, source, source_id, created_by, created_at,
+      reverses_entry_id, metadata_json
+    ) VALUES (
+      'PAYDAY-INCOME', 'PAY-STORE', 'EMP-1', 'income',
+      10000000, '¥', '2026-07-15T03:00:00.000Z',
+      'test', 'PAYDAY-INCOME', 'ADMIN-1',
+      '2026-07-15T03:00:00.000Z', NULL, '{}'
+    );
+  `);
+  const reads = [];
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => ({
+    async json() {
+      return { ok: true };
+    }
+  });
+  try {
+    const env = {
+      DB: createD1(database, {
+        beforeAll(sql) {
+          reads.push(sql);
+        }
+      }),
+      ENVIRONMENT: 'production',
+      BOT_TOKEN: 'test-token',
+      ADMIN_IDS: ''
+    };
+    const result = await processScheduledWork(
+      env,
+      new Date('2026-07-16T04:00:00.000Z')
+    );
+    const absenceRead = reads.findIndex((sql) =>
+      /absence_fine_enabled_at/.test(sql)
+    );
+    const settlementRead = reads.findIndex((sql) =>
+      /LEFT JOIN payroll_payment_profiles/.test(sql)
+    );
+    const notificationRead = reads.findIndex((sql) =>
+      /FROM payroll_disbursements d/.test(sql)
+    );
+
+    assert.deepEqual(Object.keys(result), [
+      'absence',
+      'payroll',
+      'notifications',
+      'email'
+    ]);
+    assert.ok(absenceRead >= 0);
+    assert.ok(settlementRead > absenceRead);
+    assert.ok(notificationRead > settlementRead);
+    assert.equal(result.payroll.created, 1);
+    assert.equal(result.notifications.sent, 1);
+    assert.deepEqual(result.email, {
+      scanned: 0,
+      sent: 0,
+      failed: 0
+    });
+  } finally {
+    globalThis.fetch = originalFetch;
+    database.close();
+  }
 });

@@ -1983,7 +1983,14 @@ test('discovers each absence once while excluding an exempt employee and a not-y
 
 test('registers the absence scan as an hourly Worker Cron', () => {
   assert.match(routerSource, /async scheduled\(controller, env, ctx\)/);
-  assert.match(routerSource, /ctx\.waitUntil\(processAbsenceFines\(env, new Date\(controller\.scheduledTime\)\)\)/);
+  assert.match(
+    routerSource,
+    /ctx\.waitUntil\(processScheduledWork\(\s*env,\s*new Date\(controller\.scheduledTime\)\s*\)\)/
+  );
+  assert.match(
+    routerSource,
+    /const absenceResult = await processAbsenceFines\(env, now\)/
+  );
   assert.match(wrangler, /\[triggers\]\s+crons = \["10 \* \* \* \*"\]/);
 });
 

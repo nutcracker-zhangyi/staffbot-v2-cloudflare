@@ -9,6 +9,7 @@ import {
   processPayrollSettlements,
   settlePayrollCutoff
 } from '../src/payroll-settlement.js';
+import { deliverPayrollNotifications } from '../src/payroll-notifications.js';
 import { createD1 } from './helpers/d1.js';
 
 const schema = readFileSync(
@@ -573,6 +574,159 @@ test('concurrent cutoff attempts produce one snapshot, carry, and audit', async 
       1
     );
   } finally {
+    fixture.database.close();
+  }
+});
+
+test('retries a failed payday notice without changing the immutable payroll', async () => {
+  const fixture = settlementFixture();
+  const originalFetch = globalThis.fetch;
+  const payloads = [];
+  try {
+    fixture.env.ENVIRONMENT = 'production';
+    fixture.env.BOT_TOKEN = 'test-token';
+    insertEntry(fixture.database, {
+      entryId: 'NOTICE-POSITIVE',
+      effectiveAt: '2026-07-15T03:00:00.000Z',
+      amountMicros: 9_000_000
+    });
+    const member = (await eligiblePayrollMembers(fixture.env))[0];
+    const cutoff = payrollCutoff('2026-07-01', 16, 0, 'Asia/Tokyo');
+    const settled = await settlePayrollCutoff(
+      fixture.env,
+      member,
+      cutoff,
+      new Date('2026-07-16T03:00:00.000Z')
+    );
+    globalThis.fetch = async (_url, options) => {
+      payloads.push(JSON.parse(options.body));
+      return {
+        async json() {
+          return {
+            ok: false,
+            error_code: 500,
+            description: 'telegram unavailable'
+          };
+        }
+      };
+    };
+
+    const failed = await deliverPayrollNotifications(
+      fixture.env,
+      new Date('2026-07-16T04:00:00.000Z')
+    );
+    const unchanged = fixture.database.prepare(`
+      SELECT
+        amount_snapshot_micros,
+        period_start,
+        cutoff_at,
+        employee_notified_at,
+        employee_notification_error
+      FROM payroll_disbursements
+      WHERE payroll_id = ?
+    `).get(settled.payroll.payroll_id);
+
+    assert.deepEqual(failed, {
+      scanned: 1,
+      sent: 0,
+      failed: 1,
+      reminded: 0
+    });
+    assert.equal(unchanged.amount_snapshot_micros, 9_000_000);
+    assert.equal(unchanged.period_start, settled.payroll.period_start);
+    assert.equal(unchanged.cutoff_at, cutoff.cutoff_at);
+    assert.equal(unchanged.employee_notified_at, null);
+    assert.deepEqual(
+      JSON.parse(unchanged.employee_notification_error),
+      {
+        error_code: 500,
+        description: 'telegram unavailable'
+      }
+    );
+    assert.match(payloads[0].text, /今天是发薪日/);
+    assert.match(payloads[0].text, /¥9/);
+    assert.ok(
+      payloads[0].reply_markup.inline_keyboard[0][0].callback_data.length
+      <= 64
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+    fixture.database.close();
+  }
+});
+
+test('sends the first payday notice immediately and reminders every 24 hours', async () => {
+  const fixture = settlementFixture();
+  const originalFetch = globalThis.fetch;
+  let fetchCalls = 0;
+  try {
+    fixture.env.ENVIRONMENT = 'production';
+    fixture.env.BOT_TOKEN = 'test-token';
+    insertEntry(fixture.database, {
+      entryId: 'REMINDER-POSITIVE',
+      effectiveAt: '2026-07-15T03:00:00.000Z',
+      amountMicros: 7_000_000
+    });
+    const member = (await eligiblePayrollMembers(fixture.env))[0];
+    await settlePayrollCutoff(
+      fixture.env,
+      member,
+      payrollCutoff('2026-07-01', 16, 0, 'Asia/Tokyo'),
+      new Date('2026-07-16T03:00:00.000Z')
+    );
+    globalThis.fetch = async () => {
+      fetchCalls += 1;
+      return { async json() { return { ok: true }; } };
+    };
+
+    const initial = await deliverPayrollNotifications(
+      fixture.env,
+      new Date('2026-07-16T04:00:00.000Z')
+    );
+    const tooSoon = await deliverPayrollNotifications(
+      fixture.env,
+      new Date('2026-07-17T03:59:59.999Z')
+    );
+    const reminder = await deliverPayrollNotifications(
+      fixture.env,
+      new Date('2026-07-17T04:00:00.000Z')
+    );
+
+    assert.deepEqual(initial, {
+      scanned: 1,
+      sent: 1,
+      failed: 0,
+      reminded: 0
+    });
+    assert.deepEqual(tooSoon, {
+      scanned: 0,
+      sent: 0,
+      failed: 0,
+      reminded: 0
+    });
+    assert.deepEqual(reminder, {
+      scanned: 1,
+      sent: 1,
+      failed: 0,
+      reminded: 1
+    });
+    assert.equal(fetchCalls, 2);
+    assert.deepEqual(
+      {
+        ...fixture.database.prepare(`
+          SELECT employee_notified_at, employee_reminded_at,
+                 employee_notification_error
+          FROM payroll_disbursements
+        `).get()
+      },
+      {
+        employee_notified_at: '2026-07-16T04:00:00.000Z',
+        employee_reminded_at: '2026-07-17T04:00:00.000Z',
+        employee_notification_error: null
+      }
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
     fixture.database.close();
   }
 });
