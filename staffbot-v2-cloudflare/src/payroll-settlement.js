@@ -49,7 +49,7 @@ export async function eligiblePayrollMembers(env) {
     LEFT JOIN payroll_payment_profiles p
       ON p.store_id = m.store_id
      AND p.telegram_id = m.telegram_id
-    WHERE m.role = 'employee'
+    WHERE m.role IN ('employee', 'admin', 'owner')
       AND m.status = 'active'
       AND s.status = 'active'
       AND m.payroll_start_date IS NOT NULL

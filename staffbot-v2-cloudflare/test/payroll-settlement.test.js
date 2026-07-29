@@ -250,6 +250,29 @@ test('migration 021 preserves existing members without inventing payroll dates',
   }
 });
 
+test('includes an active store admin in their own automatic payroll', async () => {
+  const fixture = settlementFixture();
+  try {
+    fixture.database.exec(`
+      UPDATE store_members
+      SET role = 'admin'
+      WHERE store_id = 'STORE-1' AND telegram_id = 'EMP-1'
+    `);
+
+    const members = await eligiblePayrollMembers(fixture.env);
+
+    assert.deepEqual(
+      members.map((member) => ({
+        store_id: member.store_id,
+        telegram_id: member.telegram_id
+      })),
+      [{ store_id: 'STORE-1', telegram_id: 'EMP-1' }]
+    );
+  } finally {
+    fixture.database.close();
+  }
+});
+
 test('settles only ledger entries strictly before the fixed local-noon cutoff', async () => {
   const fixture = settlementFixture();
   try {
