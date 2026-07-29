@@ -1,0 +1,330 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import { DatabaseSync } from 'node:sqlite';
+
+import {
+  completePayrollProofs,
+  proofCompletion,
+  proofObjectKey,
+  readPayrollProof,
+  storeTelegramProof
+} from '../src/payroll-proofs.js';
+import { createD1 } from './helpers/d1.js';
+
+const schema = readFileSync(
+  new URL('../db/schema.sql', import.meta.url),
+  'utf8'
+);
+
+function proofFixture() {
+  const database = new DatabaseSync(':memory:');
+  database.exec(schema);
+  database.exec(`
+    INSERT INTO stores (
+      store_id, name, created_at, updated_at
+    ) VALUES (
+      'STORE-1', 'Store', '2026-07-01T00:00:00.000Z',
+      '2026-07-01T00:00:00.000Z'
+    );
+    INSERT INTO store_members (
+      store_id, telegram_id, display_name, role, status,
+      cycle_start, joined_at, updated_at
+    ) VALUES
+      (
+        'STORE-1', 'ADMIN-1', 'Admin', 'admin', 'active',
+        '2026-07-01T00:00:00.000Z',
+        '2026-07-01T00:00:00.000Z',
+        '2026-07-01T00:00:00.000Z'
+      ),
+      (
+        'STORE-1', 'EMP-1', 'Employee', 'employee', 'active',
+        '2026-07-01T00:00:00.000Z',
+        '2026-07-01T00:00:00.000Z',
+        '2026-07-01T00:00:00.000Z'
+      );
+    INSERT INTO payroll_disbursements (
+      payroll_id, store_id, telegram_id, payroll_start_date,
+      scheduled_date, cycle_day, period_start, cutoff_at,
+      amount_snapshot_micros, currency, status,
+      accepts_bank, accepts_usdt, accepts_cash,
+      bank_micros, usdt_micros, cash_micros,
+      created_at, updated_at
+    ) VALUES (
+      'PAYROLL-1', 'STORE-1', 'EMP-1', '2026-07-01',
+      '2026-07-16', 16,
+      '2026-07-01T00:00:00.000Z',
+      '2026-07-16T03:00:00.000Z',
+      100000000, '₫', 'awaiting_admin_payment',
+      1, 1, 0,
+      70000000, 30000000, 0,
+      '2026-07-16T03:00:00.000Z',
+      '2026-07-16T03:00:00.000Z'
+    );
+  `);
+  const objects = new Map();
+  const deleted = [];
+  const bucket = {
+    async head(key) {
+      return objects.has(key) ? { key } : null;
+    },
+    async put(key, value, options) {
+      if (objects.has(key)) return null;
+      objects.set(key, {
+        body: value,
+        options
+      });
+      return { key, size: value.byteLength };
+    },
+    async get(key) {
+      const saved = objects.get(key);
+      if (!saved) return null;
+      return {
+        body: saved.body,
+        httpEtag: '"etag"',
+        writeHttpMetadata(headers) {
+          headers.set(
+            'content-type',
+            saved.options.httpMetadata.contentType
+          );
+        }
+      };
+    },
+    async delete(key) {
+      deleted.push(key);
+      objects.delete(key);
+    }
+  };
+  return {
+    database,
+    objects,
+    deleted,
+    env: {
+      DB: createD1(database),
+      PAYROLL_PROOFS: bucket,
+      BOT_TOKEN: 'test-token',
+      ENVIRONMENT: 'production',
+      PAYROLL_PROOF_MAX_BYTES: '1024'
+    }
+  };
+}
+
+test('builds a private normalized proof object key', () => {
+  assert.equal(
+    proofObjectKey(
+      {
+        store_id: 'STORE-1',
+        payroll_id: 'PAYROLL-1'
+      },
+      'bank',
+      'PROOF-1',
+      'jpg'
+    ),
+    'payroll/STORE-1/PAYROLL-1/bank/PROOF-1.jpg'
+  );
+});
+
+test('downloads the largest Telegram photo and stores object before metadata', async () => {
+  const fixture = proofFixture();
+  const originalFetch = globalThis.fetch;
+  const calls = [];
+  globalThis.fetch = async (url, options) => {
+    calls.push({ url: String(url), options });
+    if (String(url).includes('/getFile')) {
+      return {
+        async json() {
+          return {
+            ok: true,
+            result: { file_path: 'photos/proof.jpg' }
+          };
+        }
+      };
+    }
+    return new Response(new Uint8Array([1, 2, 3, 4]), {
+      headers: {
+        'content-type': 'image/jpeg',
+        'content-length': '4'
+      }
+    });
+  };
+  try {
+    const proof = await storeTelegramProof(
+      fixture.env,
+      'ADMIN-1',
+      'PAYROLL-1',
+      'bank',
+      [
+        { file_id: 'SMALL', file_size: 2, width: 10, height: 10 },
+        { file_id: 'LARGE', file_size: 4, width: 20, height: 20 }
+      ],
+      new Date('2026-07-16T04:00:00.000Z')
+    );
+
+    assert.equal(proof.telegram_file_id, 'LARGE');
+    assert.equal(proof.mime_type, 'image/jpeg');
+    assert.equal(proof.size_bytes, 4);
+    assert.equal(fixture.objects.size, 1);
+    assert.equal(
+      fixture.objects.get(proof.object_key)
+        .options.httpMetadata.contentType,
+      'image/jpeg'
+    );
+    assert.equal(calls.length, 2);
+    assert.doesNotMatch(
+      JSON.stringify(
+        fixture.database.prepare(`
+          SELECT * FROM bot_logs
+        `).all()
+      ),
+      /test-token/
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+    fixture.database.close();
+  }
+});
+
+test('reports missing active proofs for every non-zero split method', async () => {
+  const fixture = proofFixture();
+  try {
+    assert.deepEqual(
+      await proofCompletion(fixture.env, 'PAYROLL-1'),
+      {
+        complete: false,
+        missing_methods: ['bank', 'usdt']
+      }
+    );
+    fixture.database.exec(`
+      INSERT INTO payroll_payment_proofs (
+        proof_id, payroll_id, method, object_key, telegram_file_id,
+        mime_type, size_bytes, sort_order, uploaded_by, uploaded_at
+      ) VALUES
+        ('P1', 'PAYROLL-1', 'bank', 'p1', 'T1',
+         'image/jpeg', 1, 1, 'ADMIN-1', '2026-07-16T04:00:00.000Z'),
+        ('P2', 'PAYROLL-1', 'usdt', 'p2', 'T2',
+         'image/jpeg', 1, 1, 'ADMIN-1', '2026-07-16T04:00:00.000Z');
+    `);
+    assert.deepEqual(
+      await proofCompletion(fixture.env, 'PAYROLL-1'),
+      {
+        complete: true,
+        missing_methods: []
+      }
+    );
+    const completed = await completePayrollProofs(
+      fixture.env,
+      'ADMIN-1',
+      'PAYROLL-1',
+      new Date('2026-07-16T05:00:00.000Z')
+    );
+    assert.equal(
+      completed.status,
+      'awaiting_employee_confirmation'
+    );
+  } finally {
+    fixture.database.close();
+  }
+});
+
+test('deletes only the new R2 object when proof metadata insertion fails', async () => {
+  const fixture = proofFixture();
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (url) => {
+    if (String(url).includes('/getFile')) {
+      return {
+        async json() {
+          return {
+            ok: true,
+            result: { file_path: 'photos/proof.png' }
+          };
+        }
+      };
+    }
+    return new Response(new Uint8Array([1, 2, 3]), {
+      headers: { 'content-type': 'image/png' }
+    });
+  };
+  const baseDb = fixture.env.DB;
+  fixture.env.DB = {
+    ...baseDb,
+    prepare(sql) {
+      const statement = baseDb.prepare(sql);
+      if (!/INSERT INTO payroll_payment_proofs/.test(sql)) {
+        return statement;
+      }
+      return {
+        bind() {
+          return {
+            async run() {
+              throw new Error('metadata insert failed');
+            }
+          };
+        }
+      };
+    }
+  };
+  try {
+    await assert.rejects(
+      storeTelegramProof(
+        fixture.env,
+        'ADMIN-1',
+        'PAYROLL-1',
+        'bank',
+        [{ file_id: 'PHOTO', file_size: 3 }],
+        new Date('2026-07-16T04:00:00.000Z')
+      ),
+      /metadata insert failed/
+    );
+    assert.equal(fixture.deleted.length, 1);
+    assert.equal(fixture.objects.size, 0);
+  } finally {
+    globalThis.fetch = originalFetch;
+    fixture.database.close();
+  }
+});
+
+test('serves a private proof only to its employee or store admin', async () => {
+  const fixture = proofFixture();
+  try {
+    fixture.objects.set('private-proof', {
+      body: new Uint8Array([1, 2]),
+      options: { httpMetadata: { contentType: 'image/png' } }
+    });
+    fixture.database.exec(`
+      INSERT INTO payroll_payment_proofs (
+        proof_id, payroll_id, method, object_key, telegram_file_id,
+        mime_type, size_bytes, sort_order, uploaded_by, uploaded_at
+      ) VALUES (
+        'PROOF-READ', 'PAYROLL-1', 'bank', 'private-proof',
+        'TG', 'image/png', 2, 1, 'ADMIN-1',
+        '2026-07-16T04:00:00.000Z'
+      );
+    `);
+
+    const employeeResponse = await readPayrollProof(
+      fixture.env,
+      { telegram_id: 'EMP-1' },
+      'PROOF-READ'
+    );
+    const adminResponse = await readPayrollProof(
+      fixture.env,
+      { telegram_id: 'ADMIN-1' },
+      'PROOF-READ'
+    );
+    const denied = await readPayrollProof(
+      fixture.env,
+      { telegram_id: 'OTHER' },
+      'PROOF-READ'
+    );
+
+    assert.equal(employeeResponse.status, 200);
+    assert.equal(adminResponse.status, 200);
+    assert.equal(denied.status, 403);
+    assert.equal(
+      employeeResponse.headers.get('cache-control'),
+      'private, no-store'
+    );
+  } finally {
+    fixture.database.close();
+  }
+});

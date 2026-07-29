@@ -199,3 +199,62 @@ test('admin document provides a first work date editor', async () => {
   assert.match(document, /payroll_start_date/);
   assert.match(document, /payroll_automation_started_at/);
 });
+
+test('authorized admin reads a payroll proof with private cache headers', async () => {
+  const fixture = adminFixture();
+  try {
+    fixture.database.exec(`
+      INSERT INTO payroll_disbursements (
+        payroll_id, store_id, telegram_id, payroll_start_date,
+        scheduled_date, cycle_day, period_start, cutoff_at,
+        amount_snapshot_micros, currency, status,
+        created_at, updated_at
+      ) VALUES (
+        'PAYROLL-1', 'STORE-1', 'EMP-1', '2026-07-01',
+        '2026-07-16', 16,
+        '2026-07-01T00:00:00.000Z',
+        '2026-07-16T03:00:00.000Z',
+        1000000, '¥', 'awaiting_employee_confirmation',
+        '2026-07-16T03:00:00.000Z',
+        '2026-07-16T03:00:00.000Z'
+      );
+      INSERT INTO payroll_payment_proofs (
+        proof_id, payroll_id, method, object_key,
+        telegram_file_id, mime_type, size_bytes,
+        sort_order, uploaded_by, uploaded_at
+      ) VALUES (
+        'PROOF-1', 'PAYROLL-1', 'bank', 'proof-key',
+        'TG-FILE', 'image/jpeg', 2, 1,
+        'ADMIN-1', '2026-07-16T04:00:00.000Z'
+      );
+    `);
+    fixture.env.PAYROLL_PROOFS = {
+      async get(key) {
+        assert.equal(key, 'proof-key');
+        return {
+          body: new Uint8Array([1, 2]),
+          writeHttpMetadata(headers) {
+            headers.set('content-type', 'image/jpeg');
+          }
+        };
+      }
+    };
+    const response = await worker.fetch(new Request(
+      'https://example.com/api/admin/stores/STORE-1/payroll/proofs/PROOF-1',
+      {
+        headers: {
+          cookie: 'staffbot_admin_session=session-1'
+        }
+      }
+    ), fixture.env, { waitUntil() {} });
+
+    assert.equal(response.status, 200);
+    assert.equal(
+      response.headers.get('cache-control'),
+      'private, no-store'
+    );
+    assert.equal(response.headers.get('content-type'), 'image/jpeg');
+  } finally {
+    fixture.database.close();
+  }
+});

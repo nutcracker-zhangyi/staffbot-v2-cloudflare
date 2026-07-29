@@ -64,6 +64,7 @@ import {
   formatMoney,
   normalizeCommissionRate
 } from './money.js';
+import { readPayrollProof } from './payroll-proofs.js';
 import {
   adminIds,
   isGlobalAdmin,
@@ -195,6 +196,20 @@ export async function handleAdminApi(request, env, url, ctx) {
     if (parts.length === 4 && request.method === 'PATCH') return updateAdminStore(request, env, session.telegram_id, storeId);
     if (parts.length === 4 && request.method === 'DELETE') return deleteAdminStore(env, session.telegram_id, storeId);
     if (parts[4] === 'members') return handleAdminMembers(request, env, url, storeId, parts, session.telegram_id);
+    if (parts[4] === 'payroll'
+      && parts[5] === 'proofs'
+      && parts[6]
+      && parts.length === 7
+      && request.method === 'GET') {
+      return readPayrollProof(
+        env,
+        {
+          telegram_id: session.telegram_id,
+          store_id: storeId
+        },
+        parts[6]
+      );
+    }
     if (parts[4] === 'income') return handleAdminIncome(request, env, url, storeId, parts, session.telegram_id);
     if (parts[4] === 'salary') return handleAdminSalary(request, env, url, storeId, parts, session.telegram_id);
     if (parts[4] === 'advances') return handleAdminSalaryAdvances(request, env, url, storeId, parts, session.telegram_id);

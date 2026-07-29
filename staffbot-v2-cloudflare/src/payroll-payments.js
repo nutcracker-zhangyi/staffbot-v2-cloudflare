@@ -1,4 +1,5 @@
 import { t } from './i18n.js';
+import { isStoreAdmin } from './stores.js';
 
 function paymentBoolean(value, field) {
   if (value === true || value === 1) return 1;
@@ -203,4 +204,107 @@ export function paymentMethodKeyboard(payrollId, profile, language) {
       }]
     ]
   };
+}
+
+export function validatePaymentSplit(payroll, input) {
+  const split = {
+    bank_micros: input && input.bank_micros,
+    usdt_micros: input && input.usdt_micros,
+    cash_micros: input && input.cash_micros
+  };
+  for (const [field, value] of Object.entries(split)) {
+    if (!Number.isSafeInteger(value) || value < 0) {
+      throw new RangeError(`${field} must be a non-negative safe integer`);
+    }
+  }
+  const total = split.bank_micros
+    + split.usdt_micros
+    + split.cash_micros;
+  if (!Number.isSafeInteger(total)
+    || total !== Number(payroll.amount_snapshot_micros)) {
+    throw new RangeError('payment split must equal payroll snapshot');
+  }
+  for (const method of ['bank', 'usdt', 'cash']) {
+    if (split[`${method}_micros`] > 0
+      && Number(payroll[`accepts_${method}`]) !== 1) {
+      throw new RangeError(`${method} payment method was not accepted`);
+    }
+  }
+  return split;
+}
+
+export async function savePaymentSplit(
+  env,
+  adminId,
+  payrollId,
+  input,
+  now = new Date()
+) {
+  const payroll = await env.DB.prepare(`
+    SELECT * FROM payroll_disbursements
+    WHERE payroll_id = ?
+  `).bind(payrollId).first();
+  if (!payroll) throw new Error('payroll not found');
+  if (!(await isStoreAdmin(env, adminId, payroll.store_id))) {
+    throw new Error('payroll admin permission denied');
+  }
+  if (![
+    'awaiting_admin_payment',
+    'disputed'
+  ].includes(payroll.status)) {
+    throw new Error('payroll is not accepting a payment split');
+  }
+  const split = validatePaymentSplit(payroll, input);
+  const nowIso = now.toISOString();
+  const statements = [];
+  if (payroll.status === 'disputed') {
+    statements.push(env.DB.prepare(`
+      UPDATE payroll_payment_proofs
+      SET superseded_at = ?
+      WHERE payroll_id = ?
+        AND superseded_at IS NULL
+    `).bind(nowIso, payroll.payroll_id));
+  }
+  statements.push(
+    env.DB.prepare(`
+      UPDATE payroll_disbursements
+      SET bank_micros = ?,
+          usdt_micros = ?,
+          cash_micros = ?,
+          current_admin_id = ?,
+          status = 'awaiting_admin_payment',
+          updated_at = ?
+      WHERE payroll_id = ?
+        AND status = ?
+    `).bind(
+      split.bank_micros,
+      split.usdt_micros,
+      split.cash_micros,
+      String(adminId),
+      nowIso,
+      payroll.payroll_id,
+      payroll.status
+    ),
+    env.DB.prepare(`
+      INSERT INTO admin_audit_logs (
+        store_id, admin_id, action, target_id,
+        details_json, created_at
+      ) VALUES (?, ?, 'save_payroll_payment_split', ?, ?, ?)
+    `).bind(
+      payroll.store_id,
+      String(adminId),
+      payroll.payroll_id,
+      JSON.stringify(split),
+      nowIso
+    )
+  );
+  const results = await env.DB.batch(statements);
+  const updateResult = results[payroll.status === 'disputed' ? 1 : 0];
+  if (Number(updateResult && updateResult.meta.changes) !== 1) {
+    throw new Error('payroll payment split conflict');
+  }
+  return env.DB.prepare(`
+    SELECT * FROM payroll_disbursements
+    WHERE payroll_id = ?
+  `).bind(payroll.payroll_id).first();
 }

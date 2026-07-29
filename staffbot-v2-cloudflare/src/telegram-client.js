@@ -41,6 +41,24 @@ export function telegramErrorSummary(result, error = null) {
   };
 }
 
+export async function getTelegramFile(env, fileId) {
+  const result = await telegram(env, 'getFile', { file_id: fileId });
+  if (!result || !result.ok || !result.result || !result.result.file_path) {
+    throw new Error('telegram_file_lookup_failed');
+  }
+  return result.result;
+}
+
+export async function downloadTelegramFile(env, filePath) {
+  const path = String(filePath || '');
+  if (!path || path.includes('..') || path.startsWith('/')) {
+    throw new Error('invalid_telegram_file_path');
+  }
+  return fetch(
+    `https://api.telegram.org/file/bot${env.BOT_TOKEN}/${path}`
+  );
+}
+
 export async function telegram(env, method, payload) {
   if (!isTelegramRecipientAllowed(env, payload)) {
     await logEvent(env, 'warn', 'staging_telegram_recipient_blocked', {

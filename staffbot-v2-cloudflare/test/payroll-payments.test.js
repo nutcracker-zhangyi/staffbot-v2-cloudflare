@@ -7,6 +7,8 @@ import {
   maskPaymentValue,
   paymentMethodKeyboard,
   savePaymentProfile,
+  savePaymentSplit,
+  validatePaymentSplit,
   validatePaymentProfile
 } from '../src/payroll-payments.js';
 import { createD1 } from './helpers/d1.js';
@@ -380,4 +382,108 @@ test('builds button-only payment method selection callbacks', () => {
   assert.match(buttons[1].text, /☐.*USDT/);
   assert.match(buttons[2].text, /☑.*现金/);
   assert.ok(buttons.every((button) => button.callback_data.length <= 64));
+});
+
+test('validates exact safe-integer payment splits', () => {
+  const payrollRow = {
+    amount_snapshot_micros: 100_000_000,
+    accepts_bank: 1,
+    accepts_usdt: 1,
+    accepts_cash: 1
+  };
+  assert.deepEqual(
+    validatePaymentSplit(payrollRow, {
+      bank_micros: 50_000_000,
+      usdt_micros: 30_000_000,
+      cash_micros: 20_000_000
+    }),
+    {
+      bank_micros: 50_000_000,
+      usdt_micros: 30_000_000,
+      cash_micros: 20_000_000
+    }
+  );
+  for (const input of [
+    { bank_micros: 50.5, usdt_micros: 30, cash_micros: 19.5 },
+    { bank_micros: -1, usdt_micros: 0, cash_micros: 100_000_001 },
+    { bank_micros: Number.MAX_SAFE_INTEGER + 1, usdt_micros: 0, cash_micros: 0 },
+    { bank_micros: 50_000_000, usdt_micros: 30_000_000, cash_micros: 10_000_000 }
+  ]) {
+    assert.throws(
+      () => validatePaymentSplit(payrollRow, input)
+    );
+  }
+  assert.throws(() => validatePaymentSplit(
+    { ...payrollRow, accepts_usdt: 0 },
+    {
+      bank_micros: 50_000_000,
+      usdt_micros: 30_000_000,
+      cash_micros: 20_000_000
+    }
+  ), /not accepted/);
+});
+
+test('authorized admin saves a split and supersedes disputed proofs', async () => {
+  const database = databaseFixture();
+  try {
+    database.exec(`
+      INSERT INTO stores (
+        store_id, name, created_at, updated_at
+      ) VALUES (
+        'STORE-1', 'Store', '2026-07-01T00:00:00.000Z',
+        '2026-07-01T00:00:00.000Z'
+      );
+      INSERT INTO store_members (
+        store_id, telegram_id, display_name, role, status,
+        cycle_start, joined_at, updated_at
+      ) VALUES (
+        'STORE-1', 'ADMIN-1', 'Admin', 'admin', 'active',
+        '2026-07-01T00:00:00.000Z',
+        '2026-07-01T00:00:00.000Z',
+        '2026-07-01T00:00:00.000Z'
+      );
+    `);
+    insertPayroll(database, payroll({
+      status: 'disputed'
+    }));
+    database.exec(`
+      UPDATE payroll_disbursements
+      SET accepts_bank = 1, accepts_cash = 1
+      WHERE payroll_id = 'PAYROLL-1';
+      INSERT INTO payroll_payment_proofs (
+        proof_id, payroll_id, method, object_key, telegram_file_id,
+        mime_type, size_bytes, sort_order, uploaded_by, uploaded_at
+      ) VALUES (
+        'OLD-PROOF', 'PAYROLL-1', 'bank',
+        'payroll/old.jpg', 'TG-OLD', 'image/jpeg',
+        10, 1, 'ADMIN-1', '2026-07-16T04:00:00.000Z'
+      );
+    `);
+
+    const saved = await savePaymentSplit(
+      { DB: createD1(database) },
+      'ADMIN-1',
+      'PAYROLL-1',
+      {
+        bank_micros: 70_000_000,
+        usdt_micros: 0,
+        cash_micros: 30_000_000
+      },
+      new Date('2026-07-16T05:00:00.000Z')
+    );
+
+    assert.equal(saved.status, 'awaiting_admin_payment');
+    assert.equal(saved.current_admin_id, 'ADMIN-1');
+    assert.equal(saved.bank_micros, 70_000_000);
+    assert.equal(saved.cash_micros, 30_000_000);
+    assert.equal(
+      database.prepare(`
+        SELECT superseded_at FROM payroll_payment_proofs
+        WHERE proof_id = 'OLD-PROOF'
+      `).get().superseded_at,
+      '2026-07-16T05:00:00.000Z'
+    );
+  } finally {
+    database.close();
+  }
 });
