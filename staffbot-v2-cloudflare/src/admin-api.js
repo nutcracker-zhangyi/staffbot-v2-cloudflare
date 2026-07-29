@@ -64,6 +64,10 @@ import {
   formatMoney,
   normalizeCommissionRate
 } from './money.js';
+import {
+  maskPaymentValue,
+  savePaymentSplit
+} from './payroll-payments.js';
 import { readPayrollProof } from './payroll-proofs.js';
 import {
   adminIds,
@@ -210,6 +214,16 @@ export async function handleAdminApi(request, env, url, ctx) {
         parts[6]
       );
     }
+    if (parts[4] === 'payroll') {
+      return handleAdminPayroll(
+        request,
+        env,
+        url,
+        storeId,
+        parts,
+        session.telegram_id
+      );
+    }
     if (parts[4] === 'income') return handleAdminIncome(request, env, url, storeId, parts, session.telegram_id);
     if (parts[4] === 'salary') return handleAdminSalary(request, env, url, storeId, parts, session.telegram_id);
     if (parts[4] === 'advances') return handleAdminSalaryAdvances(request, env, url, storeId, parts, session.telegram_id);
@@ -247,6 +261,157 @@ export async function handleAdminApi(request, env, url, ctx) {
     await logError(env, 'admin_api_error', error, { path: url.pathname });
     return json({ ok: false, error: 'server_error' }, 500);
   }
+}
+
+async function handleAdminPayroll(
+  request,
+  env,
+  url,
+  storeId,
+  parts,
+  adminId
+) {
+  if (parts.length === 5 && request.method === 'GET') {
+    const count = await env.DB.prepare(`
+      SELECT COUNT(*) AS total
+      FROM payroll_disbursements
+      WHERE store_id = ?
+    `).bind(storeId).first();
+    const pagination = adminPage(
+      url.searchParams.get('page'),
+      count && count.total
+    );
+    const rows = await env.DB.prepare(`
+      SELECT
+        d.payroll_id,
+        d.telegram_id,
+        COALESCE(NULLIF(m.display_name, ''), d.telegram_id) AS employee,
+        d.scheduled_date,
+        d.period_start,
+        d.cutoff_at,
+        d.amount_snapshot_micros,
+        d.currency,
+        d.bank_micros,
+        d.usdt_micros,
+        d.cash_micros,
+        d.status,
+        d.current_admin_id,
+        d.confirmed_at,
+        d.bank_details_snapshot,
+        d.usdt_details_snapshot,
+        COALESCE(p.proof_count, 0) AS proof_count,
+        COALESCE(e.status, '') AS email_status
+      FROM payroll_disbursements d
+      LEFT JOIN store_members m
+        ON m.store_id = d.store_id
+       AND m.telegram_id = d.telegram_id
+      LEFT JOIN (
+        SELECT payroll_id, COUNT(*) AS proof_count
+        FROM payroll_payment_proofs
+        WHERE superseded_at IS NULL
+        GROUP BY payroll_id
+      ) p ON p.payroll_id = d.payroll_id
+      LEFT JOIN payroll_email_outbox e
+        ON e.payroll_id = d.payroll_id
+      WHERE d.store_id = ?
+      ORDER BY d.cutoff_at DESC, d.payroll_id DESC
+      LIMIT ? OFFSET ?
+    `).bind(
+      storeId,
+      pagination.limit,
+      pagination.offset
+    ).all();
+    return json({
+      ok: true,
+      payroll: (rows.results || []).map((row) => ({
+        ...row,
+        bank_details_snapshot: maskPaymentValue(
+          row.bank_details_snapshot
+        ),
+        usdt_details_snapshot: maskPaymentValue(
+          row.usdt_details_snapshot
+        )
+      })),
+      pagination
+    });
+  }
+
+  const payrollId = decodeURIComponent(parts[5] || '');
+  if (!payrollId) return json({ ok: false, error: 'not_found' }, 404);
+  if (parts.length === 6 && request.method === 'GET') {
+    const payroll = await env.DB.prepare(`
+      SELECT
+        d.*,
+        COALESCE(NULLIF(m.display_name, ''), d.telegram_id) AS employee,
+        COALESCE(e.status, '') AS email_status,
+        COALESCE(e.attempt_count, 0) AS email_attempt_count,
+        e.last_error AS email_last_error
+      FROM payroll_disbursements d
+      LEFT JOIN store_members m
+        ON m.store_id = d.store_id
+       AND m.telegram_id = d.telegram_id
+      LEFT JOIN payroll_email_outbox e
+        ON e.payroll_id = d.payroll_id
+      WHERE d.store_id = ? AND d.payroll_id = ?
+    `).bind(storeId, payrollId).first();
+    if (!payroll) return json({ ok: false, error: 'not_found' }, 404);
+    const proofs = await env.DB.prepare(`
+      SELECT
+        proof_id, method, mime_type, size_bytes,
+        sort_order, uploaded_by, superseded_at, uploaded_at
+      FROM payroll_payment_proofs
+      WHERE payroll_id = ?
+      ORDER BY method, sort_order
+    `).bind(payrollId).all();
+    return json({
+      ok: true,
+      payroll: {
+        ...payroll,
+        bank_details_snapshot: maskPaymentValue(
+          payroll.bank_details_snapshot
+        ),
+        usdt_details_snapshot: maskPaymentValue(
+          payroll.usdt_details_snapshot
+        )
+      },
+      proofs: proofs.results || []
+    });
+  }
+  if (parts.length === 7
+    && parts[6] === 'split'
+    && request.method === 'POST') {
+    const scopedPayroll = await env.DB.prepare(`
+      SELECT 1 FROM payroll_disbursements
+      WHERE store_id = ? AND payroll_id = ?
+    `).bind(storeId, payrollId).first();
+    if (!scopedPayroll) {
+      return json({ ok: false, error: 'not_found' }, 404);
+    }
+    const body = await readJson(request);
+    try {
+      const payroll = await savePaymentSplit(
+        env,
+        adminId,
+        payrollId,
+        {
+          bank_micros: body.bank_micros,
+          usdt_micros: body.usdt_micros,
+          cash_micros: body.cash_micros
+        }
+      );
+      return json({ ok: true, payroll });
+    } catch (error) {
+      const message = String(error && error.message || '');
+      if (message.includes('not found')) {
+        return json({ ok: false, error: 'not_found' }, 404);
+      }
+      if (message.includes('permission')) {
+        return json({ ok: false, error: 'forbidden' }, 403);
+      }
+      return json({ ok: false, error: 'invalid_payroll_split' }, 409);
+    }
+  }
+  return json({ ok: false, error: 'not_found' }, 404);
 }
 
 async function handleAdminDashboard(

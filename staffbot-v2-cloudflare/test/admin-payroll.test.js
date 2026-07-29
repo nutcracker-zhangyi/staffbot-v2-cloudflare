@@ -198,6 +198,12 @@ test('admin document provides a first work date editor', async () => {
   assert.match(document, /id="memberPayrollStartDate"/);
   assert.match(document, /payroll_start_date/);
   assert.match(document, /payroll_automation_started_at/);
+  assert.match(document, /automatic_payroll/);
+  assert.match(document, /legacy_salary_requests/);
+  assert.match(document, /legacy_salary_records/);
+  assert.match(document, /\/payroll\?page=/);
+  assert.match(document, /data-payroll-detail/);
+  assert.match(document, /savePayrollSplit/);
 });
 
 test('authorized admin reads a payroll proof with private cache headers', async () => {
@@ -254,6 +260,178 @@ test('authorized admin reads a payroll proof with private cache headers', async 
       'private, no-store'
     );
     assert.equal(response.headers.get('content-type'), 'image/jpeg');
+  } finally {
+    fixture.database.close();
+  }
+});
+
+test('admin payroll list returns fixed micros, proof count, and masked accounts', async () => {
+  const fixture = adminFixture();
+  try {
+    fixture.database.exec(`
+      INSERT INTO payroll_disbursements (
+        payroll_id, store_id, telegram_id, payroll_start_date,
+        scheduled_date, cycle_day, period_start, cutoff_at,
+        amount_snapshot_micros, currency, status,
+        accepts_bank, bank_details_snapshot,
+        bank_micros, current_admin_id, created_at, updated_at
+      ) VALUES (
+        'PAYROLL-LIST', 'STORE-1', 'EMP-1', '2026-07-01',
+        '2026-07-16', 16,
+        '2026-07-01T00:00:00.000Z',
+        '2026-07-16T03:00:00.000Z',
+        100000000, '¥', 'awaiting_employee_confirmation',
+        1, 'Bank account 12345678',
+        100000000, 'ADMIN-1',
+        '2026-07-16T03:00:00.000Z',
+        '2026-07-16T04:00:00.000Z'
+      );
+      INSERT INTO payroll_payment_proofs (
+        proof_id, payroll_id, method, object_key,
+        telegram_file_id, mime_type, size_bytes,
+        sort_order, uploaded_by, uploaded_at
+      ) VALUES (
+        'PROOF-LIST', 'PAYROLL-LIST', 'bank', 'private-key',
+        'TG-FILE-SECRET', 'image/jpeg', 2, 1,
+        'ADMIN-1', '2026-07-16T04:00:00.000Z'
+      );
+    `);
+    const response = await worker.fetch(new Request(
+      'https://example.com/api/admin/stores/STORE-1/payroll',
+      {
+        headers: {
+          cookie: 'staffbot_admin_session=session-1'
+        }
+      }
+    ), fixture.env, { waitUntil() {} });
+    const result = await response.json();
+
+    assert.equal(response.status, 200);
+    assert.equal(result.payroll.length, 1);
+    assert.deepEqual(
+      {
+        employee: result.payroll[0].employee,
+        amount_snapshot_micros:
+          result.payroll[0].amount_snapshot_micros,
+        bank_micros: result.payroll[0].bank_micros,
+        proof_count: result.payroll[0].proof_count,
+        email_status: result.payroll[0].email_status,
+        bank_details_snapshot:
+          result.payroll[0].bank_details_snapshot
+      },
+      {
+        employee: 'Alice',
+        amount_snapshot_micros: 100000000,
+        bank_micros: 100000000,
+        proof_count: 1,
+        email_status: '',
+        bank_details_snapshot: '••••5678'
+      }
+    );
+    assert.equal(result.pagination.total, 1);
+  } finally {
+    fixture.database.close();
+  }
+});
+
+test('admin payroll detail is store scoped and exposes no storage location', async () => {
+  const fixture = adminFixture();
+  try {
+    fixture.database.exec(`
+      INSERT INTO stores (
+        store_id, name, created_at, updated_at
+      ) VALUES (
+        'STORE-2', 'Other Store',
+        '2026-07-01T00:00:00.000Z',
+        '2026-07-01T00:00:00.000Z'
+      );
+      INSERT INTO payroll_disbursements (
+        payroll_id, store_id, telegram_id, payroll_start_date,
+        scheduled_date, cycle_day, period_start, cutoff_at,
+        amount_snapshot_micros, currency, status,
+        created_at, updated_at
+      ) VALUES (
+        'PAYROLL-OTHER', 'STORE-2', 'EMP-1', '2026-07-01',
+        '2026-07-16', 16,
+        '2026-07-01T00:00:00.000Z',
+        '2026-07-16T03:00:00.000Z',
+        1000000, '¥', 'awaiting_admin_payment',
+        '2026-07-16T03:00:00.000Z',
+        '2026-07-16T03:00:00.000Z'
+      );
+    `);
+
+    const response = await worker.fetch(new Request(
+      'https://example.com/api/admin/stores/STORE-1/payroll/PAYROLL-OTHER',
+      {
+        headers: {
+          cookie: 'staffbot_admin_session=session-1'
+        }
+      }
+    ), fixture.env, { waitUntil() {} });
+
+    assert.equal(response.status, 404);
+    const splitResponse = await worker.fetch(new Request(
+      'https://example.com/api/admin/stores/STORE-1/payroll/PAYROLL-OTHER/split',
+      {
+        method: 'POST',
+        headers: {
+          cookie: 'staffbot_admin_session=session-1',
+          'content-type': 'application/json'
+        },
+        body: JSON.stringify({
+          bank_micros: 1000000,
+          usdt_micros: 0,
+          cash_micros: 0
+        })
+      }
+    ), fixture.env, { waitUntil() {} });
+    assert.equal(splitResponse.status, 404);
+  } finally {
+    fixture.database.close();
+  }
+});
+
+test('admin payroll split endpoint validates the authoritative micros total', async () => {
+  const fixture = adminFixture();
+  try {
+    fixture.database.exec(`
+      INSERT INTO payroll_disbursements (
+        payroll_id, store_id, telegram_id, payroll_start_date,
+        scheduled_date, cycle_day, period_start, cutoff_at,
+        amount_snapshot_micros, currency, status,
+        accepts_bank, accepts_cash, created_at, updated_at
+      ) VALUES (
+        'PAYROLL-SPLIT', 'STORE-1', 'EMP-1', '2026-07-01',
+        '2026-07-16', 16,
+        '2026-07-01T00:00:00.000Z',
+        '2026-07-16T03:00:00.000Z',
+        100000000, '¥', 'awaiting_admin_payment',
+        1, 1,
+        '2026-07-16T03:00:00.000Z',
+        '2026-07-16T03:00:00.000Z'
+      );
+    `);
+    const response = await worker.fetch(new Request(
+      'https://example.com/api/admin/stores/STORE-1/payroll/PAYROLL-SPLIT/split',
+      {
+        method: 'POST',
+        headers: {
+          cookie: 'staffbot_admin_session=session-1',
+          'content-type': 'application/json'
+        },
+        body: JSON.stringify({
+          bank_micros: 70000000,
+          usdt_micros: 0,
+          cash_micros: 30000000
+        })
+      }
+    ), fixture.env, { waitUntil() {} });
+    const result = await response.json();
+
+    assert.equal(response.status, 200);
+    assert.equal(result.payroll.bank_micros, 70000000);
+    assert.equal(result.payroll.cash_micros, 30000000);
   } finally {
     fixture.database.close();
   }

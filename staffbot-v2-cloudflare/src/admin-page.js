@@ -214,7 +214,7 @@ export function adminHtml(env) {
       stores: { stores_page: 1 },
       members: { members_page: 1 },
       income: { pending_page: 1, records_page: 1, rejected_page: 1 },
-      salary: { requests_page: 1, records_page: 1, rejected_page: 1 },
+      salary: { payroll_page: 1, requests_page: 1, records_page: 1, rejected_page: 1 },
       advances: { pending_page: 1, approved_page: 1, rejected_page: 1 },
       attendance: { pending_page: 1, approved_page: 1, rejected_page: 1 },
       absence: { absence_pending_page: 1, absence_history_page: 1 },
@@ -255,6 +255,7 @@ export function adminHtml(env) {
         business_date:'营业日期', type:'类型', timestamp:'时间', latitude:'纬度', longitude:'经度', late:'迟到', early_leave:'早退',
         level:'级别', event:'事件', message_text:'消息', payload_json:'数据', created_at:'创建时间', leave_date:'请假日期',
         pending_income:'待审批收入', income_records:'收入记录', rejected_income:'拒绝记录', salary_requests:'待审批工资', salary_records:'工资记录', rejected_salary:'拒绝记录', pending_advances:'待审批预支', approved_advances:'已批准预支', rejected_advances:'已拒绝预支', pending_leave:'待审批请假', approved_leave:'已批准请假', rejected_leave:'已拒绝请假', pending_attendance:'待审批签退', approved_attendance:'已批准考勤', rejected_attendance:'已驳回签退',
+        automatic_payroll:'自动工资', legacy_salary_requests:'旧工资申请（历史）', legacy_salary_records:'工资记录（历史）', payroll_detail:'自动工资详情', payment_proofs:'付款凭证', view_detail:'查看详情', view_proof:'查看凭证', save_split:'保存付款拆分', payroll_id:'工资 ID', scheduled_date:'发薪日期', cutoff_at:'截止时间', amount_snapshot_micros:'固定工资', bank_micros:'银行卡金额', usdt_micros:'USDT 金额', cash_micros:'现金金额', proof_count:'凭证数', email_status:'邮件状态', email_attempt_count:'邮件尝试次数', email_last_error:'邮件错误', current_admin_id:'当前管理员', method:'方式', sort_order:'序号', size_bytes:'文件大小', uploaded_by:'上传人', uploaded_at:'上传时间', superseded_at:'已替换时间',
         summary:'合计', work_days:'出勤天数', late_days:'迟到天数', absence_days:'缺勤天数', leave_days:'请假天数', attendance_fine_total:'考勤罚款合计', employee_attendance_summary:'员工考勤汇总', view_details:'查看明细', pending_total:'待审批合计', approved_total:'已批准合计', rejected_total:'已拒绝合计', pending_days:'待审批天数', approved_days:'已批准天数', rejected_days:'已拒绝天数', income_total:'收入合计', commission_income_total:'提成收入合计', fine_total:'罚款合计', net_total:'净额合计',
         btn_approve:'批准', btn_approve_fine:'批准并罚款', btn_approve_no_fine:'批准不罚款', btn_reject:'驳回',
         pending_absence:'待审批缺勤', absence_history:'审批历史', pending_absence_total:'待审批', approved_absence_total:'已批准', rejected_absence_total:'已拒绝', cancelled_absence_total:'已取消', approved_absence_fine_total:'已批准罚款总额', notification_status:'通知状态', notification_delivery:'通知送达', notification_sent:'已发送', notification_not_queued:'未入队', notification_retrying:'待重试', notification_recipients:'{count} 位管理员', notification_attempts:'最多尝试 {count} 次', notification_sent_total:'已发送 {sent}/{total}', btn_approve_absence_fine:'批准罚款', confirm_approve_absence_fine:'确定批准这笔缺勤罚款吗？', rejection_reason_required:'必须填写拒绝原因', absence_already_processed:'这条缺勤请求已被处理，请刷新后查看。', absence_action_failed:'操作失败，请稍后重试。', all_statuses:'全部状态', status_pending:'待审批', status_approved:'已批准', status_rejected:'已拒绝', status_cancelled:'已取消', decision_reason:'决定原因', income_record_id:'罚款记录 ID', actual_fine:'实际罚款',
@@ -280,6 +281,7 @@ export function adminHtml(env) {
         business_date:'Business date', type:'Type', timestamp:'Time', latitude:'Latitude', longitude:'Longitude', late:'Late', early_leave:'Early leave',
         level:'Level', event:'Event', message_text:'Message', payload_json:'Payload', created_at:'Created at', leave_date:'Leave date',
         pending_income:'Pending income', income_records:'Income records', rejected_income:'Rejected records', salary_requests:'Pending salary', salary_records:'Salary records', rejected_salary:'Rejected records', pending_advances:'Pending advances', approved_advances:'Approved advances', rejected_advances:'Rejected advances', pending_leave:'Pending leave', approved_leave:'Approved leave', rejected_leave:'Rejected leave', pending_attendance:'Pending checkout', approved_attendance:'Approved attendance', rejected_attendance:'Rejected checkout',
+        automatic_payroll:'Automatic payroll', legacy_salary_requests:'Legacy salary requests (history)', legacy_salary_records:'Salary records (history)', payroll_detail:'Automatic payroll detail', payment_proofs:'Payment proofs', view_detail:'View detail', view_proof:'View proof', save_split:'Save payment split', payroll_id:'Payroll ID', scheduled_date:'Pay date', cutoff_at:'Cutoff', amount_snapshot_micros:'Fixed payroll', bank_micros:'Bank amount', usdt_micros:'USDT amount', cash_micros:'Cash amount', proof_count:'Proofs', email_status:'Email status', email_attempt_count:'Email attempts', email_last_error:'Email error', current_admin_id:'Current admin', method:'Method', sort_order:'Order', size_bytes:'File size', uploaded_by:'Uploaded by', uploaded_at:'Uploaded at', superseded_at:'Superseded at',
         summary:'Summary', work_days:'Work days', late_days:'Late days', absence_days:'Absence days', leave_days:'Leave days', attendance_fine_total:'Attendance fines', employee_attendance_summary:'Employee attendance summary', view_details:'View details', pending_total:'Pending total', approved_total:'Approved total', rejected_total:'Rejected total', pending_days:'Pending days', approved_days:'Approved days', rejected_days:'Rejected days', income_total:'Income total', commission_income_total:'Commission income total', fine_total:'Fine total', net_total:'Net total',
         btn_approve:'Approve', btn_approve_fine:'Approve with fine', btn_approve_no_fine:'Approve no fine', btn_reject:'Reject',
         pending_absence:'Pending absences', absence_history:'Approval history', pending_absence_total:'Pending', approved_absence_total:'Approved', rejected_absence_total:'Rejected', cancelled_absence_total:'Cancelled', approved_absence_fine_total:'Approved fine total', notification_status:'Notification status', notification_delivery:'Notification delivery', notification_sent:'Sent', notification_not_queued:'Not queued', notification_retrying:'Retry pending', notification_recipients:'{count} admins', notification_attempts:'Up to {count} attempts', notification_sent_total:'{sent}/{total} sent', btn_approve_absence_fine:'Approve fine', confirm_approve_absence_fine:'Approve this absence fine?', rejection_reason_required:'Rejection reason is required', absence_already_processed:'This absence request was already processed. Refresh to see the latest state.', absence_action_failed:'The action failed. Please try again.', all_statuses:'All statuses', status_pending:'Pending', status_approved:'Approved', status_rejected:'Rejected', status_cancelled:'Cancelled', decision_reason:'Decision reason', income_record_id:'Fine record ID', actual_fine:'Actual fine',
@@ -305,6 +307,7 @@ export function adminHtml(env) {
         business_date:'Ngày kinh doanh', type:'Loại', timestamp:'Thời gian', latitude:'Vĩ độ', longitude:'Kinh độ', late:'Đi muộn', early_leave:'Về sớm',
         level:'Mức', event:'Sự kiện', message_text:'Tin nhắn', payload_json:'Dữ liệu', created_at:'Tạo lúc',
         pending_income:'Thu nhập chờ duyệt', income_records:'Bản ghi thu nhập', rejected_income:'Bản ghi từ chối', salary_requests:'Lương chờ duyệt', salary_records:'Bản ghi lương', rejected_salary:'Bản ghi từ chối', pending_advances:'Ứng lương chờ duyệt', approved_advances:'Ứng lương đã duyệt', rejected_advances:'Ứng lương bị từ chối', pending_attendance:'Ra ca chờ duyệt', approved_attendance:'Chấm công đã duyệt', rejected_attendance:'Ra ca bị từ chối',
+        automatic_payroll:'Lương tự động', legacy_salary_requests:'Yêu cầu lương cũ (lịch sử)', legacy_salary_records:'Bản ghi lương (lịch sử)', payroll_detail:'Chi tiết lương tự động', payment_proofs:'Chứng từ thanh toán', view_detail:'Xem chi tiết', view_proof:'Xem chứng từ', save_split:'Lưu phân chia thanh toán', payroll_id:'ID lương', scheduled_date:'Ngày trả lương', cutoff_at:'Thời điểm chốt', amount_snapshot_micros:'Lương cố định', bank_micros:'Tiền ngân hàng', usdt_micros:'Tiền USDT', cash_micros:'Tiền mặt', proof_count:'Số chứng từ', email_status:'Trạng thái email', email_attempt_count:'Số lần gửi email', email_last_error:'Lỗi email', current_admin_id:'Quản trị viên hiện tại', method:'Phương thức', sort_order:'Thứ tự', size_bytes:'Kích thước', uploaded_by:'Người tải', uploaded_at:'Thời gian tải', superseded_at:'Thời gian thay thế',
         summary:'Tổng cộng', work_days:'Ngày làm việc', late_days:'Ngày đi muộn', absence_days:'Ngày vắng mặt', leave_days:'Ngày nghỉ phép', attendance_fine_total:'Tổng phạt chấm công', employee_attendance_summary:'Tổng hợp chấm công nhân viên', view_details:'Xem chi tiết', pending_total:'Tổng chờ duyệt', approved_total:'Tổng đã duyệt', rejected_total:'Tổng từ chối', income_total:'Tổng thu nhập', commission_income_total:'Tổng thu nhập hoa hồng', fine_total:'Tổng phạt', net_total:'Tổng ròng',
         btn_approve:'Duyệt', btn_approve_fine:'Duyệt kèm phạt', btn_approve_no_fine:'Duyệt không phạt', btn_reject:'Từ chối',
         pending_absence:'Vắng mặt chờ duyệt', absence_history:'Lịch sử duyệt', pending_absence_total:'Chờ duyệt', approved_absence_total:'Đã duyệt', rejected_absence_total:'Đã từ chối', cancelled_absence_total:'Đã hủy', approved_absence_fine_total:'Tổng phạt đã duyệt', notification_status:'Trạng thái thông báo', notification_delivery:'Gửi thông báo', notification_sent:'Đã gửi', notification_not_queued:'Chưa xếp hàng', notification_retrying:'Đang chờ thử lại', notification_recipients:'{count} quản trị viên', notification_attempts:'Tối đa {count} lần thử', notification_sent_total:'Đã gửi {sent}/{total}', btn_approve_absence_fine:'Duyệt tiền phạt', confirm_approve_absence_fine:'Duyệt khoản phạt vắng mặt này?', rejection_reason_required:'Bắt buộc nhập lý do từ chối', absence_already_processed:'Yêu cầu vắng mặt này đã được xử lý. Hãy làm mới để xem trạng thái mới nhất.', absence_action_failed:'Thao tác thất bại. Vui lòng thử lại.', all_statuses:'Tất cả trạng thái', status_pending:'Chờ duyệt', status_approved:'Đã duyệt', status_rejected:'Đã từ chối', status_cancelled:'Đã hủy', decision_reason:'Lý do quyết định', income_record_id:'ID bản ghi phạt', actual_fine:'Mức phạt thực tế',
@@ -330,6 +333,7 @@ export function adminHtml(env) {
         business_date:'Рабочая дата', type:'Тип', timestamp:'Время', latitude:'Широта', longitude:'Долгота', late:'Опоздание', early_leave:'Ранний уход',
         level:'Уровень', event:'Событие', message_text:'Сообщение', payload_json:'Данные', created_at:'Создано',
         pending_income:'Доход на проверке', income_records:'Записи дохода', rejected_income:'Отклоненные записи', salary_requests:'Зарплата на проверке', salary_records:'Записи зарплаты', rejected_salary:'Отклоненные записи', pending_advances:'Авансы на проверке', approved_advances:'Одобренные авансы', rejected_advances:'Отклоненные авансы', pending_attendance:'Завершение смены на проверке', approved_attendance:'Одобренная посещаемость', rejected_attendance:'Отклоненное завершение смены',
+        automatic_payroll:'Автоматическая зарплата', legacy_salary_requests:'Старые запросы зарплаты (история)', legacy_salary_records:'Записи зарплаты (история)', payroll_detail:'Детали автоматической зарплаты', payment_proofs:'Подтверждения оплаты', view_detail:'Открыть детали', view_proof:'Открыть подтверждение', save_split:'Сохранить разделение', payroll_id:'ID зарплаты', scheduled_date:'Дата выплаты', cutoff_at:'Время отсечения', amount_snapshot_micros:'Фиксированная зарплата', bank_micros:'Сумма банка', usdt_micros:'Сумма USDT', cash_micros:'Наличные', proof_count:'Подтверждения', email_status:'Статус email', email_attempt_count:'Попытки email', email_last_error:'Ошибка email', current_admin_id:'Текущий администратор', method:'Способ', sort_order:'Порядок', size_bytes:'Размер файла', uploaded_by:'Загрузил', uploaded_at:'Время загрузки', superseded_at:'Время замены',
         summary:'Итого', work_days:'Рабочие дни', late_days:'Дни опозданий', absence_days:'Дни отсутствия', leave_days:'Дни отпуска', attendance_fine_total:'Штрафы за посещаемость', employee_attendance_summary:'Сводка посещаемости сотрудников', view_details:'Подробнее', pending_total:'Ожидает итого', approved_total:'Одобрено итого', rejected_total:'Отклонено итого', income_total:'Доход итого', commission_income_total:'Комиссионный доход итого', fine_total:'Штраф итого', net_total:'Чистый итог',
         btn_approve:'Одобрить', btn_approve_fine:'Одобрить со штрафом', btn_approve_no_fine:'Одобрить без штрафа', btn_reject:'Отклонить',
         pending_absence:'Ожидающие отсутствия', absence_history:'История решений', pending_absence_total:'Ожидают', approved_absence_total:'Одобрено', rejected_absence_total:'Отклонено', cancelled_absence_total:'Отменено', approved_absence_fine_total:'Одобренные штрафы', notification_status:'Статус уведомления', notification_delivery:'Доставка уведомления', notification_sent:'Отправлено', notification_not_queued:'Не поставлено в очередь', notification_retrying:'Ожидает повтора', notification_recipients:'Администраторов: {count}', notification_attempts:'До {count} попыток', notification_sent_total:'Отправлено {sent}/{total}', btn_approve_absence_fine:'Одобрить штраф', confirm_approve_absence_fine:'Одобрить этот штраф за отсутствие?', rejection_reason_required:'Укажите причину отклонения', absence_already_processed:'Этот запрос об отсутствии уже обработан. Обновите страницу, чтобы увидеть актуальное состояние.', absence_action_failed:'Не удалось выполнить действие. Повторите попытку.', all_statuses:'Все статусы', status_pending:'Ожидает', status_approved:'Одобрено', status_rejected:'Отклонено', status_cancelled:'Отменено', decision_reason:'Причина решения', income_record_id:'ID записи штрафа', actual_fine:'Фактический штраф',
@@ -1152,13 +1156,62 @@ export function adminHtml(env) {
 
     async function renderSalary() {
       const data = await api('/api/admin/stores/' + encodeURIComponent(storeId()) + '/salary?' + queryWithPages('salary'));
+      const automatic = await api('/api/admin/stores/' + encodeURIComponent(storeId()) + '/payroll?page=' + encodeURIComponent(pages.salary.payroll_page || 1));
+      const automaticRows = (automatic.payroll || []).map((row) => ({
+        ...row,
+        amount_snapshot_micros: formatPayrollMicros(row.currency, row.amount_snapshot_micros),
+        bank_micros: formatPayrollMicros(row.currency, row.bank_micros),
+        usdt_micros: formatPayrollMicros(row.currency, row.usdt_micros),
+        cash_micros: formatPayrollMicros(row.currency, row.cash_micros),
+        action: '<button data-payroll-detail="' + esc(row.payroll_id) + '">' + L('view_detail') + '</button>'
+      }));
       $('tab-salary').innerHTML = await filterPanel() +
+        sectionTitle('automatic_payroll') + table(automaticRows, ['payroll_id','employee','scheduled_date','period_start','cutoff_at','amount_snapshot_micros','bank_micros','usdt_micros','cash_micros','status','proof_count','email_status','confirmed_at','action'], true) + pager('salary', 'payroll_page', automatic.pagination) +
+        '<div id="automaticPayrollDetail"></div>' +
         salarySummaryPanel(data) +
-        sectionTitle('salary_requests') + actionTable(data.requests, ['request_id','telegram_id','display_name','amount_snapshot','status','requested_at'], 'salary', 'requests') + pager('salary', 'requests_page', data.pagination && data.pagination.requests) +
-        sectionTitle('salary_records') + table(data.records, ['record_id','telegram_id','display_name','amount','period_start','period_end','approved_at','admin_id'], false, 'records') + pager('salary', 'records_page', data.pagination && data.pagination.records) +
+        sectionTitle('legacy_salary_requests') + actionTable(data.requests, ['request_id','telegram_id','display_name','amount_snapshot','status','requested_at'], 'salary', 'requests') + pager('salary', 'requests_page', data.pagination && data.pagination.requests) +
+        sectionTitle('legacy_salary_records') + table(data.records, ['record_id','telegram_id','display_name','amount','period_start','period_end','approved_at','admin_id'], false, 'records') + pager('salary', 'records_page', data.pagination && data.pagination.records) +
         sectionTitle('rejected_salary') + table(data.rejected, ['request_id','telegram_id','display_name','amount_snapshot','status','requested_at','decided_at','admin_id','reject_reason'], false, 'rejected') + pager('salary', 'rejected_page', data.pagination && data.pagination.rejected);
       bindFilterControls();
       bindActions('salary');
+      document.querySelectorAll('[data-payroll-detail]').forEach((button) => {
+        button.onclick = () => withBusy(button, async () => {
+          const detail = await api('/api/admin/stores/' + encodeURIComponent(storeId()) + '/payroll/' + encodeURIComponent(button.dataset.payrollDetail));
+          const payroll = detail.payroll;
+          const canSplit = payroll.status === 'awaiting_admin_payment' || payroll.status === 'disputed';
+          const proofRows = (detail.proofs || []).map((proof) => ({
+            ...proof,
+            action: '<a target="_blank" rel="noopener" href="/api/admin/stores/' + encodeURIComponent(storeId()) + '/payroll/proofs/' + encodeURIComponent(proof.proof_id) + '">' + L('view_proof') + '</a>'
+          }));
+          $('automaticPayrollDetail').innerHTML =
+            '<h3>' + L('payroll_detail') + '</h3>' +
+            table([{
+              ...payroll,
+              amount_snapshot_micros: formatPayrollMicros(payroll.currency, payroll.amount_snapshot_micros),
+              bank_micros: formatPayrollMicros(payroll.currency, payroll.bank_micros),
+              usdt_micros: formatPayrollMicros(payroll.currency, payroll.usdt_micros),
+              cash_micros: formatPayrollMicros(payroll.currency, payroll.cash_micros)
+            }], ['payroll_id','employee','status','amount_snapshot_micros','bank_details_snapshot','usdt_details_snapshot','bank_micros','usdt_micros','cash_micros','current_admin_id','email_status','email_attempt_count','email_last_error']) +
+            (canSplit
+              ? '<div class="grid"><label>' + L('bank_micros') + '<input id="payrollBankMicros" inputmode="numeric" value="' + esc(payroll.bank_micros) + '"></label><label>' + L('usdt_micros') + '<input id="payrollUsdtMicros" inputmode="numeric" value="' + esc(payroll.usdt_micros) + '"></label><label>' + L('cash_micros') + '<input id="payrollCashMicros" inputmode="numeric" value="' + esc(payroll.cash_micros) + '"></label></div><button id="savePayrollSplit">' + L('save_split') + '</button>'
+              : '') +
+            sectionTitle('payment_proofs') +
+            table(proofRows, ['proof_id','method','sort_order','size_bytes','uploaded_by','uploaded_at','superseded_at','action'], true);
+          if (canSplit) {
+            $('savePayrollSplit').onclick = () => withBusy($('savePayrollSplit'), async () => {
+              await api('/api/admin/stores/' + encodeURIComponent(storeId()) + '/payroll/' + encodeURIComponent(payroll.payroll_id) + '/split', {
+                method:'POST',
+                body: JSON.stringify({
+                  bank_micros: Number($('payrollBankMicros').value),
+                  usdt_micros: Number($('payrollUsdtMicros').value),
+                  cash_micros: Number($('payrollCashMicros').value)
+                })
+              });
+              await renderSalary();
+            });
+          }
+        });
+      });
       bindPagers();
     }
 
@@ -1616,6 +1669,10 @@ export function adminHtml(env) {
     function formatCurrencyAmount(currency, value) {
       const amount = formatAdminMoneyForUi(value);
       return currency ? String(currency) + amount : amount;
+    }
+
+    function formatPayrollMicros(currency, micros) {
+      return formatCurrencyAmount(currency, Number(micros || 0) / 1_000_000);
     }
 
     function isTimeField(key) {

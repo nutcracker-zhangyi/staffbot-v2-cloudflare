@@ -5,9 +5,9 @@ const TEXT = {
   lang_set: { zh: '语言已设置为中文。', en: 'Language set to English.', vi: 'Đã chọn Tiếng Việt.' },
   welcome: { zh: '欢迎使用员工管理机器人。请选择操作：', en: 'Welcome to the Staff Bot. Choose an action:', vi: 'Chào mừng bạn đến với Staff Bot. Vui lòng chọn:' },
   help: {
-    zh: '可用命令：\n/store - 切换店铺\n/income - 提交收入\n/total - 查看总收入\n/salary - 申请工资\n/advance - 预支薪资\n/attendance - 打卡\n/leave - 请假\n/lang - 切换语言\n/cancel - 取消当前流程\n/ping - 测试机器人',
-    en: 'Commands:\n/store - Switch store\n/income - Submit income\n/total - Total income\n/salary - Request salary\n/advance - Salary advance\n/attendance - Attendance\n/leave - Request leave\n/lang - Change language\n/cancel - Cancel current flow\n/ping - Test bot',
-    vi: 'Lệnh:\n/store - Đổi cửa hàng\n/income - Nộp thu nhập\n/total - Tổng thu nhập\n/salary - Yêu cầu lương\n/advance - Ứng lương\n/attendance - Chấm công\n/leave - Xin nghỉ\n/lang - Đổi ngôn ngữ\n/cancel - Hủy thao tác\n/ping - Kiểm tra bot'
+    zh: '可用命令：\n/store - 切换店铺\n/income - 提交收入\n/total - 查看总收入\n/advance - 预支薪资\n/attendance - 打卡\n/leave - 请假\n/lang - 切换语言\n/cancel - 取消当前流程\n/ping - 测试机器人',
+    en: 'Commands:\n/store - Switch store\n/income - Submit income\n/total - Total income\n/advance - Salary advance\n/attendance - Attendance\n/leave - Request leave\n/lang - Change language\n/cancel - Cancel current flow\n/ping - Test bot',
+    vi: 'Lệnh:\n/store - Đổi cửa hàng\n/income - Nộp thu nhập\n/total - Tổng thu nhập\n/advance - Ứng lương\n/attendance - Chấm công\n/leave - Xin nghỉ\n/lang - Đổi ngôn ngữ\n/cancel - Hủy thao tác\n/ping - Kiểm tra bot'
   },
   cancelled: { zh: '已取消当前流程。', en: 'Cancelled.', vi: 'Đã hủy thao tác.' },
   unknown: { zh: '无法识别。发送 /start 查看可用命令。', en: 'Unknown command. Send /start for help.', vi: 'Không hiểu lệnh. Gửi /start để xem hướng dẫn.' },
@@ -101,6 +101,7 @@ const TEXT = {
   total: { zh: '店铺：{store}\n当前总收入：{total}', en: 'Store: {store}\nCurrent total income: {total}', vi: 'Cửa hàng: {store}\nTổng thu nhập hiện tại: {total}' },
   no_salary: { zh: '当前总收入：{total}\n暂无可申请金额。', en: 'Current total: {total}\nNothing to request yet.', vi: 'Tổng hiện tại: {total}\nChưa có gì để yêu cầu.' },
   salary_pending: { zh: '你已有待审核的工资申请，请等待审核。', en: 'You already have a pending salary request.', vi: 'Bạn đã có yêu cầu lương đang chờ duyệt.' },
+  salary_automatic_explanation: { zh: '工资不再需要手动申请。系统会按照你的个人工资周期自动结算，并在发薪日通过 Telegram 提醒你。', en: 'You no longer need to request payroll manually. The system settles your personal payroll cycle automatically and reminds you in Telegram on payday.', vi: 'Bạn không cần yêu cầu lương thủ công nữa. Hệ thống tự quyết toán theo chu kỳ lương cá nhân và nhắc bạn trên Telegram vào ngày trả lương.' },
   salary_confirm: { zh: '店铺：{store}\n当前总收入：{total}\n提成比例：{commission}\n可申请工资：{amount}\n确认申请发薪吗？', en: 'Store: {store}\nCurrent total: {total}\nCommission: {commission}\nRequestable salary: {amount}\nConfirm salary request?', vi: 'Cửa hàng: {store}\nTổng hiện tại: {total}\nTỷ lệ hoa hồng: {commission}\nLương có thể yêu cầu: {amount}\nXác nhận yêu cầu lương?', ru: 'Магазин: {store}\nТекущий итог: {total}\nКомиссия: {commission}\nДоступная зарплата: {amount}\nПодтвердить запрос зарплаты?' },
   salary_submitted: { zh: '工资申请已提交，审核后会通知你。', en: 'Salary request submitted.', vi: 'Đã gửi yêu cầu lương.' },
   salary_approved: { zh: '你的工资申请已批准。\n金额：{amount}\n周期：{start} ~ {end}\n新周期已开始。', en: 'Salary approved.\nAmount: {amount}\nPeriod: {start} ~ {end}\nA new cycle has started.', vi: 'Lương đã được duyệt.\nSố tiền: {amount}\nKỳ: {start} ~ {end}' },
@@ -141,7 +142,7 @@ const RU_TEXT = {
   choose_lang: 'Выберите язык:',
   lang_set: 'Язык изменен на русский.',
   welcome: 'Добро пожаловать в Staff Bot. Выберите действие:',
-  help: 'Команды:\n/store - сменить магазин\n/income - отправить доход\n/total - общий доход\n/salary - запросить зарплату\n/advance - аванс зарплаты\n/attendance - посещаемость\n/leave - отпуск\n/lang - сменить язык\n/cancel - отменить текущий процесс\n/ping - проверить бота',
+  help: 'Команды:\n/store - сменить магазин\n/income - отправить доход\n/total - общий доход\n/advance - аванс зарплаты\n/attendance - посещаемость\n/leave - отпуск\n/lang - сменить язык\n/cancel - отменить текущий процесс\n/ping - проверить бота',
   cancelled: 'Текущий процесс отменен.',
   unknown: 'Команда не распознана. Отправьте /start для списка команд.',
   no_permission: 'У вас нет доступа.',
@@ -216,6 +217,7 @@ const RU_TEXT = {
   total: 'Магазин: {store}\nТекущий общий доход: {total}',
   no_salary: 'Текущий итог: {total}\nПока нечего запрашивать.',
   salary_pending: 'У вас уже есть ожидающий запрос зарплаты.',
+  salary_automatic_explanation: 'Больше не нужно запрашивать зарплату вручную. Система автоматически рассчитывает ваш личный зарплатный цикл и напоминает о выплате в Telegram.',
   salary_confirm: 'Магазин: {store}\nТекущий итог: {total}\nКомиссия: {commission}\nДоступная зарплата: {amount}\nПодтвердить запрос зарплаты?',
   salary_submitted: 'Запрос зарплаты отправлен.',
   salary_approved: 'Зарплата одобрена.\nСумма: {amount}\nПериод: {start} ~ {end}\nНачался новый цикл.',

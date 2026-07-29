@@ -16,7 +16,7 @@ const mainKeyboard = {
   keyboard: [
     [{ text: '切换店铺' }],
     [{ text: '提交收入' }, { text: '总收入' }],
-    [{ text: '申请工资' }, { text: '预支薪资' }],
+    [{ text: '预支薪资' }],
     [{ text: '打卡' }, { text: '请假' }]
   ],
   resize_keyboard: true,
@@ -30,7 +30,6 @@ const welcomeText = [
   '/store - 切换店铺',
   '/income - 提交收入',
   '/total - 查看总收入',
-  '/salary - 申请工资',
   '/advance - 预支薪资',
   '/attendance - 打卡',
   '/leave - 请假',
@@ -214,6 +213,31 @@ test('/total sends the current store and payroll total', async () => {
       text: '店铺：Tokyo Club\n当前总收入：$55.00',
       reply_markup: mainKeyboard
     }]);
+  } finally {
+    fixture.restore();
+  }
+});
+
+test('/salary explains automatic payroll and creates no legacy request', async () => {
+  const fixture = flowFixture();
+  try {
+    await sendText(fixture.env, '/salary');
+    await sendCallback(
+      fixture.env,
+      'salary:confirm:STORE1',
+      1001
+    );
+
+    assert.equal(
+      fixture.database.prepare(`
+        SELECT COUNT(*) AS count FROM salary_requests
+      `).get().count,
+      0
+    );
+    assert.ok(fixture.payloads.some((payload) =>
+      payload.text
+      && payload.text.includes('系统会按照你的个人工资周期自动结算')
+    ));
   } finally {
     fixture.restore();
   }

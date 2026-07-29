@@ -600,69 +600,27 @@ async function finishIncomeReject(env, adminId, chatId, storeId, requestId, reas
 }
 
 async function startSalary(env, store, userId, chatId, lang) {
-  const pending = await env.DB.prepare(`
-    SELECT request_id FROM salary_requests WHERE store_id = ? AND telegram_id = ? AND status = 'pending'
-  `).bind(store.store_id, userId).first();
-  if (pending) return sendMessage(env, chatId, t(lang, 'salary_pending'), mainMenu(lang));
-
-  const total = await getTotalIncome(env, store.store_id, userId);
-  if (total <= 0) {
-    return sendMessage(env, chatId, render(lang, 'no_salary', { total: formatMoney(store, total) }), mainMenu(lang));
-  }
-  const commissionRate = await getMemberCommissionRate(env, store.store_id, userId);
-  const salaryAmount = total;
-
-  return sendMessage(env, chatId, render(lang, 'salary_confirm', {
-    store: store.name,
-    total: formatMoney(store, total),
-    commission: formatPercent(commissionRate),
-    amount: formatMoney(store, salaryAmount)
-  }), {
-    inline_keyboard: [[
-      { text: t(lang, 'btn_confirm'), callback_data: `salary:confirm:${store.store_id}` },
-      { text: t(lang, 'btn_cancel'), callback_data: 'salary:cancel' }
-    ]]
-  });
+  return sendMessage(
+    env,
+    chatId,
+    t(lang, 'salary_automatic_explanation'),
+    mainMenu(lang)
+  );
 }
 
 async function confirmSalary(env, callback, store, userId, lang) {
   if (!store) return answerCallback(env, callback.id, t(lang, 'no_store'), true);
-  const pending = await env.DB.prepare(`
-    SELECT request_id FROM salary_requests WHERE store_id = ? AND telegram_id = ? AND status = 'pending'
-  `).bind(store.store_id, userId).first();
-  if (pending) return answerCallback(env, callback.id, t(lang, 'salary_pending'), true);
-
-  const total = await getTotalIncome(env, store.store_id, userId);
-  if (total <= 0) return answerCallback(env, callback.id, t(lang, 'no_salary'), true);
-  const commissionRate = await getMemberCommissionRate(env, store.store_id, userId);
-  const salaryAmount = total;
-
-  const requestId = makeId('SALREQ');
-  const requestedAt = nowIso();
-  await env.DB.prepare(`
-    INSERT INTO salary_requests
-      (request_id, store_id, telegram_id, amount_snapshot, status, requested_at)
-    VALUES (?, ?, ?, ?, 'pending', ?)
-  `).bind(requestId, store.store_id, userId, salaryAmount, requestedAt).run();
-
-  await editCallbackMessage(env, callback, `${callback.message.text}\n\n${t(lang, 'salary_submitted')}`);
-  const employeeName = await getMemberDisplayName(env, store.store_id, userId);
-  await notifyStoreAdmins(env, store.store_id, [
-    '新的工资申请',
-    `店铺：${store.name}`,
-    `员工：${employeeName}`,
-    `员工 ID：${userId}`,
-    `当前总收入：${formatMoney(store, total)}`,
-    `提成比例：${formatPercent(commissionRate)}`,
-    `可申请工资：${formatMoney(store, salaryAmount)}`,
-    `请求 ID：${requestId}`
-  ].join('\n'), {
-    inline_keyboard: [[
-      { text: t('zh', 'btn_approve'), callback_data: compactCallbackData('sal', 'a', store.store_id, requestId) },
-      { text: t('zh', 'btn_reject'), callback_data: compactCallbackData('sal', 'r', store.store_id, requestId) }
-    ]]
-  });
-  return answerCallback(env, callback.id, t(lang, 'salary_submitted'));
+  await editCallbackMessage(
+    env,
+    callback,
+    t(lang, 'salary_automatic_explanation')
+  );
+  return answerCallback(
+    env,
+    callback.id,
+    t(lang, 'salary_automatic_explanation'),
+    true
+  );
 }
 
 async function approveSalary(env, callback, adminId, storeId, requestId, lang) {
@@ -2014,7 +1972,7 @@ function mainMenu(lang) {
     keyboard: [
       [{ text: t(lang, 'btn_store') }],
       [{ text: t(lang, 'btn_income') }, { text: t(lang, 'btn_total') }],
-      [{ text: t(lang, 'btn_salary') }, { text: t(lang, 'btn_advance') }],
+      [{ text: t(lang, 'btn_advance') }],
       [{ text: t(lang, 'btn_attendance') }, { text: t(lang, 'btn_leave') }]
     ],
     resize_keyboard: true,
