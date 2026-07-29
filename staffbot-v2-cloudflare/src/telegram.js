@@ -52,7 +52,10 @@ import {
   usdtDetailModeKeyboard
 } from './payroll-payments.js';
 import { saveTelegramPaymentQr } from './payroll-payment-qr.js';
-import { sendPayrollForEmployeeConfirmation } from './payroll-notifications.js';
+import {
+  payrollReceiptMessage,
+  sendPayrollForEmployeeConfirmation
+} from './payroll-notifications.js';
 import {
   completePayrollProofs,
   storeTelegramProof
@@ -2059,8 +2062,9 @@ async function confirmEmployeePayrollReceipt(
   payrollId,
   lang
 ) {
+  let payroll;
   try {
-    await confirmPayrollReceipt(
+    payroll = await confirmPayrollReceipt(
       env,
       employeeId,
       payrollId,
@@ -2076,15 +2080,19 @@ async function confirmEmployeePayrollReceipt(
       true
     );
   }
+  const receipt = payrollReceiptMessage({
+    ...payroll,
+    language: lang
+  });
   await editCallbackMessage(
     env,
     callback,
-    t(lang, 'payroll_receipt_confirmed')
+    receipt
   );
   return answerCallback(
     env,
     callback.id,
-    t(lang, 'payroll_receipt_confirmed')
+    t(lang, 'payroll_receipt_confirmed_ack')
   );
 }
 

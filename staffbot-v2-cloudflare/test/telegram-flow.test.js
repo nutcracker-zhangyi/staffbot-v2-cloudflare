@@ -1071,6 +1071,38 @@ test('admin splits payroll and uploads proof images by payment method', async ()
       1001,
       confirmation.text
     );
+    const receipt = fixture.payloads.find((payload) =>
+      payload.message_id === 2
+      && payload.text
+      && payload.text.includes('工资收款已确认')
+    );
+    assert.ok(receipt);
+    assert.match(receipt.text, /员工：Alice/);
+    assert.match(receipt.text, /Telegram ID：1001/);
+    assert.match(receipt.text, /店铺：Tokyo Club/);
+    assert.match(
+      receipt.text,
+      /2026\/07\/01 09:00 至 2026\/07\/16 12:00/
+    );
+    assert.match(receipt.text, /工资总额：\$60\.00/);
+    assert.match(receipt.text, /银行卡：\$40\.00/);
+    assert.match(receipt.text, /现金：\$20\.00/);
+    assert.doesNotMatch(receipt.text, /USDT：/);
+    assert.match(
+      receipt.text,
+      /确认时间：\d{4}\/\d{2}\/\d{2} \d{2}:\d{2}/
+    );
+    assert.match(
+      receipt.text,
+      /工资 ID：PAYROLL-ADMIN/
+    );
+    assert.equal(receipt.reply_markup, undefined);
+
+    const receiptAck = fixture.payloads.find((payload) =>
+      payload.callback_query_id === 'callback-1001'
+      && payload.text === '确认成功。'
+    );
+    assert.ok(receiptAck);
     assert.deepEqual(
       {
         ...fixture.database.prepare(`

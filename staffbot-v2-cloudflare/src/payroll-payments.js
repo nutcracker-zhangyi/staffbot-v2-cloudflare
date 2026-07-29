@@ -413,8 +413,26 @@ export async function savePaymentSplit(
 
 async function employeePayroll(env, employeeId, payrollId) {
   const payroll = await env.DB.prepare(`
-    SELECT * FROM payroll_disbursements
-    WHERE payroll_id = ? AND telegram_id = ?
+    SELECT
+      d.*,
+      s.name AS store_name,
+      s.timezone,
+      COALESCE(
+        NULLIF(m.display_name, ''),
+        NULLIF(u.name, ''),
+        NULLIF(u.username, ''),
+        d.telegram_id
+      ) AS employee_name
+    FROM payroll_disbursements d
+    LEFT JOIN stores s
+      ON s.store_id = d.store_id
+    LEFT JOIN store_members m
+      ON m.store_id = d.store_id
+     AND m.telegram_id = d.telegram_id
+    LEFT JOIN users u
+      ON u.telegram_id = d.telegram_id
+    WHERE d.payroll_id = ?
+      AND d.telegram_id = ?
   `).bind(payrollId, String(employeeId)).first();
   if (!payroll) throw new Error('payroll not found');
   return payroll;
