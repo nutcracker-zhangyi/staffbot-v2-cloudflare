@@ -1,15 +1,16 @@
 # Staging Dashboard validation evidence
 
 Date: 2026-07-28
-Outcome: **verified — second empty-chart fix passed live staging retest**
+Updated: 2026-07-29
+Outcome: **verified — empty charts and cross-month trend continuity passed live staging retests**
 
 ## Scope and safety boundary
 
-- Code under test: `3906a00ec53c84b3ffd796578d68663bf4731ff8`
-  (`fix: preserve production mobile admin styles`).
-- Staging Worker version:
-  `342799f0-73f3-4408-a8ca-936e4625c7a2`.
-- The only deployment command was
+- Latest code under test: `d97af7b`
+  (`fix: preserve empty dashboard months`).
+- Current staging Worker version:
+  `ebc3e08c-d12d-43e7-8ef2-57b94577fada`.
+- Every deployment command used
   `npx wrangler deploy --env staging`.
 - No production deploy, migration, flag change, merge, push, or pull request
   occurred.
@@ -98,6 +99,36 @@ The live accessibility snapshot showed:
 This live retest passed the empty-chart requirement while preserving the
 equivalent tabular data. The earlier failure on Worker version
 `9d5a75a1-a78a-42c9-bf59-37ff4a952e42` remains recorded above.
+
+## Cross-month trend continuity follow-up
+
+The Dashboard previously created month buckets only when a financial aggregate
+row existed. A selection with data in July and September could therefore omit
+August and connect the two populated months without showing the empty interval.
+
+A regression test added a September row and selected
+`2026-07-01..2026-09-30` across two currencies. RED showed that the returned
+currency groups contained only months with aggregate rows. The minimal fix
+adds each selected period's month key to its existing currency group after the
+four aggregate reads, retaining the existing query count and filling missing
+months with the standard zero-money shape.
+
+Automated evidence:
+
+| Command | Result |
+| --- | --- |
+| Dashboard and routing tests | 44 passed, 0 failed |
+| `npm test` | 224 passed, 0 failed, 0 skipped |
+| `npm run test:staging` | 6 passed, 0 failed, 0 skipped |
+| `npm run check` | passed |
+
+Commit `d97af7b` was deployed only to staging Worker version
+`ebc3e08c-d12d-43e7-8ef2-57b94577fada`. The authenticated Chrome Dashboard
+selected `2026-07-01..2026-09-30` against the existing staging data. Both the
+trend SVG and its equivalent table showed `2026-07`, `2026-08`, and
+`2026-09` in order; August and September were retained as zero-value months.
+The browser console contained no application errors. No test store, employee,
+or additional financial row was created for this live verification.
 
 ## Original deployed release gate (before the local empty-chart fix)
 
@@ -290,7 +321,8 @@ the live global-admin
 `403 forbidden_store` contract.
 
 The first empty-chart fix failed live as described above; the second fix passed
-the fresh-tab, cache-busted live staging retest. Phase 9 remains `🧪`
-staging evidence rather than production approval, and this report does not
-authorize a production migration, deployment, feature enablement, merge, or
-rollout.
+the fresh-tab, cache-busted live staging retest. The later cross-month
+continuity fix also passed its live staging check with all selected month keys
+visible in order. Phase 9 remains `🧪` staging evidence rather than production
+approval, and this report does not authorize a production migration,
+deployment, feature enablement, merge, or rollout.
