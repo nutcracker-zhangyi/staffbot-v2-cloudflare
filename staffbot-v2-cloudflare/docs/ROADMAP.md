@@ -96,7 +96,7 @@
 - 大数据量下的性能方案；
 - 验收样例和发布方式。
 
-### Phase 10：员工个人发薪流程 ⏳
+### Phase 10：员工个人发薪流程 🧪
 
 目标范围包括：
 
@@ -109,18 +109,22 @@
 - 邮件通知；
 - 确认付款后开始下一个工资周期。
 
-该阶段涉及周期、提醒、截止点、文件存储和支付确认，必须在独立规格、测试方案和 staging 验收通过后再实施。
+代码、数据库迁移和管理后台已经部署到 staging。自动工资页面、旧数据隔离、
+本地测试和 staging 数据库结构检查已经通过；真实 Telegram 付款闭环、邮件发送
+和临时 Cron 验收仍待单独授权或配置，因此本阶段保持 `🧪`，不得进入 production。
 
 已确认规格与实施计划：
 
 - [个人 30 天工资周期设计](./superpowers/specs/2026-07-27-personal-payroll-cycle-design.md)
 - [个人发薪流程实施计划](./superpowers/plans/2026-07-29-personal-payroll-cycle.md)
+- [staging 个人发薪流程验收记录](./reports/2026-07-29-staging-personal-payroll-validation.md)
 
 ## 明确不在当前批次内
 
 - production 数据迁移或部署
 - dashboard 代码
-- 员工个人发薪流程代码
+- staging Cron 启用和真实自动提醒
+- 未配置发件人与财务收件人的真实邮件发送
 - 修改已确认的工资账本数据契约
 
-Task 10 只负责把已经验证的架构和后续阶段边界写入文档。
+个人发薪流程完成 staging 全链路验收并获得明确上线批准前，以上边界保持不变。
