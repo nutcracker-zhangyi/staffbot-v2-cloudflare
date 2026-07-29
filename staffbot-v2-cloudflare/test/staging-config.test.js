@@ -34,3 +34,9 @@ test('keeps production and staging D1 names different', () => {
   assert.doesNotMatch(config, /WEBHOOK_SECRET\s*=/);
   assert.doesNotMatch(config, /STAGING_ALLOWED_TELEGRAM_IDS\s*=/);
 });
+
+test('does not invent payroll email addresses or bindings', () => {
+  assert.doesNotMatch(config, /\[\[.*send_email\]\]/);
+  assert.doesNotMatch(config, /PAYROLL_FINANCE_EMAIL\s*=/);
+  assert.doesNotMatch(config, /PAYROLL_FROM_EMAIL\s*=/);
+});

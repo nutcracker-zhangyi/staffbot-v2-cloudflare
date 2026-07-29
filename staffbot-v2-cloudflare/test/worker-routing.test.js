@@ -894,6 +894,9 @@ test('runs scheduled work in accounting and delivery order when enabled', async 
     const notificationRead = reads.findIndex((sql) =>
       /FROM payroll_disbursements d/.test(sql)
     );
+    const emailRead = reads.findIndex((sql) =>
+      /FROM payroll_email_outbox/.test(sql)
+    );
 
     assert.deepEqual(Object.keys(result), [
       'absence',
@@ -904,6 +907,7 @@ test('runs scheduled work in accounting and delivery order when enabled', async 
     assert.ok(absenceRead >= 0);
     assert.ok(settlementRead > absenceRead);
     assert.ok(notificationRead > settlementRead);
+    assert.ok(emailRead > notificationRead);
     assert.equal(result.payroll.created, 1);
     assert.equal(result.notifications.sent, 1);
     assert.deepEqual(result.email, {

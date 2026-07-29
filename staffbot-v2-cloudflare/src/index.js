@@ -5,6 +5,7 @@ export * from './ids.js';
 export * from './money.js';
 export * from './payroll-cycle.js';
 export * from './payroll-ledger.js';
+export * from './payroll-email.js';
 export * from './payroll-notifications.js';
 export * from './payroll-payments.js';
 export * from './payroll-proofs.js';

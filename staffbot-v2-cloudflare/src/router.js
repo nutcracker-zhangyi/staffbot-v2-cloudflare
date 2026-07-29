@@ -3,6 +3,7 @@ import { adminHtml } from './admin-page.js';
 import { processAbsenceFines } from './absence.js';
 import { logEvent } from './audit.js';
 import { html, json } from './http.js';
+import { deliverPayrollEmailOutbox } from './payroll-email.js';
 import { deliverPayrollNotifications } from './payroll-notifications.js';
 import { processPayrollSettlements } from './payroll-settlement.js';
 import {
@@ -18,11 +19,7 @@ export async function processScheduledWork(env, now = new Date()) {
   const absence = absenceResult || { ok: true };
   const payroll = await processPayrollSettlements(env, now);
   const notifications = await deliverPayrollNotifications(env, now);
-  const email = {
-    scanned: 0,
-    sent: 0,
-    failed: 0
-  };
+  const email = await deliverPayrollEmailOutbox(env, now);
   return { absence, payroll, notifications, email };
 }
 

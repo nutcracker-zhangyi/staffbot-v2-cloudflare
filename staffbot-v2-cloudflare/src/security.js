@@ -46,6 +46,27 @@ export function scheduledTasksEnabled(env) {
     || String(env.SCHEDULED_TASKS_ENABLED || '').toLowerCase() === 'true'));
 }
 
+export function payrollEmailConfig(env) {
+  const recipient = String(
+    env && env.PAYROLL_FINANCE_EMAIL || ''
+  ).trim();
+  const sender = String(
+    env && env.PAYROLL_FROM_EMAIL || ''
+  ).trim();
+  const emailPattern = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+  return {
+    recipient,
+    sender,
+    ready: !!(
+      env
+      && env.PAYROLL_EMAIL
+      && typeof env.PAYROLL_EMAIL.send === 'function'
+      && emailPattern.test(recipient)
+      && emailPattern.test(sender)
+    )
+  };
+}
+
 export function isWebhookConfigReady(env) {
   return !!(env && env.BOT_TOKEN && env.WEBHOOK_SECRET);
 }
