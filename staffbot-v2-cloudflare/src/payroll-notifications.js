@@ -1,4 +1,7 @@
-import { localDate } from './dates.js';
+import {
+  formatLocalDateTime,
+  localDate
+} from './dates.js';
 import { render, t } from './i18n.js';
 import { formatMoney } from './money.js';
 import {
@@ -206,6 +209,63 @@ function paymentMethodLines(language, payroll) {
         Number(payroll[`${method}_micros`]) / 1_000_000
       )
     }`);
+}
+
+function receiptPaymentMethodLines(language, payroll) {
+  return ['bank', 'usdt', 'cash']
+    .filter((method) =>
+      Number(payroll[`${method}_micros`]) > 0
+    )
+    .map((method) => render(
+      language,
+      'payroll_payment_method_amount',
+      {
+        method: t(
+          language,
+          `payroll_profile_${method}`
+        ),
+        amount: formatMoney(
+          { currency: payroll.currency },
+          Number(
+            payroll[`${method}_micros`]
+          ) / 1_000_000
+        )
+      }
+    ));
+}
+
+export function payrollReceiptMessage(payroll) {
+  const language = payroll.language || 'zh';
+  const timezone = payroll.timezone || 'Asia/Tokyo';
+  return render(language, 'payroll_receipt_confirmed', {
+    employee: payroll.employee_name
+      || String(payroll.telegram_id),
+    telegram_id: payroll.telegram_id,
+    store: payroll.store_name,
+    period_start: formatLocalDateTime(
+      payroll.period_start,
+      timezone
+    ),
+    period_end: formatLocalDateTime(
+      payroll.cutoff_at,
+      timezone
+    ),
+    amount: formatMoney(
+      { currency: payroll.currency },
+      Number(
+        payroll.amount_snapshot_micros
+      ) / 1_000_000
+    ),
+    payment_methods: receiptPaymentMethodLines(
+      language,
+      payroll
+    ).join('\n'),
+    confirmed_at: formatLocalDateTime(
+      payroll.confirmed_at,
+      timezone
+    ),
+    payroll_id: payroll.payroll_id
+  });
 }
 
 export async function sendPayrollForEmployeeConfirmation(

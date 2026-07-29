@@ -74,6 +74,24 @@ export function formatAdminDateTime(value, timezone = 'Asia/Tokyo') {
   return `${map.year}/${map.month}/${map.day} ${map.hour}:${map.minute}:${map.second}`;
 }
 
+export function formatLocalDateTime(
+  value,
+  timezone = 'Asia/Tokyo'
+) {
+  const text = String(value || '').trim();
+  if (!text) return '';
+  const date = new Date(text);
+  if (Number.isNaN(date.getTime())) return text;
+  const parts = localParts(
+    date,
+    timezone || 'Asia/Tokyo'
+  );
+  return [
+    `${parts.year}/${parts.month}/${parts.day}`,
+    `${parts.hour}:${parts.minute}`
+  ].join(' ');
+}
+
 export function formatAdminShortDateHour(value, timezone = 'Asia/Tokyo') {
   const text = String(value || '').trim();
   if (!text) return '';
