@@ -41,6 +41,11 @@ import {
   payrollStartDateOptions,
   validatePayrollStartDate
 } from './payroll-cycle.js';
+import {
+  getPayrollPaymentContext,
+  paymentMethodKeyboard,
+  savePaymentProfile
+} from './payroll-payments.js';
 import { adminIds, isGlobalAdmin } from './security.js';
 import {
   getMemberDisplayName,
@@ -113,6 +118,26 @@ async function handleMessage(message, env) {
 
   if (state && state.state === 'WAIT_REGISTER_NAME') {
     return finishRegistrationRequest(env, userId, chatId, state.data.store_id, text, lang);
+  }
+  if (state && state.state === 'WAIT_PAYROLL_BANK_DETAILS') {
+    return finishPayrollBankDetails(
+      env,
+      userId,
+      chatId,
+      state.data,
+      text,
+      lang
+    );
+  }
+  if (state && state.state === 'WAIT_PAYROLL_USDT_DETAILS') {
+    return finishPayrollUsdtDetails(
+      env,
+      userId,
+      chatId,
+      state.data,
+      text,
+      lang
+    );
   }
 
   if (state && state.state === 'WAIT_INCOME_AMOUNT') {
@@ -255,6 +280,37 @@ async function handleCallback(callback, env) {
     }
     if (parts[1] === 'approve') return approveRegistration(env, callback, userId, storeId, employeeId, lang);
     if (parts[1] === 'reject') return rejectRegistration(env, callback, userId, storeId, employeeId, lang);
+  }
+
+  if (parts[0] === 'pay') {
+    if (parts[1] === 'd') {
+      return startPayrollPaymentDetails(
+        env,
+        callback,
+        userId,
+        parts.slice(2).join(':'),
+        lang
+      );
+    }
+    if (parts[1] === 'm') {
+      return togglePayrollPaymentMethod(
+        env,
+        callback,
+        userId,
+        parts[2],
+        parts.slice(3).join(':'),
+        lang
+      );
+    }
+    if (parts[1] === 'c') {
+      return confirmPayrollPaymentMethods(
+        env,
+        callback,
+        userId,
+        parts.slice(2).join(':'),
+        lang
+      );
+    }
   }
 
   if (parts[0] === 'income') {
@@ -1165,6 +1221,204 @@ async function notifyStoreAdmins(env, storeId, text, replyMarkup) {
   for (const adminId of ids) {
     await sendMessage(env, adminId, text, replyMarkup);
   }
+}
+
+function payrollPaymentState(payroll) {
+  return {
+    payroll_id: payroll.payroll_id,
+    store_id: payroll.store_id,
+    store_name: payroll.store_name,
+    currency: payroll.currency,
+    amount_snapshot_micros: payroll.amount_snapshot_micros,
+    accepts_bank: Number(payroll.profile_accepts_bank) === 1,
+    accepts_usdt: Number(payroll.profile_accepts_usdt) === 1,
+    accepts_cash: Number(payroll.profile_accepts_cash) === 1,
+    bank_details: payroll.profile_bank_details || null,
+    usdt_details: payroll.profile_usdt_details || null
+  };
+}
+
+async function startPayrollPaymentDetails(
+  env,
+  callback,
+  userId,
+  payrollId,
+  lang
+) {
+  let payroll;
+  try {
+    payroll = await getPayrollPaymentContext(env, userId, payrollId);
+  } catch {
+    return answerCallback(env, callback.id, t(lang, 'no_permission'), true);
+  }
+  if (![
+    'awaiting_employee_details',
+    'awaiting_admin_payment'
+  ].includes(payroll.status)) {
+    return answerCallback(env, callback.id, t(lang, 'already_processed'), true);
+  }
+  const state = payrollPaymentState(payroll);
+  await setState(env, userId, 'WAIT_PAYROLL_METHODS', state);
+  await answerCallback(env, callback.id);
+  return sendMessage(
+    env,
+    callback.message.chat.id,
+    t(lang, 'payroll_choose_methods'),
+    paymentMethodKeyboard(payrollId, state, lang)
+  );
+}
+
+async function togglePayrollPaymentMethod(
+  env,
+  callback,
+  userId,
+  method,
+  payrollId,
+  lang
+) {
+  const state = await getState(env, userId);
+  if (!state
+    || state.state !== 'WAIT_PAYROLL_METHODS'
+    || state.data.payroll_id !== payrollId) {
+    return answerCallback(env, callback.id, t(lang, 'no_permission'), true);
+  }
+  const field = {
+    b: 'accepts_bank',
+    u: 'accepts_usdt',
+    c: 'accepts_cash'
+  }[method];
+  if (!field) {
+    return answerCallback(env, callback.id, t(lang, 'no_permission'), true);
+  }
+  state.data[field] = !state.data[field];
+  await setState(env, userId, 'WAIT_PAYROLL_METHODS', state.data);
+  await editCallbackMessage(
+    env,
+    callback,
+    t(lang, 'payroll_choose_methods'),
+    paymentMethodKeyboard(payrollId, state.data, lang)
+  );
+  return answerCallback(env, callback.id);
+}
+
+async function confirmPayrollPaymentMethods(
+  env,
+  callback,
+  userId,
+  payrollId,
+  lang
+) {
+  const state = await getState(env, userId);
+  if (!state
+    || state.state !== 'WAIT_PAYROLL_METHODS'
+    || state.data.payroll_id !== payrollId) {
+    return answerCallback(env, callback.id, t(lang, 'no_permission'), true);
+  }
+  const data = state.data;
+  if (!data.accepts_bank && !data.accepts_usdt && !data.accepts_cash) {
+    return answerCallback(
+      env,
+      callback.id,
+      t(lang, 'payroll_method_required'),
+      true
+    );
+  }
+  if (data.accepts_bank && !String(data.bank_details || '').trim()) {
+    await setState(env, userId, 'WAIT_PAYROLL_BANK_DETAILS', data);
+    await answerCallback(env, callback.id);
+    return sendMessage(
+      env,
+      callback.message.chat.id,
+      t(lang, 'payroll_ask_bank_details')
+    );
+  }
+  if (data.accepts_usdt && !String(data.usdt_details || '').trim()) {
+    await setState(env, userId, 'WAIT_PAYROLL_USDT_DETAILS', data);
+    await answerCallback(env, callback.id);
+    return sendMessage(
+      env,
+      callback.message.chat.id,
+      t(lang, 'payroll_ask_usdt_details')
+    );
+  }
+  await answerCallback(env, callback.id);
+  return finishPayrollPaymentProfile(
+    env,
+    userId,
+    callback.message.chat.id,
+    data,
+    lang
+  );
+}
+
+async function finishPayrollBankDetails(
+  env,
+  userId,
+  chatId,
+  data,
+  text,
+  lang
+) {
+  const bankDetails = String(text || '').trim();
+  if (!bankDetails) {
+    return sendMessage(env, chatId, t(lang, 'payroll_ask_bank_details'));
+  }
+  const next = { ...data, bank_details: bankDetails };
+  if (next.accepts_usdt && !String(next.usdt_details || '').trim()) {
+    await setState(env, userId, 'WAIT_PAYROLL_USDT_DETAILS', next);
+    return sendMessage(env, chatId, t(lang, 'payroll_ask_usdt_details'));
+  }
+  return finishPayrollPaymentProfile(env, userId, chatId, next, lang);
+}
+
+async function finishPayrollUsdtDetails(
+  env,
+  userId,
+  chatId,
+  data,
+  text,
+  lang
+) {
+  const usdtDetails = String(text || '').trim();
+  if (!usdtDetails) {
+    return sendMessage(env, chatId, t(lang, 'payroll_ask_usdt_details'));
+  }
+  return finishPayrollPaymentProfile(
+    env,
+    userId,
+    chatId,
+    { ...data, usdt_details: usdtDetails },
+    lang
+  );
+}
+
+async function finishPayrollPaymentProfile(
+  env,
+  userId,
+  chatId,
+  data,
+  lang
+) {
+  const payroll = await savePaymentProfile(
+    env,
+    userId,
+    data.payroll_id,
+    data
+  );
+  await clearState(env, userId);
+  await notifyStoreAdmins(env, payroll.store_id, [
+    '员工已提交工资收款信息',
+    `工资 ID：${payroll.payroll_id}`,
+    `员工 ID：${payroll.telegram_id}`,
+    `固定工资：${formatMoney(
+      { currency: payroll.currency },
+      Number(payroll.amount_snapshot_micros) / 1_000_000
+    )}`,
+    `银行卡：${payroll.accepts_bank ? payroll.bank_details_snapshot : '不使用'}`,
+    `USDT：${payroll.accepts_usdt ? payroll.usdt_details_snapshot : '不使用'}`,
+    `现金：${payroll.accepts_cash ? '使用' : '不使用'}`
+  ].join('\n'));
+  return sendMessage(env, chatId, t(lang, 'payroll_profile_saved'));
 }
 
 function isIncomeCommand(text, lang) {

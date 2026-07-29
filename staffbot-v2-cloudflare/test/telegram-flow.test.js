@@ -350,3 +350,156 @@ test('rejects a tampered first work date callback', async () => {
     fixture.restore();
   }
 });
+
+test('collects payroll methods with buttons and asks only for selected account text', async () => {
+  const fixture = flowFixture();
+  try {
+    fixture.database.prepare(`
+      INSERT INTO payroll_disbursements (
+        payroll_id, store_id, telegram_id, payroll_start_date,
+        scheduled_date, cycle_day, period_start, cutoff_at,
+        amount_snapshot_micros, currency, status,
+        created_at, updated_at
+      ) VALUES (
+        'PAYROLL-TEST', 'STORE1', '1001', '2026-07-01',
+        '2026-07-16', 16,
+        '2026-07-01T00:00:00.000Z',
+        '2026-07-16T03:00:00.000Z',
+        60000000, '$', 'awaiting_employee_details',
+        '2026-07-16T03:00:00.000Z',
+        '2026-07-16T03:00:00.000Z'
+      )
+    `).run();
+
+    await sendCallback(
+      fixture.env,
+      'pay:d:PAYROLL-TEST',
+      1001
+    );
+    assert.equal(
+      fixture.database.prepare(`
+        SELECT state FROM user_states WHERE telegram_id = '1001'
+      `).get().state,
+      'WAIT_PAYROLL_METHODS'
+    );
+    const methodPrompt = fixture.payloads.at(-1);
+    assert.match(methodPrompt.text, /收款方式/);
+    assert.equal(
+      methodPrompt.reply_markup.inline_keyboard.flat().length,
+      4
+    );
+
+    await sendCallback(
+      fixture.env,
+      'pay:m:b:PAYROLL-TEST',
+      1001,
+      methodPrompt.text
+    );
+    await sendCallback(
+      fixture.env,
+      'pay:m:c:PAYROLL-TEST',
+      1001,
+      methodPrompt.text
+    );
+    await sendCallback(
+      fixture.env,
+      'pay:c:PAYROLL-TEST',
+      1001,
+      methodPrompt.text
+    );
+    assert.equal(
+      fixture.database.prepare(`
+        SELECT state FROM user_states WHERE telegram_id = '1001'
+      `).get().state,
+      'WAIT_PAYROLL_BANK_DETAILS'
+    );
+    assert.match(fixture.payloads.at(-1).text, /银行卡/);
+
+    await sendText(fixture.env, 'Bank account 12345678');
+
+    assert.equal(
+      fixture.database.prepare(`
+        SELECT 1 FROM user_states WHERE telegram_id = '1001'
+      `).get(),
+      undefined
+    );
+    assert.deepEqual(
+      {
+        ...fixture.database.prepare(`
+          SELECT
+            status,
+            accepts_bank,
+            accepts_usdt,
+            accepts_cash,
+            bank_details_snapshot,
+            usdt_details_snapshot
+          FROM payroll_disbursements
+          WHERE payroll_id = 'PAYROLL-TEST'
+        `).get()
+      },
+      {
+        status: 'awaiting_admin_payment',
+        accepts_bank: 1,
+        accepts_usdt: 0,
+        accepts_cash: 1,
+        bank_details_snapshot: 'Bank account 12345678',
+        usdt_details_snapshot: null
+      }
+    );
+    assert.ok(fixture.payloads.some((payload) =>
+      payload.chat_id === '9001'
+      && payload.text.includes('PAYROLL-TEST')
+      && payload.text.includes('Bank account 12345678')
+    ));
+  } finally {
+    fixture.restore();
+  }
+});
+
+test('cash-only payroll details require no free-text answer', async () => {
+  const fixture = flowFixture();
+  try {
+    fixture.database.prepare(`
+      INSERT INTO payroll_disbursements (
+        payroll_id, store_id, telegram_id, payroll_start_date,
+        scheduled_date, cycle_day, period_start, cutoff_at,
+        amount_snapshot_micros, currency, status,
+        created_at, updated_at
+      ) VALUES (
+        'PAYROLL-CASH', 'STORE1', '1001', '2026-07-01',
+        '2026-07-16', 16,
+        '2026-07-01T00:00:00.000Z',
+        '2026-07-16T03:00:00.000Z',
+        60000000, '$', 'awaiting_employee_details',
+        '2026-07-16T03:00:00.000Z',
+        '2026-07-16T03:00:00.000Z'
+      )
+    `).run();
+
+    await sendCallback(fixture.env, 'pay:d:PAYROLL-CASH', 1001);
+    await sendCallback(fixture.env, 'pay:m:c:PAYROLL-CASH', 1001);
+    await sendCallback(fixture.env, 'pay:c:PAYROLL-CASH', 1001);
+
+    assert.equal(
+      fixture.database.prepare(`
+        SELECT state FROM user_states WHERE telegram_id = '1001'
+      `).get(),
+      undefined
+    );
+    assert.deepEqual(
+      {
+        ...fixture.database.prepare(`
+          SELECT status, accepts_cash
+          FROM payroll_disbursements
+          WHERE payroll_id = 'PAYROLL-CASH'
+        `).get()
+      },
+      {
+        status: 'awaiting_admin_payment',
+        accepts_cash: 1
+      }
+    );
+  } finally {
+    fixture.restore();
+  }
+});

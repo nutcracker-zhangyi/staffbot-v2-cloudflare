@@ -3,6 +3,14 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { DatabaseSync } from 'node:sqlite';
 
+import {
+  maskPaymentValue,
+  paymentMethodKeyboard,
+  savePaymentProfile,
+  validatePaymentProfile
+} from '../src/payroll-payments.js';
+import { createD1 } from './helpers/d1.js';
+
 const schema = readFileSync(
   new URL('../db/schema.sql', import.meta.url),
   'utf8'
@@ -196,4 +204,180 @@ test('prevents duplicate proof order object keys and email rows', () => {
     ),
     /UNIQUE constraint failed/
   );
+});
+
+test('validates selected payment methods and masks all but four characters', () => {
+  assert.throws(
+    () => validatePaymentProfile({
+      accepts_bank: false,
+      accepts_usdt: false,
+      accepts_cash: false
+    }),
+    /payment method/
+  );
+  assert.throws(
+    () => validatePaymentProfile({
+      accepts_bank: true,
+      accepts_usdt: false,
+      accepts_cash: false,
+      bank_details: '   '
+    }),
+    /bank details/
+  );
+  assert.throws(
+    () => validatePaymentProfile({
+      accepts_bank: false,
+      accepts_usdt: true,
+      accepts_cash: false,
+      usdt_details: ''
+    }),
+    /USDT details/
+  );
+  assert.deepEqual(
+    validatePaymentProfile({
+      accepts_bank: true,
+      accepts_usdt: false,
+      accepts_cash: true,
+      bank_details: '  1234 5678  '
+    }),
+    {
+      accepts_bank: 1,
+      accepts_usdt: 0,
+      accepts_cash: 1,
+      bank_details: '1234 5678',
+      usdt_details: null
+    }
+  );
+  assert.equal(maskPaymentValue(' 1234 5678 '), '••••5678');
+  assert.equal(maskPaymentValue('ABC'), '••••ABC');
+  assert.equal(maskPaymentValue(''), '');
+});
+
+test('saves a reusable profile and current payroll snapshot atomically', async () => {
+  const database = databaseFixture();
+  try {
+    insertPayroll(database, payroll());
+    const env = { DB: createD1(database) };
+
+    await assert.rejects(
+      savePaymentProfile(env, 'OTHER-EMP', 'PAYROLL-1', {
+        accepts_bank: false,
+        accepts_usdt: false,
+        accepts_cash: true
+      }),
+      /payroll identity mismatch/
+    );
+
+    const saved = await savePaymentProfile(
+      env,
+      'EMP-1',
+      'PAYROLL-1',
+      {
+        accepts_bank: true,
+        accepts_usdt: true,
+        accepts_cash: false,
+        bank_details: 'Bank 12345678',
+        usdt_details: 'TRX-ABCDEFGH'
+      },
+      new Date('2026-07-16T04:00:00.000Z')
+    );
+
+    assert.equal(saved.status, 'awaiting_admin_payment');
+    assert.equal(saved.accepts_bank, 1);
+    assert.equal(saved.accepts_usdt, 1);
+    assert.equal(saved.bank_details_snapshot, 'Bank 12345678');
+    assert.equal(saved.usdt_details_snapshot, 'TRX-ABCDEFGH');
+    assert.deepEqual(
+      {
+        ...database.prepare(`
+          SELECT
+            accepts_bank,
+            accepts_usdt,
+            accepts_cash,
+            bank_details,
+            usdt_details
+          FROM payroll_payment_profiles
+        `).get()
+      },
+      {
+        accepts_bank: 1,
+        accepts_usdt: 1,
+        accepts_cash: 0,
+        bank_details: 'Bank 12345678',
+        usdt_details: 'TRX-ABCDEFGH'
+      }
+    );
+    const audit = database.prepare(`
+      SELECT details_json FROM admin_audit_logs
+      WHERE action = 'save_payroll_payment_profile'
+    `).get().details_json;
+    assert.doesNotMatch(audit, /12345678|ABCDEFGH/);
+    assert.match(audit, /••••5678/);
+  } finally {
+    database.close();
+  }
+});
+
+test('profile edits after admin payment do not rewrite the older snapshot', async () => {
+  const database = databaseFixture();
+  try {
+    insertPayroll(database, payroll({
+      status: 'awaiting_employee_confirmation'
+    }));
+    database.prepare(`
+      UPDATE payroll_disbursements
+      SET accepts_bank = 1,
+          bank_details_snapshot = 'Original 11112222'
+      WHERE payroll_id = 'PAYROLL-1'
+    `).run();
+
+    const saved = await savePaymentProfile(
+      { DB: createD1(database) },
+      'EMP-1',
+      'PAYROLL-1',
+      {
+        accepts_bank: true,
+        accepts_usdt: false,
+        accepts_cash: true,
+        bank_details: 'Future 99998888'
+      },
+      new Date('2026-07-16T05:00:00.000Z')
+    );
+
+    assert.equal(saved.status, 'awaiting_employee_confirmation');
+    assert.equal(saved.accepts_cash, 0);
+    assert.equal(saved.bank_details_snapshot, 'Original 11112222');
+    assert.deepEqual(
+      {
+        ...database.prepare(`
+          SELECT accepts_cash, bank_details
+          FROM payroll_payment_profiles
+        `).get()
+      },
+      {
+        accepts_cash: 1,
+        bank_details: 'Future 99998888'
+      }
+    );
+  } finally {
+    database.close();
+  }
+});
+
+test('builds button-only payment method selection callbacks', () => {
+  const keyboard = paymentMethodKeyboard(
+    'PAYROLL-1',
+    {
+      accepts_bank: 1,
+      accepts_usdt: 0,
+      accepts_cash: 1
+    },
+    'zh'
+  );
+  const buttons = keyboard.inline_keyboard.flat();
+
+  assert.match(buttons[0].text, /☑.*银行卡/);
+  assert.match(buttons[1].text, /☐.*USDT/);
+  assert.match(buttons[2].text, /☑.*现金/);
+  assert.ok(buttons.every((button) => button.callback_data.length <= 64));
 });

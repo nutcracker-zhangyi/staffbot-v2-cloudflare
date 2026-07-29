@@ -16,12 +16,14 @@ export async function answerCallback(env, callbackQueryId, text = '', showAlert 
   });
 }
 
-export async function editCallbackMessage(env, callback, text) {
-  return telegram(env, 'editMessageText', {
+export async function editCallbackMessage(env, callback, text, replyMarkup) {
+  const payload = {
     chat_id: callback.message.chat.id,
     message_id: callback.message.message_id,
     text
-  });
+  };
+  if (replyMarkup) payload.reply_markup = replyMarkup;
+  return telegram(env, 'editMessageText', payload);
 }
 
 export function telegramErrorSummary(result, error = null) {
