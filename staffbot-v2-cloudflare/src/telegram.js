@@ -1559,6 +1559,26 @@ async function finishPayrollUsdtQr(
         t(lang, 'payroll_payment_details_locked')
       );
     }
+    const safeReasons = new Set([
+      'telegram image is required',
+      'telegram image is too large',
+      'telegram_file_lookup_failed',
+      'telegram_file_download_failed',
+      'telegram upload must be an image',
+      'payroll QR storage is not configured',
+      'payroll QR object already exists',
+      'payroll not found',
+      'payroll identity mismatch'
+    ]);
+    await logEvent(env, 'error', 'payroll_usdt_qr_upload_failed', {
+      store_id: data.store_id,
+      telegram_id: userId,
+      payroll_id: data.payroll_id,
+      stage: error.qr_upload_stage || 'precondition',
+      reason: safeReasons.has(error.message)
+        ? error.message
+        : 'unexpected_error'
+    });
     return sendMessage(env, chatId, t(lang, 'payroll_usdt_qr_failed'));
   }
   await clearState(env, userId);

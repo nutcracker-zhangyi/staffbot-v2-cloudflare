@@ -7,6 +7,14 @@ function safeKeyPart(value) {
   return encodeURIComponent(String(value || '').trim());
 }
 
+function tagQrUploadStage(error, stage) {
+  const tagged = error instanceof Error
+    ? error
+    : new Error(String(error));
+  tagged.qr_upload_stage = stage;
+  return tagged;
+}
+
 export function paymentQrObjectKey(owner, qrId, extension) {
   if (!/^[a-z0-9]+$/i.test(extension)) {
     throw new TypeError('invalid QR extension');
@@ -54,7 +62,12 @@ export async function saveTelegramPaymentQr(
     actorId,
     payrollId
   );
-  const image = await downloadTelegramImage(env, photo);
+  let image;
+  try {
+    image = await downloadTelegramImage(env, photo);
+  } catch (error) {
+    throw tagQrUploadStage(error, 'telegram_image');
+  }
   const qrId = makeId('QR');
   const profile = validatePaymentProfile({
     ...profileInput,
@@ -66,14 +79,18 @@ export async function saveTelegramPaymentQr(
     qrId,
     image.extension
   );
-  if (await env.PAYROLL_PROOFS.head(key)) {
-    throw new Error('payroll QR object already exists');
+  try {
+    if (await env.PAYROLL_PROOFS.head(key)) {
+      throw new Error('payroll QR object already exists');
+    }
+    const stored = await env.PAYROLL_PROOFS.put(key, image.bytes, {
+      onlyIf: { etagDoesNotMatch: '*' },
+      httpMetadata: { contentType: image.mime_type }
+    });
+    if (!stored) throw new Error('payroll QR object already exists');
+  } catch (error) {
+    throw tagQrUploadStage(error, 'r2_write');
   }
-  const stored = await env.PAYROLL_PROOFS.put(key, image.bytes, {
-    onlyIf: { etagDoesNotMatch: '*' },
-    httpMetadata: { contentType: image.mime_type }
-  });
-  if (!stored) throw new Error('payroll QR object already exists');
 
   const nowIso = now.toISOString();
   try {
@@ -228,7 +245,7 @@ export async function saveTelegramPaymentQr(
     }
   } catch (error) {
     await env.PAYROLL_PROOFS.delete(key);
-    throw error;
+    throw tagQrUploadStage(error, 'd1_write');
   }
 
   return env.DB.prepare(`

@@ -111,6 +111,9 @@ function flowFixture(fixtureOptions = {}) {
           return proofObjects.has(key) ? {} : null;
         },
         async put(key, value) {
+          if (fixtureOptions.failQrUpload) {
+            throw new Error('PRIVATE-UPLOAD-FILE-ID');
+          }
           proofObjects.set(key, value);
           return {};
         },
@@ -868,6 +871,55 @@ test('a failed admin QR delivery does not undo the saved profile', async () => {
     );
     assert.doesNotMatch(log.payload_json, /PRIVATE-QR-FILE-ID/);
     assert.doesNotMatch(log.payload_json, /payroll-payment-qr/);
+  } finally {
+    fixture.restore();
+  }
+});
+
+test('logs a safe failure stage when employee QR upload fails', async () => {
+  const fixture = flowFixture({ failQrUpload: true });
+  try {
+    insertFlowPayroll(fixture.database, 'PAYROLL-USDT-UPLOAD-FAIL');
+    await sendCallback(
+      fixture.env,
+      'pay:d:PAYROLL-USDT-UPLOAD-FAIL',
+      1001
+    );
+    await sendCallback(
+      fixture.env,
+      'pay:m:u:PAYROLL-USDT-UPLOAD-FAIL',
+      1001
+    );
+    await sendCallback(
+      fixture.env,
+      'pay:c:PAYROLL-USDT-UPLOAD-FAIL',
+      1001
+    );
+    await sendCallback(
+      fixture.env,
+      'pay:um:q:PAYROLL-USDT-UPLOAD-FAIL',
+      1001
+    );
+    await sendPhoto(fixture.env, 'PRIVATE-UPLOAD-FILE-ID', {
+      id: 1001,
+      first_name: 'Alice',
+      username: 'alice'
+    });
+
+    const log = fixture.database.prepare(`
+      SELECT payload_json
+      FROM bot_logs
+      WHERE event = 'payroll_usdt_qr_upload_failed'
+    `).get();
+    assert.ok(log);
+    assert.deepEqual(JSON.parse(log.payload_json), {
+      store_id: 'STORE1',
+      telegram_id: '1001',
+      payroll_id: 'PAYROLL-USDT-UPLOAD-FAIL',
+      stage: 'r2_write',
+      reason: 'unexpected_error'
+    });
+    assert.doesNotMatch(log.payload_json, /PRIVATE-UPLOAD-FILE-ID/);
   } finally {
     fixture.restore();
   }
