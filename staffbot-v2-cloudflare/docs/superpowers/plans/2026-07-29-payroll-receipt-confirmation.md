@@ -438,9 +438,10 @@ Run:
 ```bash
 npx wrangler whoami
 npx wrangler d1 migrations list \
-  staffbot-v2-staging \
+  staffbot_v2_staging \
   --remote \
-  --config wrangler.staging.toml
+  --env staging \
+  --config wrangler.toml
 ```
 
 Expected: the authenticated Cloudflare account is shown and there are no new
@@ -452,7 +453,8 @@ Run:
 
 ```bash
 npx wrangler deploy \
-  --config wrangler.staging.toml
+  --env staging \
+  --config wrangler.toml
 ```
 
 Expected: deployment succeeds for
