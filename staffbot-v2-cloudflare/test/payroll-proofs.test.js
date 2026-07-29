@@ -10,6 +10,7 @@ import {
   readPayrollProof,
   storeTelegramProof
 } from '../src/payroll-proofs.js';
+import { downloadTelegramImage } from '../src/telegram-images.js';
 import { createD1 } from './helpers/d1.js';
 
 const schema = readFileSync(
@@ -183,6 +184,69 @@ test('downloads the largest Telegram photo and stores object before metadata', a
     fixture.database.close();
   }
 });
+
+for (const imageCase of [
+  {
+    name: 'PNG',
+    bytes: Buffer.from(
+      'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=',
+      'base64'
+    ),
+    extension: 'png',
+    mimeType: 'image/png'
+  },
+  {
+    name: 'JPEG',
+    bytes: Buffer.from([0xff, 0xd8, 0xff, 0xd9]),
+    extension: 'jpg',
+    mimeType: 'image/jpeg'
+  },
+  {
+    name: 'WebP',
+    bytes: Buffer.from('RIFF0000WEBP'),
+    extension: 'webp',
+    mimeType: 'image/webp'
+  }
+]) {
+  test(`detects a ${imageCase.name} when Telegram returns a generic content type`, async () => {
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = async (url) => {
+      if (String(url).includes('/getFile')) {
+        return {
+          async json() {
+            return {
+              ok: true,
+              result: { file_path: 'photos/qr' }
+            };
+          }
+        };
+      }
+      return new Response(imageCase.bytes, {
+        headers: { 'content-type': 'application/octet-stream' }
+      });
+    };
+    try {
+      const image = await downloadTelegramImage(
+        {
+          BOT_TOKEN: 'test-token',
+          ENVIRONMENT: 'production'
+        },
+        [{
+          file_id: `${imageCase.name}-FILE`,
+          file_size: imageCase.bytes.byteLength,
+          width: 1,
+          height: 1
+        }]
+      );
+
+      assert.equal(image.extension, imageCase.extension);
+      assert.equal(image.mime_type, imageCase.mimeType);
+      assert.equal(image.size_bytes, imageCase.bytes.byteLength);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+}
 
 test('keeps existing proof image validation errors', async (context) => {
   await context.test('requires a Telegram photo', async () => {

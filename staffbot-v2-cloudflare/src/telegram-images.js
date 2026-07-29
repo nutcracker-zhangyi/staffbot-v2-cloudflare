@@ -10,6 +10,39 @@ const IMAGE_EXTENSIONS = new Map([
 ]);
 const DEFAULT_MAX_BYTES = 10 * 1024 * 1024;
 
+function imageTypeFromBytes(bytes) {
+  const view = new Uint8Array(bytes);
+  if (view.length >= 8
+    && view[0] === 0x89
+    && view[1] === 0x50
+    && view[2] === 0x4e
+    && view[3] === 0x47
+    && view[4] === 0x0d
+    && view[5] === 0x0a
+    && view[6] === 0x1a
+    && view[7] === 0x0a) {
+    return { extension: 'png', mime_type: 'image/png' };
+  }
+  if (view.length >= 3
+    && view[0] === 0xff
+    && view[1] === 0xd8
+    && view[2] === 0xff) {
+    return { extension: 'jpg', mime_type: 'image/jpeg' };
+  }
+  if (view.length >= 12
+    && view[0] === 0x52
+    && view[1] === 0x49
+    && view[2] === 0x46
+    && view[3] === 0x46
+    && view[8] === 0x57
+    && view[9] === 0x45
+    && view[10] === 0x42
+    && view[11] === 0x50) {
+    return { extension: 'webp', mime_type: 'image/webp' };
+  }
+  return null;
+}
+
 export function largestTelegramPhoto(photo) {
   const photos = Array.isArray(photo) ? photo : [photo];
   return photos
@@ -44,20 +77,23 @@ export async function downloadTelegramImage(
   const mimeType = String(
     response.headers.get('content-type') || ''
   ).split(';')[0].trim().toLowerCase();
-  const extension = IMAGE_EXTENSIONS.get(mimeType);
-  if (!extension) {
-    throw new TypeError('telegram upload must be an image');
-  }
   const bytes = await response.arrayBuffer();
   if (!bytes.byteLength || bytes.byteLength > maxBytes) {
     throw new RangeError('telegram image is too large');
   }
+  const declaredExtension = IMAGE_EXTENSIONS.get(mimeType);
+  const imageType = declaredExtension
+    ? { extension: declaredExtension, mime_type: mimeType }
+    : imageTypeFromBytes(bytes);
+  if (!imageType) {
+    throw new TypeError('telegram upload must be an image');
+  }
 
   return {
     bytes,
-    extension,
+    extension: imageType.extension,
     file_name: telegramFile.file_path.split('/').at(-1) || null,
-    mime_type: mimeType,
+    mime_type: imageType.mime_type,
     size_bytes: bytes.byteLength,
     telegram_file_id: selectedPhoto.file_id
   };
