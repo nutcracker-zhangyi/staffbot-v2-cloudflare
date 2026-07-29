@@ -5,6 +5,7 @@ export * from './ids.js';
 export * from './money.js';
 export * from './payroll-cycle.js';
 export * from './payroll-ledger.js';
+export * from './payroll-settlement.js';
 export * from './security.js';
 export {
   attendanceEmployeeStats,

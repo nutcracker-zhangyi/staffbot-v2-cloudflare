@@ -208,6 +208,27 @@ export function createReversalDraft(originalEntry, adminId, effectiveAt, entryId
   }, originalEntry);
 }
 
+export function createNegativeCarryDraft(payroll, createdAt) {
+  return validatePayrollEntry({
+    entry_id: `PAY-CARRY:${payroll.payroll_id}`,
+    store_id: payroll.store_id,
+    telegram_id: payroll.telegram_id,
+    type: 'negative_carry',
+    amount_micros: payroll.amount_snapshot_micros,
+    currency: payroll.currency,
+    effective_at: payroll.cutoff_at,
+    source: 'payroll_negative_carry',
+    source_id: payroll.payroll_id,
+    created_by: 'SYSTEM',
+    created_at: createdAt,
+    reverses_entry_id: null,
+    metadata_json: JSON.stringify({
+      payroll_id: payroll.payroll_id,
+      scheduled_date: payroll.scheduled_date
+    })
+  });
+}
+
 export function payrollEntryInsertStatement(env, entry, originalEntry = null) {
   validatePayrollEntry(entry, originalEntry);
   return env.DB.prepare(`
