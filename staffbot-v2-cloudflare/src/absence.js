@@ -42,6 +42,7 @@ export async function processAbsenceFines(env, now = new Date()) {
         SELECT m.telegram_id,
                m.joined_at,
                m.absence_check_enabled_at,
+               m.payroll_start_date,
                COALESCE(NULLIF(m.display_name, ''), NULLIF(u.name, ''), NULLIF(u.username, ''), m.telegram_id) AS display_name
         FROM store_members m
         LEFT JOIN users u ON u.telegram_id = m.telegram_id
@@ -66,6 +67,8 @@ export async function processAbsenceFines(env, now = new Date()) {
       `).bind(store.store_id, businessDate, businessDate).all();
 
       for (const member of candidates.results || []) {
+        if (!member.payroll_start_date
+          || businessDate < member.payroll_start_date) continue;
         if (localDate(new Date(member.joined_at), timezone) > businessDate) continue;
         if (member.absence_check_enabled_at
           && localDate(new Date(member.absence_check_enabled_at), timezone) > businessDate) continue;
@@ -82,6 +85,8 @@ export async function processAbsenceFines(env, now = new Date()) {
             AND m.joined_at < ?
             AND m.absence_check_enabled_at IS NOT NULL
             AND m.absence_check_enabled_at < ?
+            AND m.payroll_start_date IS NOT NULL
+            AND m.payroll_start_date <= ?
             AND NOT EXISTS (
               SELECT 1 FROM attendance_records a
               WHERE a.store_id = m.store_id
@@ -96,7 +101,8 @@ export async function processAbsenceFines(env, now = new Date()) {
             )
         `).bind(
           makeId('ABS'), store.store_id, member.telegram_id, businessDate, fine, fine, now.toISOString(),
-          store.store_id, member.telegram_id, nextBusinessDate, nextBusinessDate, businessDate, businessDate
+          store.store_id, member.telegram_id, nextBusinessDate, nextBusinessDate,
+          businessDate, businessDate, businessDate
         ).run();
       }
 

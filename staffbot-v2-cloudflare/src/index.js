@@ -9,7 +9,8 @@ export * from './security.js';
 export {
   attendanceEmployeeStats,
   normalizeAbsenceFineSetting,
-  normalizeEmployeeAbsenceCheck
+  normalizeEmployeeAbsenceCheck,
+  normalizeMemberPayrollStart
 } from './admin-api.js';
 export { approveLeaveRequest } from './approvals.js';
 export * from './absence.js';

@@ -248,7 +248,7 @@ export function adminHtml(env) {
         store_id:'店铺 ID', name:'名称', timezone:'时区', currency:'货币', checkin_time:'签到时间', checkout_time:'签退时间',
         late_fine:'迟到罚款', early_leave_fine:'早退罚款', absence_fine_enabled:'缺勤罚款', absence_fine:'缺勤罚款金额', leave_min_notice_days:'最早提前天数', leave_max_notice_days:'最晚提前天数', leave_monthly_limit:'每月请假上限', leave_daily_limit:'同日请假人数上限', leave_same_day_cutoff_hour:'当天请假截止小时', status:'状态', save_store:'保存店铺', clear:'清空', edit:'编辑',
         disable:'禁用', enable:'启用', delete:'删除', action:'操作', new_store:'新建店铺', employee_name:'姓名',
-        username:'用户名', role:'角色', commission_rate:'提成比例', commission_income:'提成收入', absence_check_enabled:'每日缺勤检查', save_member:'保存员工', telegram_name:'Telegram 名字', display_name:'员工姓名',
+        username:'用户名', role:'角色', commission_rate:'提成比例', commission_income:'提成收入', absence_check_enabled:'每日缺勤检查', payroll_start_date:'第一工作日期', payroll_automation_started_at:'自动发薪启用时间', save_member:'保存员工', telegram_name:'Telegram 名字', display_name:'员工姓名',
         cycle_start:'工资周期开始', joined_at:'加入时间', updated_at:'更新时间', decided_at:'决定时间', request_id:'请求 ID', record_id:'记录 ID',
         fine:'罚款', original_fine:'原始罚款', submitted_at:'提交时间', approved_at:'批准时间', admin_id:'管理员 ID', source:'来源',
         amount_snapshot:'申请金额', amount:'金额', requested_at:'申请时间', period_start:'周期开始', period_end:'周期结束',
@@ -273,7 +273,7 @@ export function adminHtml(env) {
         store_id:'Store ID', name:'Name', timezone:'Timezone', currency:'Currency', checkin_time:'Check-in time', checkout_time:'Check-out time',
         late_fine:'Late fine', early_leave_fine:'Early leave fine', absence_fine_enabled:'Absence fine', absence_fine:'Absence fine amount', leave_min_notice_days:'Earliest leave days', leave_max_notice_days:'Latest leave days', leave_monthly_limit:'Monthly leave limit', leave_daily_limit:'Daily leave limit', leave_same_day_cutoff_hour:'Same-day leave cutoff hour', status:'Status', save_store:'Save store', clear:'Clear', edit:'Edit',
         disable:'Disable', enable:'Enable', delete:'Delete', action:'Action', new_store:'New store', employee_name:'Employee name',
-        username:'Username', role:'Role', commission_rate:'Commission', commission_income:'Commission income', absence_check_enabled:'Daily absence check', save_member:'Save member', telegram_name:'Telegram name', display_name:'Display name',
+        username:'Username', role:'Role', commission_rate:'Commission', commission_income:'Commission income', absence_check_enabled:'Daily absence check', payroll_start_date:'First work date', payroll_automation_started_at:'Payroll automation started', save_member:'Save member', telegram_name:'Telegram name', display_name:'Display name',
         cycle_start:'Cycle start', joined_at:'Joined at', updated_at:'Updated at', decided_at:'Decided at', request_id:'Request ID', record_id:'Record ID',
         fine:'Fine', original_fine:'Original fine', submitted_at:'Submitted at', approved_at:'Approved at', admin_id:'Admin ID', source:'Source',
         amount_snapshot:'Requested amount', amount:'Amount', requested_at:'Requested at', period_start:'Period start', period_end:'Period end',
@@ -298,7 +298,7 @@ export function adminHtml(env) {
         store_id:'ID cửa hàng', name:'Tên', timezone:'Múi giờ', currency:'Tiền tệ', checkin_time:'Giờ vào ca', checkout_time:'Giờ ra ca',
         late_fine:'Phạt đi muộn', early_leave_fine:'Phạt về sớm', absence_fine_enabled:'Phạt vắng mặt', absence_fine:'Mức phạt vắng mặt', status:'Trạng thái', save_store:'Lưu cửa hàng', clear:'Xóa form', edit:'Sửa',
         disable:'Tắt', enable:'Bật', delete:'Xóa', action:'Thao tác', new_store:'Cửa hàng mới', employee_name:'Tên nhân viên',
-        username:'Tên người dùng', role:'Vai trò', commission_rate:'Tỷ lệ hoa hồng', commission_income:'Thu nhập hoa hồng', absence_check_enabled:'Kiểm tra vắng mặt hằng ngày', save_member:'Lưu nhân viên', telegram_name:'Tên Telegram', display_name:'Tên hiển thị',
+        username:'Tên người dùng', role:'Vai trò', commission_rate:'Tỷ lệ hoa hồng', commission_income:'Thu nhập hoa hồng', absence_check_enabled:'Kiểm tra vắng mặt hằng ngày', payroll_start_date:'Ngày làm việc đầu tiên', payroll_automation_started_at:'Bắt đầu tự động trả lương', save_member:'Lưu nhân viên', telegram_name:'Tên Telegram', display_name:'Tên hiển thị',
         cycle_start:'Bắt đầu kỳ lương', joined_at:'Ngày tham gia', updated_at:'Cập nhật', decided_at:'Thời gian quyết định', request_id:'ID yêu cầu', record_id:'ID bản ghi',
         fine:'Phạt', original_fine:'Phạt ban đầu', submitted_at:'Ngày gửi', approved_at:'Ngày duyệt', admin_id:'ID quản trị', source:'Nguồn',
         amount_snapshot:'Số tiền yêu cầu', amount:'Số tiền', requested_at:'Ngày yêu cầu', period_start:'Bắt đầu kỳ', period_end:'Kết thúc kỳ',
@@ -323,7 +323,7 @@ export function adminHtml(env) {
         store_id:'ID магазина', name:'Название', timezone:'Часовой пояс', currency:'Валюта', checkin_time:'Начало смены', checkout_time:'Конец смены',
         late_fine:'Штраф за опоздание', early_leave_fine:'Штраф за ранний уход', absence_fine_enabled:'Штраф за отсутствие', absence_fine:'Размер штрафа за отсутствие', status:'Статус', save_store:'Сохранить магазин', clear:'Очистить', edit:'Редактировать',
         disable:'Отключить', enable:'Включить', delete:'Удалить', action:'Действие', new_store:'Новый магазин', employee_name:'Имя сотрудника',
-        username:'Имя пользователя', role:'Роль', commission_rate:'Комиссия', commission_income:'Комиссионный доход', absence_check_enabled:'Ежедневная проверка отсутствия', save_member:'Сохранить сотрудника', telegram_name:'Имя Telegram', display_name:'Отображаемое имя',
+        username:'Имя пользователя', role:'Роль', commission_rate:'Комиссия', commission_income:'Комиссионный доход', absence_check_enabled:'Ежедневная проверка отсутствия', payroll_start_date:'Первый рабочий день', payroll_automation_started_at:'Автоматическая выплата включена', save_member:'Сохранить сотрудника', telegram_name:'Имя Telegram', display_name:'Отображаемое имя',
         cycle_start:'Начало цикла', joined_at:'Дата вступления', updated_at:'Обновлено', decided_at:'Время решения', request_id:'ID запроса', record_id:'ID записи',
         fine:'Штраф', original_fine:'Исходный штраф', submitted_at:'Отправлено', approved_at:'Одобрено', admin_id:'ID администратора', source:'Источник',
         amount_snapshot:'Сумма запроса', amount:'Сумма', requested_at:'Время запроса', period_start:'Начало периода', period_end:'Конец периода',
@@ -1079,13 +1079,13 @@ export function adminHtml(env) {
         action: '<button data-member-edit="' + esc(member.telegram_id) + '">' + L('edit') + '</button> <button class="' + (member.status === 'active' ? 'danger' : '') + '" data-member-toggle="' + esc(member.telegram_id) + '">' + (member.status === 'active' ? L('disable') : L('enable')) + '</button> <button class="danger" data-member-delete="' + esc(member.telegram_id) + '">' + L('delete') + '</button>'
       }));
       $('tab-members').innerHTML = memberFilterPanel() + '<h2>' + L('members') + '</h2>' +
-        '<div class="grid"><label>' + L('telegram_id') + '<input id="memberId"></label><label>' + L('employee_name') + '<input id="memberName"></label><label>' + L('username') + '<input id="memberUsername"></label><label>' + L('role') + '<select id="memberRole"><option>employee</option><option>admin</option><option>owner</option></select></label><label>' + L('status') + '<select id="memberStatus"><option>active</option><option>pending</option><option>disabled</option></select></label><label>' + L('commission_rate') + '<input id="memberCommission" inputmode="decimal" value="60"></label><label>' + L('absence_check_enabled') + '<select id="memberAbsenceCheck"><option value="true">' + L('enable') + '</option><option value="false">' + L('disable') + '</option></select></label></div>' +
+        '<div class="grid"><label>' + L('telegram_id') + '<input id="memberId"></label><label>' + L('employee_name') + '<input id="memberName"></label><label>' + L('username') + '<input id="memberUsername"></label><label>' + L('role') + '<select id="memberRole"><option>employee</option><option>admin</option><option>owner</option></select></label><label>' + L('status') + '<select id="memberStatus"><option>active</option><option>pending</option><option>disabled</option></select></label><label>' + L('commission_rate') + '<input id="memberCommission" inputmode="decimal" value="60"></label><label>' + L('absence_check_enabled') + '<select id="memberAbsenceCheck"><option value="true">' + L('enable') + '</option><option value="false">' + L('disable') + '</option></select></label><label>' + L('payroll_start_date') + '<input id="memberPayrollStartDate" type="date"></label></div>' +
         '<div class="row" style="margin-top:10px"><button id="saveMember">' + L('save_member') + '</button><button id="clearMember" class="secondary">' + L('clear') + '</button></div>' +
-        table(members.map((member) => ({ ...member, commission_rate: percentForDisplay(member.commission_rate) })), ['store_id','telegram_id','display_name','username','role','status','commission_rate','absence_check_enabled','cycle_start','joined_at','action'], true, 'members') +
+        table(members.map((member) => ({ ...member, commission_rate: percentForDisplay(member.commission_rate) })), ['store_id','telegram_id','display_name','username','role','status','commission_rate','absence_check_enabled','payroll_start_date','payroll_automation_started_at','cycle_start','joined_at','action'], true, 'members') +
         pager('members', 'members_page', data.pagination && data.pagination.members);
       bindFilterControls();
       $('saveMember').onclick = () => withBusy($('saveMember'), async () => {
-        await api('/api/admin/stores/' + encodeURIComponent(storeId()) + '/members', { method:'POST', body: JSON.stringify({ telegram_id:$('memberId').value, name:$('memberName').value, username:$('memberUsername').value, role:$('memberRole').value, status:$('memberStatus').value, commission_rate: Number($('memberCommission').value || 60) / 100, absence_check_enabled: $('memberAbsenceCheck').value === 'true' }) });
+        await api('/api/admin/stores/' + encodeURIComponent(storeId()) + '/members', { method:'POST', body: JSON.stringify({ telegram_id:$('memberId').value, name:$('memberName').value, username:$('memberUsername').value, role:$('memberRole').value, status:$('memberStatus').value, commission_rate: Number($('memberCommission').value || 60) / 100, absence_check_enabled: $('memberAbsenceCheck').value === 'true', payroll_start_date: $('memberPayrollStartDate').value }) });
         await renderMembers();
       });
       $('clearMember').onclick = () => fillMemberForm({});
@@ -1134,6 +1134,7 @@ export function adminHtml(env) {
       $('memberCommission').value = percentForInput(member.commission_rate);
       $('memberAbsenceCheck').value =
         member.absence_check_enabled === 0 ? 'false' : 'true';
+      $('memberPayrollStartDate').value = member.payroll_start_date || '';
     }
 
     async function renderIncome() {

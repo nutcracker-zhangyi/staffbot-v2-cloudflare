@@ -239,6 +239,7 @@ function memberAbsenceTestDatabase() {
       store_id TEXT NOT NULL, telegram_id TEXT NOT NULL, display_name TEXT, role TEXT, status TEXT,
       commission_rate REAL, cycle_start TEXT, joined_at TEXT, updated_at TEXT,
       absence_check_enabled INTEGER NOT NULL DEFAULT 1, absence_check_enabled_at TEXT,
+      payroll_start_date TEXT, payroll_automation_started_at TEXT,
       PRIMARY KEY (store_id, telegram_id)
     );
     CREATE TABLE absence_fine_requests (
@@ -263,8 +264,8 @@ function memberAbsenceTestDatabase() {
 
     INSERT INTO admin_sessions VALUES ('session-1', 'ADMIN', '2099-01-01T00:00:00.000Z', '2026-07-15T00:00:00.000Z');
     INSERT INTO users VALUES ('U1', 'Alice', 'alice', 'employee', 'active', '2026-07-01T00:00:00.000Z', '2026-07-01T00:00:00.000Z', '2026-07-01T00:00:00.000Z');
-    INSERT INTO store_members VALUES ('S1', 'U1', 'Alice', 'employee', 'active', 0.6, '2026-07-01T00:00:00.000Z', '2026-07-01T00:00:00.000Z', '2026-07-01T00:00:00.000Z', 1, '2026-07-01T00:00:00.000Z');
-    INSERT INTO store_members VALUES ('S2', 'U1', 'Alice', 'employee', 'active', 0.6, '2026-07-01T00:00:00.000Z', '2026-07-01T00:00:00.000Z', '2026-07-01T00:00:00.000Z', 1, '2026-07-01T00:00:00.000Z');
+    INSERT INTO store_members VALUES ('S1', 'U1', 'Alice', 'employee', 'active', 0.6, '2026-07-01T00:00:00.000Z', '2026-07-01T00:00:00.000Z', '2026-07-01T00:00:00.000Z', 1, '2026-07-01T00:00:00.000Z', NULL, NULL);
+    INSERT INTO store_members VALUES ('S2', 'U1', 'Alice', 'employee', 'active', 0.6, '2026-07-01T00:00:00.000Z', '2026-07-01T00:00:00.000Z', '2026-07-01T00:00:00.000Z', 1, '2026-07-01T00:00:00.000Z', NULL, NULL);
 
     INSERT INTO absence_fine_requests VALUES ('PENDING-S1-U1', 'S1', 'U1', 'pending', NULL, NULL, NULL);
     INSERT INTO absence_fine_requests VALUES ('APPROVED-S1-U1', 'S1', 'U1', 'approved', NULL, '2026-07-14T00:00:00.000Z', 'ADMIN');
@@ -286,7 +287,8 @@ function attendanceStatsTestDatabase() {
     CREATE TABLE users (telegram_id TEXT PRIMARY KEY, name TEXT, username TEXT);
     CREATE TABLE store_members (
       store_id TEXT, telegram_id TEXT, display_name TEXT, status TEXT, joined_at TEXT,
-      absence_check_enabled INTEGER NOT NULL DEFAULT 1, absence_check_enabled_at TEXT
+      absence_check_enabled INTEGER NOT NULL DEFAULT 1, absence_check_enabled_at TEXT,
+      payroll_start_date TEXT
     );
     CREATE TABLE attendance_records (
       record_id TEXT PRIMARY KEY, store_id TEXT, telegram_id TEXT,
@@ -307,11 +309,11 @@ function attendanceStatsTestDatabase() {
     INSERT INTO stores VALUES ('TOKYO', 'Tokyo Club', 'Asia/Tokyo', '¥');
     INSERT INTO users VALUES ('U1', 'Telegram Alice', 'alice');
     INSERT INTO users VALUES ('U2', 'Bob', 'bob');
-    INSERT INTO store_members VALUES ('TOKYO', 'U1', 'Alice', 'active', '2026-07-09T16:00:00.000Z', 1, '2026-07-09T16:00:00.000Z');
-    INSERT INTO store_members VALUES ('TOKYO', 'U2', '', 'active', '2026-07-14T02:00:00.000Z', 1, '2026-07-14T02:00:00.000Z');
-    INSERT INTO store_members VALUES ('TOKYO', 'U3', 'Disabled', 'disabled', '2026-07-01T00:00:00.000Z', 1, '2026-07-01T00:00:00.000Z');
-    INSERT INTO store_members VALUES ('TOKYO', 'U4', 'Exempt', 'active', '2026-07-09T00:00:00.000Z', 0, NULL);
-    INSERT INTO store_members VALUES ('TOKYO', 'U5', 'Re-enabled', 'active', '2026-07-09T00:00:00.000Z', 1, '2026-07-12T15:00:00.000Z');
+    INSERT INTO store_members VALUES ('TOKYO', 'U1', 'Alice', 'active', '2026-07-09T16:00:00.000Z', 1, '2026-07-09T16:00:00.000Z', '2026-07-10');
+    INSERT INTO store_members VALUES ('TOKYO', 'U2', '', 'active', '2026-07-14T02:00:00.000Z', 1, '2026-07-14T02:00:00.000Z', '2026-07-14');
+    INSERT INTO store_members VALUES ('TOKYO', 'U3', 'Disabled', 'disabled', '2026-07-01T00:00:00.000Z', 1, '2026-07-01T00:00:00.000Z', '2026-07-01');
+    INSERT INTO store_members VALUES ('TOKYO', 'U4', 'Exempt', 'active', '2026-07-09T00:00:00.000Z', 0, NULL, '2026-07-09');
+    INSERT INTO store_members VALUES ('TOKYO', 'U5', 'Re-enabled', 'active', '2026-07-09T00:00:00.000Z', 1, '2026-07-12T15:00:00.000Z', '2026-07-09');
 
     INSERT INTO attendance_records VALUES ('IN-10', 'TOKYO', 'U1', '2026-07-10', 'checkin', 1);
     INSERT INTO attendance_records VALUES ('IN-11', 'TOKYO', 'U1', '2026-07-11', 'checkin', 0);
@@ -385,7 +387,7 @@ function absenceCronTestDatabase() {
     CREATE TABLE store_members (
       store_id TEXT, telegram_id TEXT, display_name TEXT, role TEXT, status TEXT,
       joined_at TEXT, absence_check_enabled INTEGER NOT NULL DEFAULT 1,
-      absence_check_enabled_at TEXT,
+      absence_check_enabled_at TEXT, payroll_start_date TEXT,
       PRIMARY KEY (store_id, telegram_id)
     );
     CREATE TABLE attendance_records (
@@ -417,11 +419,13 @@ function absenceCronTestDatabase() {
     );
     INSERT INTO store_members VALUES (
       'STORE1', 'U1', 'Alice', 'employee', 'active',
-      '2026-07-01T00:00:00.000Z', 1, '2026-07-01T00:00:00.000Z'
+      '2026-07-01T00:00:00.000Z', 1, '2026-07-01T00:00:00.000Z',
+      '2026-07-01'
     );
     INSERT INTO store_members VALUES (
       'STORE1', 'A1', 'Admin', 'admin', 'active',
-      '2026-07-01T00:00:00.000Z', 1, '2026-07-01T00:00:00.000Z'
+      '2026-07-01T00:00:00.000Z', 1, '2026-07-01T00:00:00.000Z',
+      NULL
     );
   `);
   return database;
@@ -656,6 +660,21 @@ test('starts absence statistics for a re-enabled employee on the store-local ena
   });
 });
 
+test('does not count absence statistics before the employee first work date', async () => {
+  const database = attendanceStatsTestDatabase();
+  database.prepare(`
+    UPDATE store_members
+    SET payroll_start_date = '2026-07-15'
+    WHERE store_id = 'TOKYO' AND telegram_id = 'U1'
+  `).run();
+
+  const rows = await attendanceEmployeeStats({ DB: d1TestDatabase(database) }, {
+    storeIds: ['TOKYO'], employeeId: 'U1', monthDateStart: '2026-07-09', monthDateEnd: '2026-07-21'
+  }, new Date('2026-07-15T03:00:00.000Z'));
+
+  assert.equal(rows[0].absence_days, 0);
+});
+
 test('hides disabled stores from admin store choices', () => {
   assert.deepEqual(visibleAdminStores([
     { store_id: 'A', status: 'active' },
@@ -884,7 +903,7 @@ test('member form exposes daily absence checking', () => {
   assert.match(source, /memberAbsenceCheck/);
   assert.equal((source.match(/absence_check_enabled:'[^']+'/g) || []).length, 4);
   assert.equal((adminApiSource.match(/m\.commission_rate,\s*m\.absence_check_enabled,/g) || []).length, 2);
-  assert.match(source, /\['store_id','telegram_id','display_name','username','role','status','commission_rate','absence_check_enabled','cycle_start','joined_at','action'\]/);
+  assert.match(source, /\['store_id','telegram_id','display_name','username','role','status','commission_rate','absence_check_enabled','payroll_start_date','payroll_automation_started_at','cycle_start','joined_at','action'\]/);
   assert.match(source, /absence_check_enabled:\s*member\.absence_check_enabled === 0 \? L\('disable'\) : L\('enable'\)/);
   assert.match(source, /absence_check_enabled:\s*\$\('memberAbsenceCheck'\)\.value === 'true'/);
   assert.match(source, /absence_check_enabled:\s*member\.absence_check_enabled !== 0/);
@@ -1779,6 +1798,33 @@ test('rechecks employee eligibility when inserting an absence after candidate di
   assert.equal(database.prepare(`SELECT COUNT(*) AS total FROM absence_fine_requests`).get().total, 0);
 });
 
+test('does not create an absence before the employee first work date', async () => {
+  const database = absenceCronTestDatabase();
+  database.prepare(`
+    UPDATE store_members
+    SET payroll_start_date = '2026-07-15'
+    WHERE store_id = 'STORE1' AND telegram_id = 'U1'
+  `).run();
+  const env = {
+    ENVIRONMENT: 'production',
+    BOT_TOKEN: 'test',
+    ADMIN_IDS: '',
+    DB: d1TestDatabase(database)
+  };
+
+  await processAbsenceFines(
+    env,
+    new Date('2026-07-15T03:10:00.000Z')
+  );
+
+  assert.equal(
+    database.prepare(`
+      SELECT COUNT(*) AS total FROM absence_fine_requests
+    `).get().total,
+    0
+  );
+});
+
 test('rechecks request and employee state when inserting a notification from a stale snapshot', async () => {
   const database = absenceCronTestDatabase();
   database.exec(`
@@ -1845,10 +1891,10 @@ test('discovers each absence once while excluding an exempt employee and a not-y
             if (/FROM stores/.test(sql)) return { results: [store] };
             if (/FROM store_members m/.test(sql)) {
               const members = [
-                { telegram_id: '10', joined_at: '2026-07-01T00:00:00.000Z', display_name: 'Alice', absence_check_enabled: 1, absence_check_enabled_at: '2026-07-01T00:00:00.000Z' },
-                { telegram_id: '11', joined_at: '2026-07-15T00:00:00.000Z', display_name: 'Bob', absence_check_enabled: 1, absence_check_enabled_at: '2026-07-15T00:00:00.000Z' },
-                { telegram_id: '12', joined_at: '2026-07-01T00:00:00.000Z', display_name: 'Exempt', absence_check_enabled: 0, absence_check_enabled_at: null },
-                { telegram_id: '13', joined_at: '2026-07-01T00:00:00.000Z', display_name: 'Re-enabled', absence_check_enabled: 1, absence_check_enabled_at: '2026-07-14T15:00:00.000Z' }
+                { telegram_id: '10', joined_at: '2026-07-01T00:00:00.000Z', payroll_start_date: '2026-07-01', display_name: 'Alice', absence_check_enabled: 1, absence_check_enabled_at: '2026-07-01T00:00:00.000Z' },
+                { telegram_id: '11', joined_at: '2026-07-15T00:00:00.000Z', payroll_start_date: '2026-07-15', display_name: 'Bob', absence_check_enabled: 1, absence_check_enabled_at: '2026-07-15T00:00:00.000Z' },
+                { telegram_id: '12', joined_at: '2026-07-01T00:00:00.000Z', payroll_start_date: '2026-07-01', display_name: 'Exempt', absence_check_enabled: 0, absence_check_enabled_at: null },
+                { telegram_id: '13', joined_at: '2026-07-01T00:00:00.000Z', payroll_start_date: '2026-07-01', display_name: 'Re-enabled', absence_check_enabled: 1, absence_check_enabled_at: '2026-07-14T15:00:00.000Z' }
               ];
               return { results: /m\.absence_check_enabled = 1/.test(sql)
                 ? members.filter((member) => member.absence_check_enabled === 1)

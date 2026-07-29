@@ -41,7 +41,8 @@ import {
   completedAttendanceDate,
   dateRange,
   localDate,
-  localTime
+  localTime,
+  zonedMidnightIso
 } from './dates.js';
 import {
   DashboardInputError,
@@ -81,6 +82,70 @@ function financialApprovalResponse(result) {
     return json(result, 409);
   }
   return json(result);
+}
+
+function validCalendarDate(value) {
+  const text = String(value || '').trim();
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(text)) return '';
+  const date = new Date(`${text}T00:00:00.000Z`);
+  return Number.isNaN(date.getTime()) || date.toISOString().slice(0, 10) !== text
+    ? ''
+    : text;
+}
+
+export function normalizeMemberPayrollStart(
+  body,
+  currentMember,
+  store,
+  now = new Date()
+) {
+  const existingDate = currentMember
+    ? currentMember.payroll_start_date || null
+    : null;
+  const existingStartedAt = currentMember
+    ? currentMember.payroll_automation_started_at || null
+    : null;
+  const existingCycleStart = currentMember
+    ? currentMember.cycle_start
+    : null;
+  if (!Object.prototype.hasOwnProperty.call(body, 'payroll_start_date')) {
+    return {
+      ok: true,
+      payroll_start_date: existingDate,
+      payroll_automation_started_at: existingStartedAt,
+      cycle_start: existingCycleStart || now.toISOString()
+    };
+  }
+
+  const rawDate = String(body.payroll_start_date || '').trim();
+  if (!rawDate) {
+    if (existingDate) {
+      return { ok: false, error: 'payroll_start_date_required' };
+    }
+    return {
+      ok: true,
+      payroll_start_date: null,
+      payroll_automation_started_at: null,
+      cycle_start: existingCycleStart || now.toISOString()
+    };
+  }
+  const payrollStartDate = validCalendarDate(rawDate);
+  if (!payrollStartDate) {
+    return { ok: false, error: 'invalid_payroll_start_date' };
+  }
+  if (existingDate && existingDate !== payrollStartDate) {
+    return { ok: false, error: 'payroll_start_date_locked' };
+  }
+
+  return {
+    ok: true,
+    payroll_start_date: payrollStartDate,
+    payroll_automation_started_at: existingStartedAt || now.toISOString(),
+    cycle_start: existingCycleStart || zonedMidnightIso(
+      payrollStartDate,
+      store && store.timezone ? store.timezone : 'Asia/Tokyo'
+    )
+  };
 }
 
 function financialCorrectionResponse(result) {
@@ -385,6 +450,8 @@ async function handleAdminMembers(request, env, url, storeId, parts, adminId) {
           m.status,
           m.commission_rate,
           m.absence_check_enabled,
+          m.payroll_start_date,
+          m.payroll_automation_started_at,
           m.cycle_start,
           m.joined_at,
           m.updated_at
@@ -397,7 +464,7 @@ async function handleAdminMembers(request, env, url, storeId, parts, adminId) {
     if (!filters.ok) return json({ ok: false, error: filters.error }, filters.status);
     const storeWhere = adminStoreWhere('m', filters.storeIds);
     const memberSort = {
-      ...adminSortColumns(['store_id','telegram_id','role','status','commission_rate','cycle_start','joined_at','updated_at'], 'm'),
+      ...adminSortColumns(['store_id','telegram_id','role','status','commission_rate','payroll_start_date','payroll_automation_started_at','cycle_start','joined_at','updated_at'], 'm'),
       display_name: 'display_name',
       telegram_name: 'u.name',
       username: 'u.username'
@@ -413,6 +480,8 @@ async function handleAdminMembers(request, env, url, storeId, parts, adminId) {
         m.status,
         m.commission_rate,
         m.absence_check_enabled,
+        m.payroll_start_date,
+        m.payroll_automation_started_at,
         m.cycle_start,
         m.joined_at,
         m.updated_at
@@ -443,9 +512,31 @@ async function handleAdminMembers(request, env, url, storeId, parts, adminId) {
   const nowDate = new Date();
   const now = nowDate.toISOString();
   const currentMember = await env.DB.prepare(`
-    SELECT absence_check_enabled, absence_check_enabled_at
+    SELECT
+      absence_check_enabled,
+      absence_check_enabled_at,
+      cycle_start,
+      payroll_start_date,
+      payroll_automation_started_at
     FROM store_members WHERE store_id = ? AND telegram_id = ?
   `).bind(storeId, telegramId).first();
+  const needsPayrollTimezone = Object.prototype.hasOwnProperty.call(
+    body,
+    'payroll_start_date'
+  ) && String(body.payroll_start_date || '').trim()
+    && !(currentMember && currentMember.cycle_start);
+  const store = needsPayrollTimezone
+    ? await getStore(env, storeId)
+    : null;
+  const payrollStart = normalizeMemberPayrollStart(
+    body,
+    currentMember,
+    store,
+    nowDate
+  );
+  if (!payrollStart.ok) {
+    return json({ ok: false, error: payrollStart.error }, 400);
+  }
   const absenceCheck = normalizeEmployeeAbsenceCheck(body, currentMember, nowDate);
   const disablingAbsenceCheck = !!currentMember
     && Number(currentMember.absence_check_enabled) === 1
@@ -462,9 +553,11 @@ async function handleAdminMembers(request, env, url, storeId, parts, adminId) {
     env.DB.prepare(`
       INSERT INTO store_members (
         store_id, telegram_id, display_name, role, status, commission_rate,
-        cycle_start, joined_at, updated_at, absence_check_enabled, absence_check_enabled_at
+        cycle_start, joined_at, updated_at,
+        absence_check_enabled, absence_check_enabled_at,
+        payroll_start_date, payroll_automation_started_at
       )
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(store_id, telegram_id) DO UPDATE SET
         display_name = COALESCE(NULLIF(excluded.display_name, ''), store_members.display_name),
         role = excluded.role,
@@ -472,10 +565,18 @@ async function handleAdminMembers(request, env, url, storeId, parts, adminId) {
         commission_rate = excluded.commission_rate,
         absence_check_enabled = excluded.absence_check_enabled,
         absence_check_enabled_at = excluded.absence_check_enabled_at,
+        payroll_start_date = excluded.payroll_start_date,
+        payroll_automation_started_at = excluded.payroll_automation_started_at,
         updated_at = excluded.updated_at
     `).bind(
       storeId, telegramId, String(body.name || ''), role, status, commissionRate,
-      now, now, now, absenceCheck.absence_check_enabled, absenceCheck.absence_check_enabled_at
+      payrollStart.cycle_start,
+      now,
+      now,
+      absenceCheck.absence_check_enabled,
+      absenceCheck.absence_check_enabled_at,
+      payrollStart.payroll_start_date,
+      payrollStart.payroll_automation_started_at
     )
   ];
   if (disablingAbsenceCheck) {
@@ -503,6 +604,11 @@ async function handleAdminMembers(request, env, url, storeId, parts, adminId) {
     absence_check: {
       before: currentMember ? Number(currentMember.absence_check_enabled) : null,
       after: absenceCheck.absence_check_enabled
+    },
+    payroll_start: {
+      before: currentMember ? currentMember.payroll_start_date : null,
+      after: payrollStart.payroll_start_date,
+      automation_started_at: payrollStart.payroll_automation_started_at
     }
   }, now));
   await env.DB.batch(statements);
@@ -944,6 +1050,7 @@ export async function attendanceEmployeeStats(env, filters, now = new Date()) {
         m.joined_at,
         m.absence_check_enabled,
         m.absence_check_enabled_at,
+        m.payroll_start_date,
         e.business_date,
         e.event_kind,
         e.fine
@@ -968,6 +1075,9 @@ export async function attendanceEmployeeStats(env, filters, now = new Date()) {
         const enabledDate = row.absence_check_enabled_at
           ? localDate(new Date(row.absence_check_enabled_at), timezone)
           : startDate;
+        const absenceStartDate = [startDate, enabledDate, row.payroll_start_date]
+          .filter(Boolean)
+          .reduce((latest, date) => date > latest ? date : latest, startDate);
         member = {
           row: {
             store_id: row.store_id,
@@ -983,7 +1093,8 @@ export async function attendanceEmployeeStats(env, filters, now = new Date()) {
           },
           startDate,
           absenceStartDate: Number(row.absence_check_enabled) === 1
-            ? (enabledDate > startDate ? enabledDate : startDate)
+            && row.payroll_start_date
+            ? absenceStartDate
             : null,
           workDates: new Set(),
           lateDates: new Set(),

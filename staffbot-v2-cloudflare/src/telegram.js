@@ -24,7 +24,8 @@ import {
   leaveRuleParams,
   localTime,
   minutesOf,
-  validateLeaveDate
+  validateLeaveDate,
+  zonedMidnightIso
 } from './dates.js';
 import { LANGS, allLangLabels, render, t } from './i18n.js';
 import {
@@ -36,6 +37,10 @@ import {
   parseStoreAmount
 } from './money.js';
 import { getMemberCommissionRate, getTotalIncome } from './payroll.js';
+import {
+  payrollStartDateOptions,
+  validatePayrollStartDate
+} from './payroll-cycle.js';
 import { adminIds, isGlobalAdmin } from './security.js';
 import {
   getMemberDisplayName,
@@ -216,6 +221,31 @@ async function handleCallback(callback, env) {
       await setState(env, userId, 'WAIT_REGISTER_NAME', { store_id: store.store_id });
       await answerCallback(env, callback.id);
       return sendMessage(env, callback.message.chat.id, `${render(lang, 'current_store', { store: store.name })}\n${t(lang, 'ask_register_name')}`);
+    }
+    if (parts[1] === 'paydate') {
+      const store = await getStore(env, parts[2] || DEFAULT_STORE_ID);
+      const selectedDate = parts[3] || '';
+      const state = await getState(env, userId);
+      if (!store
+        || store.status !== 'active'
+        || !state
+        || state.state !== 'WAIT_REGISTER_PAYROLL_DATE'
+        || state.data.store_id !== store.store_id) {
+        return answerCallback(env, callback.id, t(lang, 'invalid_payroll_start_date'), true);
+      }
+      const validation = validatePayrollStartDate(store, selectedDate);
+      if (!validation.ok) {
+        return answerCallback(env, callback.id, t(lang, 'invalid_payroll_start_date'), true);
+      }
+      return finishRegistrationWithPayrollDate(
+        env,
+        callback,
+        userId,
+        store,
+        state.data.display_name,
+        validation.date,
+        lang
+      );
     }
     const storeId = parts[2] || DEFAULT_STORE_ID;
     const employeeId = parts[3] || '';
@@ -1018,29 +1048,77 @@ async function finishRegistrationRequest(env, userId, chatId, storeId, name, lan
   }
   const displayName = String(name || '').trim();
   if (!displayName) return sendMessage(env, chatId, t(lang, 'ask_register_name'));
+  await setState(env, userId, 'WAIT_REGISTER_PAYROLL_DATE', {
+    store_id: storeId,
+    display_name: displayName
+  });
+  return sendMessage(
+    env,
+    chatId,
+    t(lang, 'ask_register_payroll_date'),
+    registrationPayrollDateKeyboard(store)
+  );
+}
+
+async function finishRegistrationWithPayrollDate(
+  env,
+  callback,
+  userId,
+  store,
+  displayName,
+  payrollStartDate,
+  lang
+) {
   const now = nowIso();
+  const payrollStartAt = zonedMidnightIso(
+    payrollStartDate,
+    store.timezone || 'Asia/Tokyo'
+  );
   await env.DB.prepare(`
-    INSERT INTO store_members (store_id, telegram_id, display_name, role, status, cycle_start, joined_at, updated_at)
-    VALUES (?, ?, ?, 'employee', 'pending', ?, ?, ?)
+    INSERT INTO store_members (
+      store_id, telegram_id, display_name, role, status,
+      cycle_start, joined_at, payroll_start_date,
+      payroll_automation_started_at, updated_at
+    )
+    VALUES (?, ?, ?, 'employee', 'pending', ?, ?, ?, ?, ?)
     ON CONFLICT(store_id, telegram_id) DO UPDATE SET
       display_name = excluded.display_name,
       role = 'employee',
       status = 'pending',
+      cycle_start = excluded.cycle_start,
+      payroll_start_date = excluded.payroll_start_date,
+      payroll_automation_started_at = excluded.payroll_automation_started_at,
       updated_at = excluded.updated_at
-  `).bind(storeId, userId, displayName, now, now, now).run();
+  `).bind(
+    store.store_id,
+    userId,
+    displayName,
+    payrollStartAt,
+    now,
+    payrollStartDate,
+    payrollStartAt,
+    now
+  ).run();
   await clearState(env, userId);
-  await notifyStoreAdmins(env, storeId, [
+  await notifyStoreAdmins(env, store.store_id, [
     '新的员工加入申请',
     `店铺：${store.name}`,
     `员工：${displayName}`,
-    `员工 ID：${userId}`
+    `员工 ID：${userId}`,
+    `第一工作日期：${payrollStartDate}`
   ].join('\n'), {
     inline_keyboard: [[
-      { text: t('zh', 'btn_approve'), callback_data: `reg:approve:${storeId}:${userId}` },
-      { text: t('zh', 'btn_reject'), callback_data: `reg:reject:${storeId}:${userId}` }
+      { text: t('zh', 'btn_approve'), callback_data: `reg:approve:${store.store_id}:${userId}` },
+      { text: t('zh', 'btn_reject'), callback_data: `reg:reject:${store.store_id}:${userId}` }
     ]]
   });
-  return sendMessage(env, chatId, t(lang, 'register_submitted'));
+  await editCallbackMessage(
+    env,
+    callback,
+    `${callback.message.text}\n\n${payrollStartDate}`
+  );
+  await answerCallback(env, callback.id);
+  return sendMessage(env, callback.message.chat.id, t(lang, 'register_submitted'));
 }
 
 async function approveRegistration(env, callback, adminId, storeId, employeeId, lang) {
@@ -1154,6 +1232,15 @@ function registrationStoreKeyboard(stores) {
     inline_keyboard: stores.map((store) => [{
       text: store.name,
       callback_data: `reg:store:${store.store_id}`
+    }])
+  };
+}
+
+export function registrationPayrollDateKeyboard(store, now = new Date()) {
+  return {
+    inline_keyboard: payrollStartDateOptions(store, now).map((date) => [{
+      text: date,
+      callback_data: `reg:paydate:${store.store_id}:${date}`
     }])
   };
 }
