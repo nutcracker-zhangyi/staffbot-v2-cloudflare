@@ -252,6 +252,8 @@ export async function readPayrollPaymentQr(
     FROM payroll_disbursements d
     JOIN payroll_payment_qr_codes q
       ON q.qr_id = d.usdt_qr_id_snapshot
+     AND q.store_id = d.store_id
+     AND q.telegram_id = d.telegram_id
     WHERE d.payroll_id = ?
   `).bind(payrollId).first();
   if (!qr) return new Response('not_found', { status: 404 });

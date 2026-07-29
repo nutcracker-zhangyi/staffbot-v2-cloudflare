@@ -295,6 +295,17 @@ test('admin payroll list returns fixed micros, proof count, and masked accounts'
         'TG-FILE-SECRET', 'image/jpeg', 2, 1,
         'ADMIN-1', '2026-07-16T04:00:00.000Z'
       );
+      INSERT INTO payroll_payment_qr_codes (
+        qr_id, store_id, telegram_id, object_key,
+        telegram_file_id, mime_type, size_bytes, uploaded_at
+      ) VALUES (
+        'QR-LIST', 'STORE-1', 'EMP-1', 'qr-list-private-key',
+        'QR-TG-FILE-SECRET', 'image/png', 3,
+        '2026-07-16T03:30:00.000Z'
+      );
+      UPDATE payroll_disbursements
+      SET usdt_qr_id_snapshot = 'QR-LIST'
+      WHERE payroll_id = 'PAYROLL-LIST';
     `);
     const response = await worker.fetch(new Request(
       'https://example.com/api/admin/stores/STORE-1/payroll',
@@ -315,6 +326,7 @@ test('admin payroll list returns fixed micros, proof count, and masked accounts'
           result.payroll[0].amount_snapshot_micros,
         bank_micros: result.payroll[0].bank_micros,
         proof_count: result.payroll[0].proof_count,
+        has_usdt_qr: result.payroll[0].has_usdt_qr,
         email_status: result.payroll[0].email_status,
         bank_details_snapshot:
           result.payroll[0].bank_details_snapshot
@@ -324,11 +336,144 @@ test('admin payroll list returns fixed micros, proof count, and masked accounts'
         amount_snapshot_micros: 100000000,
         bank_micros: 100000000,
         proof_count: 1,
+        has_usdt_qr: true,
         email_status: '',
         bank_details_snapshot: '••••5678'
       }
     );
+    assert.equal('object_key' in result.payroll[0], false);
+    assert.equal('telegram_file_id' in result.payroll[0], false);
+    assert.equal('usdt_qr_url' in result.payroll[0], false);
     assert.equal(result.pagination.total, 1);
+  } finally {
+    fixture.database.close();
+  }
+});
+
+test('admin reads a snapshotted USDT QR through the private store route', async () => {
+  const fixture = adminFixture();
+  try {
+    fixture.database.exec(`
+      INSERT INTO stores (
+        store_id, name, created_at, updated_at
+      ) VALUES (
+        'STORE-2', 'Other Store',
+        '2026-07-01T00:00:00.000Z',
+        '2026-07-01T00:00:00.000Z'
+      );
+      INSERT INTO store_members (
+        store_id, telegram_id, display_name, role, status,
+        cycle_start, joined_at, updated_at
+      ) VALUES (
+        'STORE-1', 'STORE-ADMIN', 'Store Admin', 'admin', 'active',
+        '2026-07-01T00:00:00.000Z',
+        '2026-07-01T00:00:00.000Z',
+        '2026-07-01T00:00:00.000Z'
+      );
+      INSERT INTO admin_sessions (
+        token, telegram_id, expires_at, created_at
+      ) VALUES (
+        'store-session', 'STORE-ADMIN',
+        '2099-01-01T00:00:00.000Z',
+        '2026-07-01T00:00:00.000Z'
+      );
+      INSERT INTO payroll_payment_qr_codes (
+        qr_id, store_id, telegram_id, object_key,
+        telegram_file_id, mime_type, size_bytes, uploaded_at
+      ) VALUES (
+        'QR-PRIVATE', 'STORE-1', 'EMP-1', 'qr-private-key',
+        'QR-TELEGRAM-SECRET', 'image/png', 3,
+        '2026-07-16T03:30:00.000Z'
+      );
+      INSERT INTO payroll_disbursements (
+        payroll_id, store_id, telegram_id, payroll_start_date,
+        scheduled_date, cycle_day, period_start, cutoff_at,
+        amount_snapshot_micros, currency, status,
+        accepts_usdt, usdt_qr_id_snapshot,
+        created_at, updated_at
+      ) VALUES (
+        'PAYROLL-QR', 'STORE-1', 'EMP-1', '2026-07-01',
+        '2026-07-16', 16,
+        '2026-07-01T00:00:00.000Z',
+        '2026-07-16T03:00:00.000Z',
+        1000000, '¥', 'awaiting_admin_payment',
+        1, 'QR-PRIVATE',
+        '2026-07-16T03:00:00.000Z',
+        '2026-07-16T03:30:00.000Z'
+      );
+    `);
+    fixture.env.PAYROLL_PROOFS = {
+      async get(key) {
+        assert.equal(key, 'qr-private-key');
+        return {
+          body: new Uint8Array([1, 2, 3]),
+          writeHttpMetadata(headers) {
+            headers.set('content-type', 'image/png');
+          }
+        };
+      }
+    };
+    const path = [
+      'https://example.com/api/admin/stores/STORE-1/payroll',
+      'PAYROLL-QR',
+      'usdt-qr'
+    ].join('/');
+    const authorized = await worker.fetch(
+      new Request(path, {
+        headers: {
+          cookie: 'staffbot_admin_session=store-session'
+        }
+      }),
+      fixture.env,
+      { waitUntil() {} }
+    );
+    const crossStore = await worker.fetch(
+      new Request(path.replace('STORE-1', 'STORE-2'), {
+        headers: {
+          cookie: 'staffbot_admin_session=store-session'
+        }
+      }),
+      fixture.env,
+      { waitUntil() {} }
+    );
+    const unauthenticated = await worker.fetch(
+      new Request(path),
+      fixture.env,
+      { waitUntil() {} }
+    );
+    const detailResponse = await worker.fetch(
+      new Request(
+        'https://example.com/api/admin/stores/STORE-1/payroll/PAYROLL-QR',
+        {
+          headers: {
+            cookie: 'staffbot_admin_session=store-session'
+          }
+        }
+      ),
+      fixture.env,
+      { waitUntil() {} }
+    );
+    const detail = await detailResponse.json();
+
+    assert.equal(authorized.status, 200);
+    assert.equal(crossStore.status, 403);
+    assert.equal(unauthenticated.status, 401);
+    assert.equal(
+      authorized.headers.get('cache-control'),
+      'private, no-store'
+    );
+    assert.equal(authorized.headers.get('content-type'), 'image/png');
+    assert.equal(detail.payroll.has_usdt_qr, true);
+    assert.equal(
+      detail.payroll.usdt_qr_url,
+      '/api/admin/stores/STORE-1/payroll/PAYROLL-QR/usdt-qr'
+    );
+    assert.equal('object_key' in detail.payroll, false);
+    assert.equal('telegram_file_id' in detail.payroll, false);
+    assert.doesNotMatch(
+      JSON.stringify(detail),
+      /qr-private-key|QR-TELEGRAM-SECRET/
+    );
   } finally {
     fixture.database.close();
   }

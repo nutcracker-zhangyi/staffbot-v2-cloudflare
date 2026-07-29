@@ -68,6 +68,7 @@ import {
   maskPaymentValue,
   savePaymentSplit
 } from './payroll-payments.js';
+import { readPayrollPaymentQr } from './payroll-payment-qr.js';
 import { readPayrollProof } from './payroll-proofs.js';
 import {
   adminIds,
@@ -299,6 +300,8 @@ async function handleAdminPayroll(
         d.confirmed_at,
         d.bank_details_snapshot,
         d.usdt_details_snapshot,
+        CASE WHEN q.qr_id IS NULL THEN 0 ELSE 1 END
+          AS has_usdt_qr,
         COALESCE(p.proof_count, 0) AS proof_count,
         COALESCE(e.status, '') AS email_status
       FROM payroll_disbursements d
@@ -311,6 +314,10 @@ async function handleAdminPayroll(
         WHERE superseded_at IS NULL
         GROUP BY payroll_id
       ) p ON p.payroll_id = d.payroll_id
+      LEFT JOIN payroll_payment_qr_codes q
+        ON q.qr_id = d.usdt_qr_id_snapshot
+       AND q.store_id = d.store_id
+       AND q.telegram_id = d.telegram_id
       LEFT JOIN payroll_email_outbox e
         ON e.payroll_id = d.payroll_id
       WHERE d.store_id = ?
@@ -325,6 +332,7 @@ async function handleAdminPayroll(
       ok: true,
       payroll: (rows.results || []).map((row) => ({
         ...row,
+        has_usdt_qr: Number(row.has_usdt_qr) === 1,
         bank_details_snapshot: maskPaymentValue(
           row.bank_details_snapshot
         ),
@@ -338,6 +346,27 @@ async function handleAdminPayroll(
 
   const payrollId = decodeURIComponent(parts[5] || '');
   if (!payrollId) return json({ ok: false, error: 'not_found' }, 404);
+  if (parts.length === 7
+    && parts[6] === 'usdt-qr'
+    && request.method === 'GET') {
+    const scopedPayroll = await env.DB.prepare(`
+      SELECT 1
+      FROM payroll_disbursements
+      WHERE store_id = ?
+        AND payroll_id = ?
+    `).bind(storeId, payrollId).first();
+    if (!scopedPayroll) {
+      return json({ ok: false, error: 'not_found' }, 404);
+    }
+    return readPayrollPaymentQr(
+      env,
+      {
+        telegram_id: adminId,
+        store_id: storeId
+      },
+      payrollId
+    );
+  }
   if (parts.length === 6 && request.method === 'GET') {
     const payroll = await env.DB.prepare(`
       SELECT
@@ -345,13 +374,19 @@ async function handleAdminPayroll(
         COALESCE(NULLIF(m.display_name, ''), d.telegram_id) AS employee,
         COALESCE(e.status, '') AS email_status,
         COALESCE(e.attempt_count, 0) AS email_attempt_count,
-        e.last_error AS email_last_error
+        e.last_error AS email_last_error,
+        CASE WHEN q.qr_id IS NULL THEN 0 ELSE 1 END
+          AS has_usdt_qr
       FROM payroll_disbursements d
       LEFT JOIN store_members m
         ON m.store_id = d.store_id
        AND m.telegram_id = d.telegram_id
       LEFT JOIN payroll_email_outbox e
         ON e.payroll_id = d.payroll_id
+      LEFT JOIN payroll_payment_qr_codes q
+        ON q.qr_id = d.usdt_qr_id_snapshot
+       AND q.store_id = d.store_id
+       AND q.telegram_id = d.telegram_id
       WHERE d.store_id = ? AND d.payroll_id = ?
     `).bind(storeId, payrollId).first();
     if (!payroll) return json({ ok: false, error: 'not_found' }, 404);
@@ -372,7 +407,17 @@ async function handleAdminPayroll(
         ),
         usdt_details_snapshot: maskPaymentValue(
           payroll.usdt_details_snapshot
-        )
+        ),
+        has_usdt_qr: Number(payroll.has_usdt_qr) === 1,
+        usdt_qr_url: Number(payroll.has_usdt_qr) === 1
+          ? [
+              '/api/admin/stores',
+              encodeURIComponent(storeId),
+              'payroll',
+              encodeURIComponent(payrollId),
+              'usdt-qr'
+            ].join('/')
+          : null
       },
       proofs: proofs.results || []
     });

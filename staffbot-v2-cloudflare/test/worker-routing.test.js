@@ -99,6 +99,11 @@ test('preserves the complete admin document contract', async () => {
   ]) {
     assert.match(document, new RegExp(`id="${id}"`));
   }
+  assert.match(document, /USDT 二维码：已提供/);
+  assert.match(document, /USDT 二维码：未提供/);
+  assert.match(document, /查看 USDT 二维码/);
+  assert.match(document, /usdt_qr_url/);
+  assert.match(document, /target="_blank" rel="noopener"/);
 });
 
 test('shows Dashboard only in staging and keeps production admin unchanged', async () => {
