@@ -235,7 +235,25 @@ test('validates selected payment methods and masks all but four characters', () 
       accepts_cash: false,
       usdt_details: ''
     }),
-    /USDT details/
+    /USDT address or QR is required/
+  );
+  assert.doesNotThrow(
+    () => validatePaymentProfile({
+      accepts_bank: false,
+      accepts_usdt: true,
+      accepts_cash: false,
+      usdt_details: '',
+      usdt_qr_id: 'QR-1'
+    })
+  );
+  assert.doesNotThrow(
+    () => validatePaymentProfile({
+      accepts_bank: false,
+      accepts_usdt: true,
+      accepts_cash: false,
+      usdt_details: '0xabc',
+      usdt_qr_id: null
+    })
   );
   assert.deepEqual(
     validatePaymentProfile({
@@ -249,7 +267,8 @@ test('validates selected payment methods and masks all but four characters', () 
       accepts_usdt: 0,
       accepts_cash: 1,
       bank_details: '1234 5678',
-      usdt_details: null
+      usdt_details: null,
+      usdt_qr_id: null
     }
   );
   assert.equal(maskPaymentValue(' 1234 5678 '), '••••5678');
@@ -322,46 +341,113 @@ test('saves a reusable profile and current payroll snapshot atomically', async (
   }
 });
 
-test('profile edits after admin payment do not rewrite the older snapshot', async () => {
+test('profile edits are locked after an admin starts payment', async () => {
   const database = databaseFixture();
   try {
     insertPayroll(database, payroll({
-      status: 'awaiting_employee_confirmation'
+      status: 'awaiting_admin_payment'
     }));
     database.prepare(`
       UPDATE payroll_disbursements
       SET accepts_bank = 1,
-          bank_details_snapshot = 'Original 11112222'
+          bank_details_snapshot = 'Original 11112222',
+          current_admin_id = 'ADMIN-1'
       WHERE payroll_id = 'PAYROLL-1'
     `).run();
+
+    await assert.rejects(
+      savePaymentProfile(
+        { DB: createD1(database) },
+        'EMP-1',
+        'PAYROLL-1',
+        {
+          accepts_bank: true,
+          accepts_usdt: false,
+          accepts_cash: true,
+          bank_details: 'Future 99998888'
+        },
+        new Date('2026-07-16T05:00:00.000Z')
+      ),
+      /payroll payment details are locked/
+    );
+
+    assert.equal(
+      database.prepare(`
+        SELECT COUNT(*) AS count
+        FROM payroll_payment_profiles
+      `).get().count,
+      0
+    );
+  } finally {
+    database.close();
+  }
+});
+
+test('address-only USDT supersedes the active QR on an editable payroll', async () => {
+  const database = databaseFixture();
+  try {
+    insertPayroll(database, payroll({
+      status: 'awaiting_admin_payment'
+    }));
+    database.exec(`
+      INSERT INTO payroll_payment_qr_codes (
+        qr_id, store_id, telegram_id, object_key,
+        telegram_file_id, mime_type, size_bytes, uploaded_at
+      ) VALUES (
+        'QR-OLD', 'STORE-1', 'EMP-1',
+        'payroll-payment-qr/STORE-1/EMP-1/QR-OLD.jpg',
+        'TELEGRAM-OLD', 'image/jpeg', 4,
+        '2026-07-16T03:30:00.000Z'
+      );
+      INSERT INTO payroll_payment_profiles (
+        store_id, telegram_id,
+        accepts_bank, accepts_usdt, accepts_cash,
+        usdt_details, usdt_qr_id, created_at, updated_at
+      ) VALUES (
+        'STORE-1', 'EMP-1', 0, 1, 0,
+        NULL, 'QR-OLD',
+        '2026-07-16T03:30:00.000Z',
+        '2026-07-16T03:30:00.000Z'
+      );
+      UPDATE payroll_disbursements
+      SET accepts_usdt = 1,
+          usdt_qr_id_snapshot = 'QR-OLD'
+      WHERE payroll_id = 'PAYROLL-1';
+    `);
 
     const saved = await savePaymentProfile(
       { DB: createD1(database) },
       'EMP-1',
       'PAYROLL-1',
       {
-        accepts_bank: true,
-        accepts_usdt: false,
-        accepts_cash: true,
-        bank_details: 'Future 99998888'
+        accepts_bank: false,
+        accepts_usdt: true,
+        accepts_cash: false,
+        usdt_details: 'TADDRESS',
+        usdt_qr_id: null
       },
-      new Date('2026-07-16T05:00:00.000Z')
+      new Date('2026-07-16T04:00:00.000Z')
     );
 
-    assert.equal(saved.status, 'awaiting_employee_confirmation');
-    assert.equal(saved.accepts_cash, 0);
-    assert.equal(saved.bank_details_snapshot, 'Original 11112222');
-    assert.deepEqual(
-      {
-        ...database.prepare(`
-          SELECT accepts_cash, bank_details
-          FROM payroll_payment_profiles
-        `).get()
-      },
-      {
-        accepts_cash: 1,
-        bank_details: 'Future 99998888'
-      }
+    assert.equal(saved.amount_snapshot_micros, 100_000_000);
+    assert.equal(saved.usdt_details_snapshot, 'TADDRESS');
+    assert.equal(saved.usdt_qr_id_snapshot, null);
+    assert.equal(
+      database.prepare(`
+        SELECT usdt_qr_id
+        FROM payroll_payment_profiles
+        WHERE store_id = 'STORE-1'
+          AND telegram_id = 'EMP-1'
+      `).get().usdt_qr_id,
+      null
+    );
+    assert.equal(
+      database.prepare(`
+        SELECT superseded_at
+        FROM payroll_payment_qr_codes
+        WHERE qr_id = 'QR-OLD'
+      `).get().superseded_at,
+      '2026-07-16T04:00:00.000Z'
     );
   } finally {
     database.close();

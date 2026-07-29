@@ -449,6 +449,77 @@ test('uses a valid saved payment profile for the initial positive status', async
   }
 });
 
+test('freezes the current QR version into an automatic payroll', async () => {
+  const fixture = settlementFixture();
+  try {
+    fixture.database.exec(`
+      INSERT INTO payroll_payment_qr_codes (
+        qr_id, store_id, telegram_id, object_key,
+        telegram_file_id, mime_type, size_bytes, uploaded_at
+      ) VALUES (
+        'QR-1', 'STORE-1', 'EMP-1',
+        'payroll-payment-qr/STORE-1/EMP-1/QR-1.jpg',
+        'TELEGRAM-1', 'image/jpeg', 4,
+        '2026-07-01T00:00:00.000Z'
+      );
+      INSERT INTO payroll_payment_profiles (
+        store_id, telegram_id,
+        accepts_bank, accepts_usdt, accepts_cash,
+        bank_details, usdt_details, usdt_qr_id,
+        created_at, updated_at
+      ) VALUES (
+        'STORE-1', 'EMP-1', 0, 1, 0,
+        NULL, NULL, 'QR-1',
+        '2026-07-01T00:00:00.000Z',
+        '2026-07-01T00:00:00.000Z'
+      );
+    `);
+    insertEntry(fixture.database, {
+      entryId: 'QR-PERIOD',
+      effectiveAt: '2026-07-15T03:00:00.000Z',
+      amountMicros: 8_000_000
+    });
+
+    const member = (await eligiblePayrollMembers(fixture.env))[0];
+    const result = await settlePayrollCutoff(
+      fixture.env,
+      member,
+      payrollCutoff('2026-07-01', 16, 0, 'Asia/Tokyo'),
+      new Date('2026-07-16T04:00:00.000Z')
+    );
+
+    fixture.database.exec(`
+      UPDATE payroll_payment_qr_codes
+      SET superseded_at = '2026-07-17T00:00:00.000Z'
+      WHERE qr_id = 'QR-1';
+      INSERT INTO payroll_payment_qr_codes (
+        qr_id, store_id, telegram_id, object_key,
+        telegram_file_id, mime_type, size_bytes, uploaded_at
+      ) VALUES (
+        'QR-2', 'STORE-1', 'EMP-1',
+        'payroll-payment-qr/STORE-1/EMP-1/QR-2.png',
+        'TELEGRAM-2', 'image/png', 5,
+        '2026-07-17T00:00:00.000Z'
+      );
+      UPDATE payroll_payment_profiles
+      SET usdt_qr_id = 'QR-2'
+      WHERE store_id = 'STORE-1'
+        AND telegram_id = 'EMP-1';
+    `);
+
+    const saved = fixture.database.prepare(`
+      SELECT status, amount_snapshot_micros, usdt_qr_id_snapshot
+      FROM payroll_disbursements
+      WHERE payroll_id = ?
+    `).get(result.payroll.payroll_id);
+    assert.equal(saved.status, 'awaiting_admin_payment');
+    assert.equal(saved.amount_snapshot_micros, 8_000_000);
+    assert.equal(saved.usdt_qr_id_snapshot, 'QR-1');
+  } finally {
+    fixture.database.close();
+  }
+});
+
 test('catches up every missed cutoff without waiting for earlier payment completion', async () => {
   const fixture = settlementFixture();
   try {

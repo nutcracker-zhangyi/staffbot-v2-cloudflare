@@ -17,7 +17,10 @@ function validPaymentProfile(profile) {
   const acceptsBank = Number(profile.accepts_bank) === 1
     && String(profile.bank_details || '').trim() !== '';
   const acceptsUsdt = Number(profile.accepts_usdt) === 1
-    && String(profile.usdt_details || '').trim() !== '';
+    && (
+      String(profile.usdt_details || '').trim() !== ''
+      || String(profile.usdt_qr_id || '').trim() !== ''
+    );
   return acceptsCash || acceptsBank || acceptsUsdt;
 }
 
@@ -43,7 +46,8 @@ export async function eligiblePayrollMembers(env) {
       COALESCE(p.accepts_usdt, 0) AS accepts_usdt,
       COALESCE(p.accepts_cash, 0) AS accepts_cash,
       p.bank_details,
-      p.usdt_details
+      p.usdt_details,
+      p.usdt_qr_id
     FROM store_members m
     JOIN stores s ON s.store_id = m.store_id
     LEFT JOIN payroll_payment_profiles p
@@ -98,6 +102,9 @@ export function settlementDraft(
     usdt_details_snapshot: profile && profile.usdt_details
       ? String(profile.usdt_details)
       : null,
+    usdt_qr_id_snapshot: profile && profile.usdt_qr_id
+      ? String(profile.usdt_qr_id)
+      : null,
     negative_carry_entry_id: status === 'carried_negative'
       ? `PAY-CARRY:${id}`
       : null,
@@ -114,6 +121,7 @@ function disbursementInsertStatement(env, payroll) {
       amount_snapshot_micros, currency, status,
       accepts_bank, accepts_usdt, accepts_cash,
       bank_details_snapshot, usdt_details_snapshot,
+      usdt_qr_id_snapshot,
       negative_carry_entry_id, created_at, updated_at
     )
     SELECT
@@ -121,7 +129,7 @@ function disbursementInsertStatement(env, payroll) {
       ?, ?, m.cycle_start, ?,
       ?, ?, ?,
       ?, ?, ?,
-      ?, ?,
+      ?, ?, ?,
       ?, ?, ?
     FROM store_members m
     WHERE m.store_id = ?
@@ -147,6 +155,7 @@ function disbursementInsertStatement(env, payroll) {
     payroll.accepts_cash,
     payroll.bank_details_snapshot,
     payroll.usdt_details_snapshot,
+    payroll.usdt_qr_id_snapshot,
     payroll.negative_carry_entry_id,
     payroll.created_at,
     payroll.updated_at,

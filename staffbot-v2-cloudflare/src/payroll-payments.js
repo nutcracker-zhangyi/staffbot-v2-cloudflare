@@ -35,18 +35,22 @@ export function validatePaymentProfile(input) {
   const usdtDetails = String(
     input && input.usdt_details || ''
   ).trim();
+  const usdtQrId = String(
+    input && input.usdt_qr_id || ''
+  ).trim();
   if (acceptsBank && !bankDetails) {
     throw new TypeError('bank details are required');
   }
-  if (acceptsUsdt && !usdtDetails) {
-    throw new TypeError('USDT details are required');
+  if (acceptsUsdt && !usdtDetails && !usdtQrId) {
+    throw new TypeError('USDT address or QR is required');
   }
   return {
     accepts_bank: acceptsBank,
     accepts_usdt: acceptsUsdt,
     accepts_cash: acceptsCash,
     bank_details: acceptsBank ? bankDetails : null,
-    usdt_details: acceptsUsdt ? usdtDetails : null
+    usdt_details: acceptsUsdt && usdtDetails ? usdtDetails : null,
+    usdt_qr_id: acceptsUsdt && usdtQrId ? usdtQrId : null
   };
 }
 
@@ -63,7 +67,8 @@ export async function getPayrollPaymentContext(
       COALESCE(p.accepts_usdt, d.accepts_usdt) AS profile_accepts_usdt,
       COALESCE(p.accepts_cash, d.accepts_cash) AS profile_accepts_cash,
       COALESCE(p.bank_details, d.bank_details_snapshot) AS profile_bank_details,
-      COALESCE(p.usdt_details, d.usdt_details_snapshot) AS profile_usdt_details
+      COALESCE(p.usdt_details, d.usdt_details_snapshot) AS profile_usdt_details,
+      COALESCE(p.usdt_qr_id, d.usdt_qr_id_snapshot) AS profile_usdt_qr_id
     FROM payroll_disbursements d
     LEFT JOIN stores s ON s.store_id = d.store_id
     LEFT JOIN payroll_payment_profiles p
@@ -91,6 +96,27 @@ export async function savePaymentProfile(
     actorId,
     payrollId
   );
+  if (![
+    'awaiting_employee_details',
+    'awaiting_admin_payment'
+  ].includes(payroll.status) || payroll.current_admin_id !== null) {
+    throw new Error('payroll payment details are locked');
+  }
+  if (profile.usdt_qr_id) {
+    const qr = await env.DB.prepare(`
+      SELECT qr_id
+      FROM payroll_payment_qr_codes
+      WHERE qr_id = ?
+        AND store_id = ?
+        AND telegram_id = ?
+        AND superseded_at IS NULL
+    `).bind(
+      profile.usdt_qr_id,
+      payroll.store_id,
+      payroll.telegram_id
+    ).first();
+    if (!qr) throw new Error('USDT QR is not active');
+  }
   const nowIso = now.toISOString();
   const auditDetails = JSON.stringify({
     payroll_id: payroll.payroll_id,
@@ -101,20 +127,57 @@ export async function savePaymentProfile(
     usdt: maskPaymentValue(profile.usdt_details)
   });
 
-  await env.DB.batch([
+  const statements = [];
+  if (!profile.usdt_qr_id) {
+    statements.push(env.DB.prepare(`
+      UPDATE payroll_payment_qr_codes
+      SET superseded_at = ?
+      WHERE store_id = ?
+        AND telegram_id = ?
+        AND superseded_at IS NULL
+        AND EXISTS (
+          SELECT 1
+          FROM payroll_disbursements
+          WHERE payroll_id = ?
+            AND telegram_id = ?
+            AND status IN (
+              'awaiting_employee_details',
+              'awaiting_admin_payment'
+            )
+            AND current_admin_id IS NULL
+        )
+    `).bind(
+      nowIso,
+      payroll.store_id,
+      payroll.telegram_id,
+      payroll.payroll_id,
+      payroll.telegram_id
+    ));
+  }
+  statements.push(
     env.DB.prepare(`
       INSERT INTO payroll_payment_profiles (
         store_id, telegram_id,
         accepts_bank, accepts_usdt, accepts_cash,
-        bank_details, usdt_details,
+        bank_details, usdt_details, usdt_qr_id,
         created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      )
+      SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+      FROM payroll_disbursements
+      WHERE payroll_id = ?
+        AND telegram_id = ?
+        AND status IN (
+          'awaiting_employee_details',
+          'awaiting_admin_payment'
+        )
+        AND current_admin_id IS NULL
       ON CONFLICT(store_id, telegram_id) DO UPDATE SET
         accepts_bank = excluded.accepts_bank,
         accepts_usdt = excluded.accepts_usdt,
         accepts_cash = excluded.accepts_cash,
         bank_details = excluded.bank_details,
         usdt_details = excluded.usdt_details,
+        usdt_qr_id = excluded.usdt_qr_id,
         updated_at = excluded.updated_at
     `).bind(
       payroll.store_id,
@@ -124,8 +187,11 @@ export async function savePaymentProfile(
       profile.accepts_cash,
       profile.bank_details,
       profile.usdt_details,
+      profile.usdt_qr_id,
       nowIso,
-      nowIso
+      nowIso,
+      payroll.payroll_id,
+      payroll.telegram_id
     ),
     env.DB.prepare(`
       UPDATE payroll_disbursements
@@ -134,6 +200,7 @@ export async function savePaymentProfile(
           accepts_cash = ?,
           bank_details_snapshot = ?,
           usdt_details_snapshot = ?,
+          usdt_qr_id_snapshot = ?,
           status = CASE
             WHEN status = 'awaiting_employee_details'
               THEN 'awaiting_admin_payment'
@@ -146,12 +213,14 @@ export async function savePaymentProfile(
           'awaiting_employee_details',
           'awaiting_admin_payment'
         )
+        AND current_admin_id IS NULL
     `).bind(
       profile.accepts_bank,
       profile.accepts_usdt,
       profile.accepts_cash,
       profile.bank_details,
       profile.usdt_details,
+      profile.usdt_qr_id,
       nowIso,
       payroll.payroll_id,
       payroll.telegram_id
@@ -160,15 +229,28 @@ export async function savePaymentProfile(
       INSERT INTO admin_audit_logs (
         store_id, admin_id, action, target_id,
         details_json, created_at
-      ) VALUES (?, ?, 'save_payroll_payment_profile', ?, ?, ?)
+      )
+      SELECT ?, ?, 'save_payroll_payment_profile', ?, ?, ?
+      FROM payroll_disbursements
+      WHERE payroll_id = ?
+        AND telegram_id = ?
+        AND updated_at = ?
     `).bind(
       payroll.store_id,
       payroll.telegram_id,
       payroll.payroll_id,
       auditDetails,
+      nowIso,
+      payroll.payroll_id,
+      payroll.telegram_id,
       nowIso
     )
-  ]);
+  );
+  const results = await env.DB.batch(statements);
+  const updateResult = results[statements.length - 2];
+  if (Number(updateResult && updateResult.meta.changes) !== 1) {
+    throw new Error('payroll payment details are locked');
+  }
 
   return env.DB.prepare(`
     SELECT * FROM payroll_disbursements
