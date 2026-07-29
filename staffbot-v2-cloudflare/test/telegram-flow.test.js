@@ -67,9 +67,24 @@ function flowFixture() {
   `);
 
   const payloads = [];
+  const proofObjects = new Map();
   const originalFetch = globalThis.fetch;
-  globalThis.fetch = async (_url, options) => {
-    payloads.push(JSON.parse(options.body));
+  globalThis.fetch = async (url, options) => {
+    if (String(url).includes('/file/bot')) {
+      return new Response(new Uint8Array([1, 2, 3]), {
+        headers: { 'content-type': 'image/jpeg' }
+      });
+    }
+    const payload = JSON.parse(options.body);
+    payloads.push(payload);
+    if (String(url).endsWith('/getFile')) {
+      return {
+        json: async () => ({
+          ok: true,
+          result: { file_path: `proofs/${payload.file_id}.jpg` }
+        })
+      };
+    }
     return { json: async () => ({ ok: true }) };
   };
 
@@ -79,9 +94,22 @@ function flowFixture() {
       DB: createD1(database),
       BOT_TOKEN: 'test-token',
       ENVIRONMENT: 'production',
-      ADMIN_IDS: '9001'
+      ADMIN_IDS: '9001',
+      PAYROLL_PROOFS: {
+        async head(key) {
+          return proofObjects.has(key) ? {} : null;
+        },
+        async put(key, value) {
+          proofObjects.set(key, value);
+          return {};
+        },
+        async delete(key) {
+          proofObjects.delete(key);
+        }
+      }
     },
     payloads,
+    proofObjects,
     restore() {
       globalThis.fetch = originalFetch;
       database.close();
@@ -117,6 +145,27 @@ async function sendCallback(env, data, userId, text = 'callback message') {
         chat: { id: userId, type: 'private' },
         text
       }
+    }
+  }, env);
+}
+
+async function sendPhoto(env, fileId, user = {
+  id: 9001,
+  first_name: 'Admin',
+  username: 'admin'
+}) {
+  return handleUpdate({
+    update_id: 3,
+    message: {
+      message_id: 3,
+      chat: { id: user.id, type: 'private' },
+      from: user,
+      photo: [{
+        file_id: fileId,
+        file_size: 3,
+        width: 100,
+        height: 100
+      }]
     }
   }, env);
 }
@@ -498,6 +547,135 @@ test('cash-only payroll details require no free-text answer', async () => {
         status: 'awaiting_admin_payment',
         accepts_cash: 1
       }
+    );
+  } finally {
+    fixture.restore();
+  }
+});
+
+test('admin splits payroll and uploads proof images by payment method', async () => {
+  const fixture = flowFixture();
+  try {
+    fixture.database.prepare(`
+      INSERT INTO payroll_disbursements (
+        payroll_id, store_id, telegram_id, payroll_start_date,
+        scheduled_date, cycle_day, period_start, cutoff_at,
+        amount_snapshot_micros, currency, status,
+        accepts_bank, accepts_usdt, accepts_cash,
+        bank_details_snapshot,
+        created_at, updated_at
+      ) VALUES (
+        'PAYROLL-ADMIN', 'STORE1', '1001', '2026-07-01',
+        '2026-07-16', 16,
+        '2026-07-01T00:00:00.000Z',
+        '2026-07-16T03:00:00.000Z',
+        60000000, '$', 'awaiting_admin_payment',
+        1, 0, 1, 'Bank account 12345678',
+        '2026-07-16T03:00:00.000Z',
+        '2026-07-16T03:00:00.000Z'
+      )
+    `).run();
+
+    await sendCallback(
+      fixture.env,
+      'pay:a:PAYROLL-ADMIN',
+      9001
+    );
+    assert.equal(
+      fixture.database.prepare(`
+        SELECT state FROM user_states WHERE telegram_id = '9001'
+      `).get().state,
+      'WAIT_PAYROLL_SPLIT'
+    );
+    assert.match(fixture.payloads.at(-1).text, /银行卡.*付款金额/);
+
+    await sendText(fixture.env, '40', {
+      id: 9001,
+      first_name: 'Admin',
+      username: 'admin'
+    });
+
+    assert.deepEqual(
+      {
+        ...fixture.database.prepare(`
+          SELECT bank_micros, usdt_micros, cash_micros, current_admin_id
+          FROM payroll_disbursements
+          WHERE payroll_id = 'PAYROLL-ADMIN'
+        `).get()
+      },
+      {
+        bank_micros: 40000000,
+        usdt_micros: 0,
+        cash_micros: 20000000,
+        current_admin_id: '9001'
+      }
+    );
+    assert.equal(
+      fixture.database.prepare(`
+        SELECT state FROM user_states WHERE telegram_id = '9001'
+      `).get().state,
+      'WAIT_PAYROLL_PROOF'
+    );
+
+    await sendPhoto(fixture.env, 'BANK-PHOTO');
+    await sendCallback(
+      fixture.env,
+      'pay:a:PAYROLL-ADMIN',
+      9001
+    );
+    assert.equal(
+      fixture.database.prepare(`
+        SELECT state FROM user_states WHERE telegram_id = '9001'
+      `).get().state,
+      'WAIT_PAYROLL_PROOF'
+    );
+    assert.equal(
+      fixture.database.prepare(`
+        SELECT COUNT(*) AS count
+        FROM payroll_payment_proofs
+        WHERE payroll_id = 'PAYROLL-ADMIN'
+          AND superseded_at IS NULL
+      `).get().count,
+      1
+    );
+    await sendCallback(
+      fixture.env,
+      'pay:ps:c:PAYROLL-ADMIN',
+      9001
+    );
+    await sendPhoto(fixture.env, 'CASH-PHOTO');
+    await sendCallback(
+      fixture.env,
+      'pay:pc:PAYROLL-ADMIN',
+      9001
+    );
+
+    assert.deepEqual(
+      fixture.database.prepare(`
+        SELECT method, COUNT(*) AS count
+        FROM payroll_payment_proofs
+        WHERE payroll_id = 'PAYROLL-ADMIN'
+        GROUP BY method
+        ORDER BY method
+      `).all().map((row) => ({ ...row })),
+      [
+        { method: 'bank', count: 1 },
+        { method: 'cash', count: 1 }
+      ]
+    );
+    assert.equal(fixture.proofObjects.size, 2);
+    assert.equal(
+      fixture.database.prepare(`
+        SELECT status FROM payroll_disbursements
+        WHERE payroll_id = 'PAYROLL-ADMIN'
+      `).get().status,
+      'awaiting_employee_confirmation'
+    );
+    assert.equal(
+      fixture.database.prepare(`
+        SELECT 1 FROM user_states WHERE telegram_id = '9001'
+      `).get(),
+      undefined
     );
   } finally {
     fixture.restore();
