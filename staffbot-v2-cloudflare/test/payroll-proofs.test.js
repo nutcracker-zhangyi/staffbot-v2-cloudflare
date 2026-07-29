@@ -184,6 +184,114 @@ test('downloads the largest Telegram photo and stores object before metadata', a
   }
 });
 
+test('keeps existing proof image validation errors', async (context) => {
+  await context.test('requires a Telegram photo', async () => {
+    const fixture = proofFixture();
+    try {
+      await assert.rejects(
+        storeTelegramProof(
+          fixture.env,
+          'ADMIN-1',
+          'PAYROLL-1',
+          'bank',
+          []
+        ),
+        /payroll proof photo is required/
+      );
+    } finally {
+      fixture.database.close();
+    }
+  });
+
+  await context.test('rejects oversized Telegram metadata', async () => {
+    const fixture = proofFixture();
+    try {
+      await assert.rejects(
+        storeTelegramProof(
+          fixture.env,
+          'ADMIN-1',
+          'PAYROLL-1',
+          'bank',
+          [{ file_id: 'PHOTO', file_size: 1025 }]
+        ),
+        /payroll proof is too large/
+      );
+    } finally {
+      fixture.database.close();
+    }
+  });
+
+  await context.test('rejects non-image downloads', async () => {
+    const fixture = proofFixture();
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = async (url) => {
+      if (String(url).includes('/getFile')) {
+        return {
+          async json() {
+            return {
+              ok: true,
+              result: { file_path: 'files/proof.txt' }
+            };
+          }
+        };
+      }
+      return new Response(new Uint8Array([1]), {
+        headers: { 'content-type': 'text/plain' }
+      });
+    };
+    try {
+      await assert.rejects(
+        storeTelegramProof(
+          fixture.env,
+          'ADMIN-1',
+          'PAYROLL-1',
+          'bank',
+          [{ file_id: 'PHOTO', file_size: 1 }]
+        ),
+        /payroll proof must be an image/
+      );
+    } finally {
+      globalThis.fetch = originalFetch;
+      fixture.database.close();
+    }
+  });
+
+  await context.test('rejects oversized downloaded bytes', async () => {
+    const fixture = proofFixture();
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = async (url) => {
+      if (String(url).includes('/getFile')) {
+        return {
+          async json() {
+            return {
+              ok: true,
+              result: { file_path: 'photos/proof.jpg' }
+            };
+          }
+        };
+      }
+      return new Response(new Uint8Array(1025), {
+        headers: { 'content-type': 'image/jpeg' }
+      });
+    };
+    try {
+      await assert.rejects(
+        storeTelegramProof(
+          fixture.env,
+          'ADMIN-1',
+          'PAYROLL-1',
+          'bank',
+          [{ file_id: 'PHOTO', file_size: 1 }]
+        ),
+        /payroll proof is too large/
+      );
+    } finally {
+      globalThis.fetch = originalFetch;
+      fixture.database.close();
+    }
+  });
+});
+
 test('reports missing active proofs for every non-zero split method', async () => {
   const fixture = proofFixture();
   try {

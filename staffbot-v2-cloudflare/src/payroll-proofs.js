@@ -1,15 +1,7 @@
 import { makeId } from './audit.js';
 import { isStoreAdmin } from './stores.js';
-import {
-  downloadTelegramFile,
-  getTelegramFile
-} from './telegram-client.js';
+import { downloadTelegramImage } from './telegram-images.js';
 
-const IMAGE_EXTENSIONS = new Map([
-  ['image/jpeg', 'jpg'],
-  ['image/png', 'png'],
-  ['image/webp', 'webp']
-]);
 const DEFAULT_MAX_PROOF_BYTES = 10 * 1024 * 1024;
 
 function safeKeyPart(value) {
@@ -35,17 +27,6 @@ export function proofObjectKey(
     method,
     `${safeKeyPart(proofId)}.${extension.toLowerCase()}`
   ].join('/');
-}
-
-function largestPhoto(photo) {
-  const photos = Array.isArray(photo) ? photo : [photo];
-  return photos
-    .filter((item) => item && item.file_id)
-    .sort((left, right) =>
-      Number(right.file_size || 0) - Number(left.file_size || 0)
-      || Number(right.width || 0) * Number(right.height || 0)
-        - Number(left.width || 0) * Number(left.height || 0)
-    )[0] || null;
 }
 
 function maximumProofBytes(env) {
@@ -91,30 +72,22 @@ export async function storeTelegramProof(
     payrollId,
     method
   );
-  const selectedPhoto = largestPhoto(photo);
-  if (!selectedPhoto) throw new Error('payroll proof photo is required');
-  const maxBytes = maximumProofBytes(env);
-  if (Number(selectedPhoto.file_size || 0) > maxBytes) {
-    throw new RangeError('payroll proof is too large');
-  }
-
-  const telegramFile = await getTelegramFile(
-    env,
-    selectedPhoto.file_id
-  );
-  const response = await downloadTelegramFile(
-    env,
-    telegramFile.file_path
-  );
-  if (!response.ok) throw new Error('telegram_file_download_failed');
-  const mimeType = String(
-    response.headers.get('content-type') || ''
-  ).split(';')[0].trim().toLowerCase();
-  const extension = IMAGE_EXTENSIONS.get(mimeType);
-  if (!extension) throw new TypeError('payroll proof must be an image');
-  const bytes = await response.arrayBuffer();
-  if (!bytes.byteLength || bytes.byteLength > maxBytes) {
-    throw new RangeError('payroll proof is too large');
+  let image;
+  try {
+    image = await downloadTelegramImage(env, photo, {
+      maxBytes: maximumProofBytes(env)
+    });
+  } catch (error) {
+    if (error.message === 'telegram image is required') {
+      throw new Error('payroll proof photo is required');
+    }
+    if (error.message === 'telegram image is too large') {
+      throw new RangeError('payroll proof is too large');
+    }
+    if (error.message === 'telegram upload must be an image') {
+      throw new TypeError('payroll proof must be an image');
+    }
+    throw error;
   }
 
   const proofId = makeId('PROOF');
@@ -122,14 +95,14 @@ export async function storeTelegramProof(
     payroll,
     method,
     proofId,
-    extension
+    image.extension
   );
   if (await env.PAYROLL_PROOFS.head(key)) {
     throw new Error('payroll proof object already exists');
   }
-  const stored = await env.PAYROLL_PROOFS.put(key, bytes, {
+  const stored = await env.PAYROLL_PROOFS.put(key, image.bytes, {
     onlyIf: { etagDoesNotMatch: '*' },
-    httpMetadata: { contentType: mimeType }
+    httpMetadata: { contentType: image.mime_type }
   });
   if (!stored) throw new Error('payroll proof object already exists');
 
@@ -152,10 +125,10 @@ export async function storeTelegramProof(
       payroll.payroll_id,
       method,
       key,
-      selectedPhoto.file_id,
-      telegramFile.file_path.split('/').at(-1) || null,
-      mimeType,
-      bytes.byteLength,
+      image.telegram_file_id,
+      image.file_name,
+      image.mime_type,
+      image.size_bytes,
       sortOrder,
       String(adminId),
       uploadedAt

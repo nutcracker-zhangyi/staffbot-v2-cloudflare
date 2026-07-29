@@ -119,6 +119,7 @@ test('canonical schema contains the personal payroll contract', () => {
       'accepts_cash',
       'bank_details_snapshot',
       'usdt_details_snapshot',
+      'usdt_qr_id_snapshot',
       'bank_micros',
       'usdt_micros',
       'cash_micros',
@@ -145,6 +146,7 @@ test('canonical schema contains the personal payroll contract', () => {
       'accepts_cash',
       'bank_details',
       'usdt_details',
+      'usdt_qr_id',
       'created_at',
       'updated_at'
     ]
