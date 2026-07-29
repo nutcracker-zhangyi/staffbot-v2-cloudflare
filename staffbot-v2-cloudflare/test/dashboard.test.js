@@ -489,6 +489,56 @@ test('merges a third selected store with the same currency into one group', asyn
   );
 });
 
+test('fills every selected month including gaps with zero money', async () => {
+  const { database, env } = dashboardFixture();
+  database.prepare(`
+    INSERT INTO income_records (
+      record_id, store_id, telegram_id, income, type, approved_at, admin_id
+    ) VALUES ('september-income', 'TOKYO', 'EMP-1', 10, 'income',
+      '2026-09-15T00:00:00.000Z', 'ADMIN-1')
+  `).run();
+  const url = new URL(
+    'https://staffbot.test/api/admin/stores/TOKYO/dashboard'
+      + '?stores=TOKYO,NEW_YORK'
+      + '&date_from=2026-07-01'
+      + '&date_to=2026-09-30'
+  );
+  const result = await loadDashboard(
+    env,
+    await resolveDashboardFilters(env, url, 'TOKYO', 'ADMIN-1')
+  );
+
+  for (const group of result.groups) {
+    assert.deepEqual(
+      group.months.map((month) => month.month_key),
+      ['2026-07', '2026-08', '2026-09']
+    );
+    assert.deepEqual(
+      group.months.find((month) => month.month_key === '2026-08'),
+      {
+        month_key: '2026-08',
+        gross_income_micros: 0,
+        commission_micros: 0,
+        fine_micros: 0,
+        advance_micros: 0,
+        bonus_micros: 0,
+        adjustment_micros: 0,
+        negative_carry_micros: 0,
+        reversal_micros: 0,
+        net_payroll_micros: 0,
+        paid_salary_micros: 0
+      }
+    );
+  }
+  assert.equal(
+    result.groups
+      .find((group) => group.currency === '¥')
+      .months.find((month) => month.month_key === '2026-09')
+      .gross_income_micros,
+    10_000_000
+  );
+});
+
 test('returns active-member currency groups with zero money for an empty range', async () => {
   const { env } = dashboardFixture();
   const url = new URL(

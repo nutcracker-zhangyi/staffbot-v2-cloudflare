@@ -413,6 +413,10 @@ export async function loadDashboard(env, filters) {
       'paid_salary_micros', row.paid_salary_micros);
   }
 
+  for (const period of filters.periods) {
+    const group = groups.get(period.store_currency);
+    if (group) groupMonth(group, period.month_key);
+  }
   for (const group of groups.values()) assertSafeDashboardMicros(group);
   const orderedGroups = [...groups.values()].sort((left, right) =>
     left.currency.localeCompare(right.currency)
