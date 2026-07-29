@@ -480,6 +480,56 @@ test('catches up every missed cutoff without waiting for earlier payment complet
   }
 });
 
+test('a disputed payroll does not block the next scheduled cutoff', async () => {
+  const fixture = settlementFixture();
+  try {
+    insertEntry(fixture.database, {
+      entryId: 'FIRST-DISPUTED-PERIOD',
+      effectiveAt: '2026-07-15T03:00:00.000Z',
+      amountMicros: 8_000_000
+    });
+    await processPayrollSettlements(
+      fixture.env,
+      new Date('2026-07-16T04:00:00.000Z')
+    );
+    fixture.database.prepare(`
+      UPDATE payroll_disbursements SET status = 'disputed'
+      WHERE scheduled_date = '2026-07-16'
+    `).run();
+    insertEntry(fixture.database, {
+      entryId: 'NEXT-AFTER-DISPUTE',
+      effectiveAt: '2026-07-20T03:00:00.000Z',
+      amountMicros: 12_000_000
+    });
+
+    await processPayrollSettlements(
+      fixture.env,
+      new Date('2026-07-31T03:00:00.000Z')
+    );
+
+    assert.deepEqual(
+      fixture.database.prepare(`
+        SELECT scheduled_date, status, amount_snapshot_micros
+        FROM payroll_disbursements ORDER BY cutoff_at
+      `).all().map((row) => ({ ...row })),
+      [
+        {
+          scheduled_date: '2026-07-16',
+          status: 'disputed',
+          amount_snapshot_micros: 8_000_000
+        },
+        {
+          scheduled_date: '2026-07-30',
+          status: 'awaiting_employee_details',
+          amount_snapshot_micros: 12_000_000
+        }
+      ]
+    );
+  } finally {
+    fixture.database.close();
+  }
+});
+
 test('automation start skips old cutoffs while delayed registration approval catches up', async () => {
   const existingFixture = settlementFixture({
     payroll_automation_started_at: '2026-07-20T00:00:00.000Z'

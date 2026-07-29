@@ -42,11 +42,15 @@ import {
   validatePayrollStartDate
 } from './payroll-cycle.js';
 import {
+  confirmPayrollReceipt,
+  disputePayrollPayment,
   getPayrollPaymentContext,
+  maskPaymentValue,
   paymentMethodKeyboard,
   savePaymentSplit,
   savePaymentProfile
 } from './payroll-payments.js';
+import { sendPayrollForEmployeeConfirmation } from './payroll-notifications.js';
 import {
   completePayrollProofs,
   storeTelegramProof
@@ -365,6 +369,24 @@ async function handleCallback(callback, env) {
     }
     if (parts[1] === 'pc') {
       return finishPayrollProofUpload(
+        env,
+        callback,
+        userId,
+        parts.slice(2).join(':'),
+        lang
+      );
+    }
+    if (parts[1] === 'ok') {
+      return confirmEmployeePayrollReceipt(
+        env,
+        callback,
+        userId,
+        parts.slice(2).join(':'),
+        lang
+      );
+    }
+    if (parts[1] === 'x') {
+      return disputeEmployeePayrollPayment(
         env,
         callback,
         userId,
@@ -1794,20 +1816,52 @@ async function finishPayrollProofUpload(
     || state.data.payroll_id !== payrollId) {
     return answerCallback(env, callback.id, t(lang, 'no_permission'), true);
   }
+  let payroll;
   try {
-    await completePayrollProofs(env, adminId, payrollId);
+    payroll = await completePayrollProofs(env, adminId, payrollId);
   } catch (error) {
     const missing = Array.isArray(error.missing_methods)
       ? error.missing_methods.map(
         (method) => payrollMethodLabel(lang, method)
       ).join('、')
       : '';
+    if (missing) {
+      return answerCallback(
+        env,
+        callback.id,
+        render(lang, 'payroll_proofs_incomplete', { methods: missing }),
+        true
+      );
+    }
+    payroll = await env.DB.prepare(`
+      SELECT * FROM payroll_disbursements
+      WHERE payroll_id = ?
+    `).bind(payrollId).first();
+    if (!payroll || payroll.status !== 'awaiting_employee_confirmation') {
+      return answerCallback(
+        env,
+        callback.id,
+        t(lang, 'payroll_proof_upload_failed'),
+        true
+      );
+    }
+  }
+  try {
+    await sendPayrollForEmployeeConfirmation(
+      env,
+      adminId,
+      payroll.payroll_id
+    );
+  } catch (error) {
+    await logError(env, 'payroll_confirmation_delivery_error', error, {
+      store_id: payroll.store_id,
+      telegram_id: payroll.telegram_id,
+      payroll_id: payroll.payroll_id
+    });
     return answerCallback(
       env,
       callback.id,
-      missing
-        ? render(lang, 'payroll_proofs_incomplete', { methods: missing })
-        : t(lang, 'payroll_proof_upload_failed'),
+      t(lang, 'payroll_confirmation_delivery_failed'),
       true
     );
   }
@@ -1821,6 +1875,99 @@ async function finishPayrollProofUpload(
     env,
     callback.id,
     t(lang, 'payroll_proof_upload_complete')
+  );
+}
+
+async function confirmEmployeePayrollReceipt(
+  env,
+  callback,
+  employeeId,
+  payrollId,
+  lang
+) {
+  try {
+    await confirmPayrollReceipt(
+      env,
+      employeeId,
+      payrollId,
+      env.PAYROLL_FINANCE_EMAIL
+    );
+  } catch (error) {
+    return answerCallback(
+      env,
+      callback.id,
+      error.message === 'already_processed'
+        ? t(lang, 'already_processed')
+        : t(lang, 'payroll_confirmation_failed'),
+      true
+    );
+  }
+  await editCallbackMessage(
+    env,
+    callback,
+    t(lang, 'payroll_receipt_confirmed')
+  );
+  return answerCallback(
+    env,
+    callback.id,
+    t(lang, 'payroll_receipt_confirmed')
+  );
+}
+
+async function disputeEmployeePayrollPayment(
+  env,
+  callback,
+  employeeId,
+  payrollId,
+  lang
+) {
+  let payroll;
+  try {
+    payroll = await disputePayrollPayment(
+      env,
+      employeeId,
+      payrollId
+    );
+  } catch (error) {
+    return answerCallback(
+      env,
+      callback.id,
+      error.message === 'already_processed'
+        ? t(lang, 'already_processed')
+        : t(lang, 'no_permission'),
+      true
+    );
+  }
+  await notifyStoreAdmins(env, payroll.store_id, [
+    '员工对工资付款提出争议',
+    `工资 ID：${payroll.payroll_id}`,
+    `员工 ID：${payroll.telegram_id}`,
+    `固定工资：${formatMoney(
+      { currency: payroll.currency },
+      Number(payroll.amount_snapshot_micros) / 1_000_000
+    )}`,
+    `银行卡：${payroll.accepts_bank
+      ? maskPaymentValue(payroll.bank_details_snapshot)
+      : '不使用'}`,
+    `USDT：${payroll.accepts_usdt
+      ? maskPaymentValue(payroll.usdt_details_snapshot)
+      : '不使用'}`,
+    `现金：${payroll.accepts_cash ? '使用' : '不使用'}`
+  ].join('\n'), {
+    inline_keyboard: [[{
+      text: t(lang, 'btn_admin_correct_payroll'),
+      callback_data: `pay:a:${payroll.payroll_id}`
+    }]]
+  });
+  await editCallbackMessage(
+    env,
+    callback,
+    t(lang, 'payroll_dispute_submitted')
+  );
+  return answerCallback(
+    env,
+    callback.id,
+    t(lang, 'payroll_dispute_submitted')
   );
 }
 

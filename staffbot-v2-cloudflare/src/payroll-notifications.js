@@ -3,8 +3,10 @@ import { render, t } from './i18n.js';
 import { formatMoney } from './money.js';
 import {
   sendMessage,
+  sendPhoto,
   telegramErrorSummary
 } from './telegram-client.js';
+import { isStoreAdmin } from './stores.js';
 
 const REMINDER_INTERVAL_MS = 24 * 60 * 60 * 1000;
 
@@ -193,4 +195,116 @@ export async function deliverPayrollNotifications(
     if (isReminder) summary.reminded += 1;
   }
   return summary;
+}
+
+function paymentMethodLines(language, payroll) {
+  return ['bank', 'usdt', 'cash']
+    .filter((method) => Number(payroll[`${method}_micros`]) > 0)
+    .map((method) => `${t(language, `payroll_profile_${method}`)}：${
+      formatMoney(
+        { currency: payroll.currency },
+        Number(payroll[`${method}_micros`]) / 1_000_000
+      )
+    }`);
+}
+
+export async function sendPayrollForEmployeeConfirmation(
+  env,
+  adminId,
+  payrollId,
+  now = new Date()
+) {
+  const payroll = await env.DB.prepare(`
+    SELECT
+      d.*,
+      s.name AS store_name,
+      COALESCE(p.language, 'zh') AS language
+    FROM payroll_disbursements d
+    JOIN stores s ON s.store_id = d.store_id
+    LEFT JOIN user_preferences p
+      ON p.telegram_id = d.telegram_id
+    WHERE d.payroll_id = ?
+  `).bind(payrollId).first();
+  if (!payroll
+    || !(await isStoreAdmin(env, adminId, payroll.store_id))) {
+    throw new Error('payroll confirmation permission denied');
+  }
+  if (payroll.status !== 'awaiting_employee_confirmation') {
+    throw new Error('payroll is not awaiting employee confirmation');
+  }
+  if (payroll.payment_sent_at) return payroll;
+
+  const proofRows = await env.DB.prepare(`
+    SELECT method, telegram_file_id, sort_order
+    FROM payroll_payment_proofs
+    WHERE payroll_id = ?
+      AND superseded_at IS NULL
+    ORDER BY method, sort_order
+  `).bind(payroll.payroll_id).all();
+  const language = payroll.language || 'zh';
+  for (const proof of proofRows.results || []) {
+    const result = await sendPhoto(
+      env,
+      payroll.telegram_id,
+      proof.telegram_file_id,
+      render(language, 'payroll_proof_caption', {
+        method: t(language, `payroll_profile_${proof.method}`),
+        number: proof.sort_order
+      })
+    );
+    if (!result || !result.ok) {
+      throw new Error('payroll proof delivery failed');
+    }
+  }
+
+  const result = await sendMessage(
+    env,
+    payroll.telegram_id,
+    [
+      render(language, 'payroll_payment_summary', {
+        store: payroll.store_name,
+        amount: formatMoney(
+          { currency: payroll.currency },
+          Number(payroll.amount_snapshot_micros) / 1_000_000
+        )
+      }),
+      ...paymentMethodLines(language, payroll)
+    ].join('\n'),
+    {
+      inline_keyboard: [[
+        {
+          text: t(language, 'btn_confirm_receipt'),
+          callback_data: `pay:ok:${payroll.payroll_id}`
+        },
+        {
+          text: t(language, 'btn_dispute_payment'),
+          callback_data: `pay:x:${payroll.payroll_id}`
+        }
+      ]]
+    }
+  );
+  if (!result || !result.ok) {
+    throw new Error('payroll confirmation delivery failed');
+  }
+
+  const sentAt = now.toISOString();
+  const updated = await env.DB.prepare(`
+    UPDATE payroll_disbursements
+    SET payment_sent_at = ?,
+        updated_at = ?
+    WHERE payroll_id = ?
+      AND status = 'awaiting_employee_confirmation'
+      AND payment_sent_at IS NULL
+  `).bind(
+    sentAt,
+    sentAt,
+    payroll.payroll_id
+  ).run();
+  if (Number(updated.meta.changes) !== 1) {
+    throw new Error('payroll confirmation delivery conflict');
+  }
+  return env.DB.prepare(`
+    SELECT * FROM payroll_disbursements
+    WHERE payroll_id = ?
+  `).bind(payroll.payroll_id).first();
 }

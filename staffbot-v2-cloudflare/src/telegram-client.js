@@ -8,6 +8,12 @@ export async function sendMessage(env, chatId, text, replyMarkup) {
   return telegram(env, 'sendMessage', payload);
 }
 
+export async function sendPhoto(env, chatId, photo, caption) {
+  const payload = { chat_id: chatId, photo };
+  if (caption) payload.caption = caption;
+  return telegram(env, 'sendPhoto', payload);
+}
+
 export async function answerCallback(env, callbackQueryId, text = '', showAlert = false) {
   return telegram(env, 'answerCallbackQuery', {
     callback_query_id: callbackQueryId,

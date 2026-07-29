@@ -273,6 +273,7 @@ export async function savePaymentSplit(
           cash_micros = ?,
           current_admin_id = ?,
           status = 'awaiting_admin_payment',
+          payment_sent_at = NULL,
           updated_at = ?
       WHERE payroll_id = ?
         AND status = ?
@@ -307,4 +308,164 @@ export async function savePaymentSplit(
     SELECT * FROM payroll_disbursements
     WHERE payroll_id = ?
   `).bind(payroll.payroll_id).first();
+}
+
+async function employeePayroll(env, employeeId, payrollId) {
+  const payroll = await env.DB.prepare(`
+    SELECT * FROM payroll_disbursements
+    WHERE payroll_id = ? AND telegram_id = ?
+  `).bind(payrollId, String(employeeId)).first();
+  if (!payroll) throw new Error('payroll not found');
+  return payroll;
+}
+
+export async function confirmPayrollReceipt(
+  env,
+  employeeId,
+  payrollId,
+  financeEmail,
+  now = new Date()
+) {
+  const payroll = await employeePayroll(
+    env,
+    employeeId,
+    payrollId
+  );
+  if (payroll.status !== 'awaiting_employee_confirmation') {
+    throw new Error('already_processed');
+  }
+  const recipient = String(financeEmail || '').trim();
+  if (!recipient) throw new Error('payroll finance email is not configured');
+  const confirmedAt = now.toISOString();
+  const salaryRecordId = `SAL-AUTO-${payroll.payroll_id}`;
+  const results = await env.DB.batch([
+    env.DB.prepare(`
+      INSERT INTO salary_records (
+        record_id, store_id, telegram_id, amount,
+        period_start, period_end, approved_at,
+        admin_id, request_id
+      )
+      SELECT ?, store_id, telegram_id,
+        amount_snapshot_micros / 1000000.0,
+        period_start, cutoff_at, ?,
+        current_admin_id, payroll_id
+      FROM payroll_disbursements
+      WHERE payroll_id = ?
+        AND telegram_id = ?
+        AND status = 'awaiting_employee_confirmation'
+    `).bind(
+      salaryRecordId,
+      confirmedAt,
+      payroll.payroll_id,
+      String(employeeId)
+    ),
+    env.DB.prepare(`
+      INSERT INTO payroll_email_outbox (
+        payroll_id, recipient, status, attempt_count,
+        created_at, updated_at
+      )
+      SELECT payroll_id, ?, 'pending', 0, ?, ?
+      FROM payroll_disbursements
+      WHERE payroll_id = ?
+        AND telegram_id = ?
+        AND status = 'awaiting_employee_confirmation'
+    `).bind(
+      recipient,
+      confirmedAt,
+      confirmedAt,
+      payroll.payroll_id,
+      String(employeeId)
+    ),
+    env.DB.prepare(`
+      INSERT INTO admin_audit_logs (
+        store_id, admin_id, action, target_id,
+        details_json, created_at
+      )
+      SELECT store_id, telegram_id,
+        'confirm_payroll_receipt', payroll_id, ?, ?
+      FROM payroll_disbursements
+      WHERE payroll_id = ?
+        AND telegram_id = ?
+        AND status = 'awaiting_employee_confirmation'
+    `).bind(
+      JSON.stringify({ payroll_id: payroll.payroll_id }),
+      confirmedAt,
+      payroll.payroll_id,
+      String(employeeId)
+    ),
+    env.DB.prepare(`
+      UPDATE payroll_disbursements
+      SET status = 'confirmed',
+          salary_record_id = ?,
+          confirmed_at = ?,
+          updated_at = ?
+      WHERE payroll_id = ?
+        AND telegram_id = ?
+        AND status = 'awaiting_employee_confirmation'
+    `).bind(
+      salaryRecordId,
+      confirmedAt,
+      confirmedAt,
+      payroll.payroll_id,
+      String(employeeId)
+    )
+  ]);
+  if (Number(results[3] && results[3].meta.changes) !== 1) {
+    throw new Error('already_processed');
+  }
+  return employeePayroll(env, employeeId, payroll.payroll_id);
+}
+
+export async function disputePayrollPayment(
+  env,
+  employeeId,
+  payrollId,
+  now = new Date()
+) {
+  const payroll = await employeePayroll(
+    env,
+    employeeId,
+    payrollId
+  );
+  if (payroll.status !== 'awaiting_employee_confirmation') {
+    throw new Error('already_processed');
+  }
+  const disputedAt = now.toISOString();
+  const results = await env.DB.batch([
+    env.DB.prepare(`
+      INSERT INTO admin_audit_logs (
+        store_id, admin_id, action, target_id,
+        details_json, created_at
+      )
+      SELECT store_id, telegram_id,
+        'dispute_payroll_payment', payroll_id, ?, ?
+      FROM payroll_disbursements
+      WHERE payroll_id = ?
+        AND telegram_id = ?
+        AND status = 'awaiting_employee_confirmation'
+    `).bind(
+      JSON.stringify({ payroll_id: payroll.payroll_id }),
+      disputedAt,
+      payroll.payroll_id,
+      String(employeeId)
+    ),
+    env.DB.prepare(`
+      UPDATE payroll_disbursements
+      SET status = 'disputed',
+          disputed_at = ?,
+          updated_at = ?
+      WHERE payroll_id = ?
+        AND telegram_id = ?
+        AND status = 'awaiting_employee_confirmation'
+    `).bind(
+      disputedAt,
+      disputedAt,
+      payroll.payroll_id,
+      String(employeeId)
+    )
+  ]);
+  if (Number(results[1] && results[1].meta.changes) !== 1) {
+    throw new Error('already_processed');
+  }
+  return employeePayroll(env, employeeId, payroll.payroll_id);
 }

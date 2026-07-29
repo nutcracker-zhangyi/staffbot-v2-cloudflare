@@ -95,6 +95,7 @@ function flowFixture() {
       BOT_TOKEN: 'test-token',
       ENVIRONMENT: 'production',
       ADMIN_IDS: '9001',
+      PAYROLL_FINANCE_EMAIL: 'finance@example.test',
       PAYROLL_PROOFS: {
         async head(key) {
           return proofObjects.has(key) ? {} : null;
@@ -671,11 +672,114 @@ test('admin splits payroll and uploads proof images by payment method', async ()
       `).get().status,
       'awaiting_employee_confirmation'
     );
+    const confirmation = fixture.payloads.find((payload) =>
+      payload.chat_id === '1001'
+      && payload.reply_markup
+      && payload.reply_markup.inline_keyboard.flat().some(
+        (button) => button.callback_data === 'pay:ok:PAYROLL-ADMIN'
+      )
+    );
+    assert.ok(confirmation);
+    assert.match(confirmation.text, /工资总额：\$60\.00/);
+    assert.equal(
+      fixture.payloads.filter((payload) =>
+        payload.chat_id === '1001' && payload.photo
+      ).length,
+      2
+    );
     assert.equal(
       fixture.database.prepare(`
         SELECT 1 FROM user_states WHERE telegram_id = '9001'
       `).get(),
       undefined
+    );
+
+    await sendCallback(
+      fixture.env,
+      'pay:ok:PAYROLL-ADMIN',
+      1001,
+      confirmation.text
+    );
+    assert.deepEqual(
+      {
+        ...fixture.database.prepare(`
+          SELECT status, salary_record_id
+          FROM payroll_disbursements
+          WHERE payroll_id = 'PAYROLL-ADMIN'
+        `).get()
+      },
+      {
+        status: 'confirmed',
+        salary_record_id: 'SAL-AUTO-PAYROLL-ADMIN'
+      }
+    );
+    assert.equal(
+      fixture.database.prepare(`
+        SELECT COUNT(*) AS count FROM salary_records
+        WHERE request_id = 'PAYROLL-ADMIN'
+      `).get().count,
+      1
+    );
+    assert.equal(
+      fixture.database.prepare(`
+        SELECT recipient FROM payroll_email_outbox
+        WHERE payroll_id = 'PAYROLL-ADMIN'
+      `).get().recipient,
+      'finance@example.test'
+    );
+  } finally {
+    fixture.restore();
+  }
+});
+
+test('employee dispute notifies admins with a correction button', async () => {
+  const fixture = flowFixture();
+  try {
+    fixture.database.prepare(`
+      INSERT INTO payroll_disbursements (
+        payroll_id, store_id, telegram_id, payroll_start_date,
+        scheduled_date, cycle_day, period_start, cutoff_at,
+        amount_snapshot_micros, currency, status,
+        accepts_bank, bank_details_snapshot, bank_micros,
+        current_admin_id, payment_sent_at,
+        created_at, updated_at
+      ) VALUES (
+        'PAYROLL-DISPUTE', 'STORE1', '1001', '2026-07-01',
+        '2026-07-16', 16,
+        '2026-07-01T00:00:00.000Z',
+        '2026-07-16T03:00:00.000Z',
+        60000000, '$', 'awaiting_employee_confirmation',
+        1, 'Bank account 12345678', 60000000,
+        '9001', '2026-07-16T04:00:00.000Z',
+        '2026-07-16T03:00:00.000Z',
+        '2026-07-16T04:00:00.000Z'
+      )
+    `).run();
+
+    await sendCallback(
+      fixture.env,
+      'pay:x:PAYROLL-DISPUTE',
+      1001
+    );
+
+    assert.equal(
+      fixture.database.prepare(`
+        SELECT status FROM payroll_disbursements
+        WHERE payroll_id = 'PAYROLL-DISPUTE'
+      `).get().status,
+      'disputed'
+    );
+    const adminNotice = fixture.payloads.find((payload) =>
+      payload.chat_id === '9001'
+      && payload.text
+      && payload.text.includes('PAYROLL-DISPUTE')
+    );
+    assert.ok(adminNotice);
+    assert.doesNotMatch(adminNotice.text, /12345678/);
+    assert.match(adminNotice.text, /••••5678/);
+    assert.equal(
+      adminNotice.reply_markup.inline_keyboard[0][0].callback_data,
+      'pay:a:PAYROLL-DISPUTE'
     );
   } finally {
     fixture.restore();

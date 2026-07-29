@@ -4,6 +4,8 @@ import { readFileSync } from 'node:fs';
 import { DatabaseSync } from 'node:sqlite';
 
 import {
+  confirmPayrollReceipt,
+  disputePayrollPayment,
   maskPaymentValue,
   paymentMethodKeyboard,
   savePaymentProfile,
@@ -448,7 +450,9 @@ test('authorized admin saves a split and supersedes disputed proofs', async () =
     }));
     database.exec(`
       UPDATE payroll_disbursements
-      SET accepts_bank = 1, accepts_cash = 1
+      SET accepts_bank = 1,
+          accepts_cash = 1,
+          payment_sent_at = '2026-07-16T04:30:00.000Z'
       WHERE payroll_id = 'PAYROLL-1';
       INSERT INTO payroll_payment_proofs (
         proof_id, payroll_id, method, object_key, telegram_file_id,
@@ -476,12 +480,217 @@ test('authorized admin saves a split and supersedes disputed proofs', async () =
     assert.equal(saved.current_admin_id, 'ADMIN-1');
     assert.equal(saved.bank_micros, 70_000_000);
     assert.equal(saved.cash_micros, 30_000_000);
+    assert.equal(saved.payment_sent_at, null);
     assert.equal(
       database.prepare(`
         SELECT superseded_at FROM payroll_payment_proofs
         WHERE proof_id = 'OLD-PROOF'
       `).get().superseded_at,
       '2026-07-16T05:00:00.000Z'
+    );
+  } finally {
+    database.close();
+  }
+});
+
+test('employee confirmation creates one formal salary record and email row', async () => {
+  const database = databaseFixture();
+  try {
+    insertPayroll(database, payroll({
+      status: 'awaiting_employee_confirmation',
+      bank_micros: 70_000_000,
+      cash_micros: 30_000_000
+    }));
+    database.prepare(`
+      UPDATE payroll_disbursements
+      SET current_admin_id = 'ADMIN-1'
+      WHERE payroll_id = 'PAYROLL-1'
+    `).run();
+    const before = database.prepare(`
+      SELECT period_start, cutoff_at, amount_snapshot_micros
+      FROM payroll_disbursements WHERE payroll_id = 'PAYROLL-1'
+    `).get();
+
+    const confirmed = await confirmPayrollReceipt(
+      { DB: createD1(database) },
+      'EMP-1',
+      'PAYROLL-1',
+      'finance@example.test',
+      new Date('2026-07-16T06:00:00.000Z')
+    );
+
+    assert.equal(confirmed.status, 'confirmed');
+    assert.equal(confirmed.confirmed_at, '2026-07-16T06:00:00.000Z');
+    assert.equal(confirmed.salary_record_id, 'SAL-AUTO-PAYROLL-1');
+    assert.deepEqual(
+      {
+        ...database.prepare(`
+          SELECT * FROM salary_records
+          WHERE record_id = 'SAL-AUTO-PAYROLL-1'
+        `).get()
+      },
+      {
+        record_id: 'SAL-AUTO-PAYROLL-1',
+        store_id: 'STORE-1',
+        telegram_id: 'EMP-1',
+        amount: 100,
+        period_start: '2026-07-01T03:00:00.000Z',
+        period_end: '2026-07-16T03:00:00.000Z',
+        approved_at: '2026-07-16T06:00:00.000Z',
+        admin_id: 'ADMIN-1',
+        request_id: 'PAYROLL-1'
+      }
+    );
+    assert.deepEqual(
+      {
+        ...database.prepare(`
+          SELECT payroll_id, recipient, status, attempt_count
+          FROM payroll_email_outbox
+        `).get()
+      },
+      {
+        payroll_id: 'PAYROLL-1',
+        recipient: 'finance@example.test',
+        status: 'pending',
+        attempt_count: 0
+      }
+    );
+    assert.deepEqual(
+      {
+        ...database.prepare(`
+          SELECT period_start, cutoff_at, amount_snapshot_micros
+          FROM payroll_disbursements WHERE payroll_id = 'PAYROLL-1'
+        `).get()
+      },
+      { ...before }
+    );
+    assert.equal(
+      database.prepare(`
+        SELECT COUNT(*) AS count FROM admin_audit_logs
+        WHERE action = 'confirm_payroll_receipt'
+      `).get().count,
+      1
+    );
+
+    await assert.rejects(
+      confirmPayrollReceipt(
+        { DB: createD1(database) },
+        'EMP-1',
+        'PAYROLL-1',
+        'finance@example.test'
+      ),
+      /already_processed/
+    );
+    assert.equal(
+      database.prepare(`
+        SELECT COUNT(*) AS count FROM salary_records
+        WHERE request_id = 'PAYROLL-1'
+      `).get().count,
+      1
+    );
+    assert.equal(
+      database.prepare(`
+        SELECT COUNT(*) AS count FROM payroll_email_outbox
+        WHERE payroll_id = 'PAYROLL-1'
+      `).get().count,
+      1
+    );
+  } finally {
+    database.close();
+  }
+});
+
+test('only the payroll employee can dispute an awaiting confirmation', async () => {
+  const database = databaseFixture();
+  try {
+    insertPayroll(database, payroll({
+      status: 'awaiting_employee_confirmation',
+      bank_micros: 100_000_000
+    }));
+
+    await assert.rejects(
+      disputePayrollPayment(
+        { DB: createD1(database) },
+        'OTHER-EMP',
+        'PAYROLL-1'
+      ),
+      /not found/
+    );
+    const disputed = await disputePayrollPayment(
+      { DB: createD1(database) },
+      'EMP-1',
+      'PAYROLL-1',
+      new Date('2026-07-16T06:30:00.000Z')
+    );
+
+    assert.equal(disputed.status, 'disputed');
+    assert.equal(disputed.disputed_at, '2026-07-16T06:30:00.000Z');
+    assert.equal(
+      database.prepare(`
+        SELECT COUNT(*) AS count FROM admin_audit_logs
+        WHERE action = 'dispute_payroll_payment'
+      `).get().count,
+      1
+    );
+    await assert.rejects(
+      disputePayrollPayment(
+        { DB: createD1(database) },
+        'EMP-1',
+        'PAYROLL-1'
+      ),
+      /already_processed/
+    );
+  } finally {
+    database.close();
+  }
+});
+
+test('concurrent payroll confirmations create one record and one email row', async () => {
+  const database = databaseFixture();
+  try {
+    insertPayroll(database, payroll({
+      status: 'awaiting_employee_confirmation',
+      bank_micros: 100_000_000
+    }));
+    database.prepare(`
+      UPDATE payroll_disbursements
+      SET current_admin_id = 'ADMIN-1'
+      WHERE payroll_id = 'PAYROLL-1'
+    `).run();
+    const env = { DB: createD1(database) };
+
+    const results = await Promise.allSettled([
+      confirmPayrollReceipt(
+        env,
+        'EMP-1',
+        'PAYROLL-1',
+        'finance@example.test'
+      ),
+      confirmPayrollReceipt(
+        env,
+        'EMP-1',
+        'PAYROLL-1',
+        'finance@example.test'
+      )
+    ]);
+
+    assert.deepEqual(
+      results.map((result) => result.status).sort(),
+      ['fulfilled', 'rejected']
+    );
+    assert.equal(
+      database.prepare(`
+        SELECT COUNT(*) AS count FROM salary_records
+        WHERE request_id = 'PAYROLL-1'
+      `).get().count,
+      1
+    );
+    assert.equal(
+      database.prepare(`
+        SELECT COUNT(*) AS count FROM payroll_email_outbox
+        WHERE payroll_id = 'PAYROLL-1'
+      `).get().count,
+      1
     );
   } finally {
     database.close();
