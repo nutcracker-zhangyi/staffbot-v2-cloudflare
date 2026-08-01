@@ -207,6 +207,40 @@ function insertFlowPayroll(
   `).run(payrollId, amountMicros);
 }
 
+function insertLegacyCallbackPayroll(database, payrollId, attemptId) {
+  database.prepare(`
+    INSERT INTO payroll_disbursements (
+      payroll_id, store_id, telegram_id, payroll_start_date,
+      scheduled_date, cycle_day, period_start, cutoff_at,
+      amount_snapshot_micros, currency, status,
+      accepts_bank, bank_details_snapshot, bank_micros,
+      current_admin_id, payment_sent_at, current_payment_attempt_id,
+      created_at, updated_at
+    ) VALUES (
+      ?, 'STORE1', '1001', '2026-07-01',
+      '2026-07-16', 16,
+      '2026-07-01T00:00:00.000Z',
+      '2026-07-16T03:00:00.000Z',
+      60000000, '$', 'awaiting_employee_confirmation',
+      1, 'Bank account 12345678', 60000000,
+      '9001', '2026-07-16T04:00:00.000Z', ?,
+      '2026-07-16T03:00:00.000Z',
+      '2026-07-16T04:00:00.000Z'
+    )
+  `).run(payrollId, attemptId);
+  database.prepare(`
+    INSERT INTO payroll_payment_attempts (
+      attempt_id, payroll_id, version, status,
+      bank_micros, usdt_micros, cash_micros,
+      submitted_by, submitted_at, created_at, updated_at
+    ) VALUES (
+      ?, ?, 1, 'submitted',
+      60000000, 0, 0, '9001', '2026-07-16T04:00:00.000Z',
+      '2026-07-16T03:30:00.000Z', '2026-07-16T04:00:00.000Z'
+    )
+  `).run(attemptId, payrollId);
+}
+
 test('keeps the Telegram workflow available through the Worker facade', () => {
   assert.equal(facadeHandleUpdate, handleUpdate);
 });
@@ -1316,6 +1350,140 @@ test('stale payment buttons cannot confirm a newer submitted version', async () 
       SELECT current_payment_attempt_id FROM payroll_disbursements
       WHERE payroll_id = 'PAYROLL-VERSIONED'
     `).get().current_payment_attempt_id, 'ATT-V2');
+  } finally {
+    fixture.restore();
+  }
+});
+
+test('legacy confirm callback supports first response and replay but rejects an opposite response', async () => {
+  const fixture = flowFixture();
+  try {
+    insertLegacyCallbackPayroll(
+      fixture.database,
+      'PAYROLL-LEGACY-CONFIRM',
+      'ATT-LEGACY-CONFIRM'
+    );
+
+    await sendCallback(
+      fixture.env,
+      'pay:ok:PAYROLL-LEGACY-CONFIRM',
+      1001
+    );
+    const beforeReplay = {
+      salary: fixture.database.prepare(`
+        SELECT COUNT(*) AS count FROM salary_records
+        WHERE request_id = 'PAYROLL-LEGACY-CONFIRM'
+      `).get().count,
+      email: fixture.database.prepare(`
+        SELECT COUNT(*) AS count FROM payroll_email_outbox
+        WHERE payroll_id = 'PAYROLL-LEGACY-CONFIRM'
+      `).get().count,
+      audit: fixture.database.prepare(`
+        SELECT COUNT(*) AS count FROM admin_audit_logs
+        WHERE target_id = 'PAYROLL-LEGACY-CONFIRM'
+      `).get().count
+    };
+
+    await sendCallback(
+      fixture.env,
+      'pay:ok:PAYROLL-LEGACY-CONFIRM',
+      1001
+    );
+    await sendCallback(
+      fixture.env,
+      'pay:x:PAYROLL-LEGACY-CONFIRM',
+      1001
+    );
+
+    assert.deepEqual(beforeReplay, { salary: 1, email: 1, audit: 1 });
+    assert.deepEqual({
+      salary: fixture.database.prepare(`
+        SELECT COUNT(*) AS count FROM salary_records
+        WHERE request_id = 'PAYROLL-LEGACY-CONFIRM'
+      `).get().count,
+      email: fixture.database.prepare(`
+        SELECT COUNT(*) AS count FROM payroll_email_outbox
+        WHERE payroll_id = 'PAYROLL-LEGACY-CONFIRM'
+      `).get().count,
+      audit: fixture.database.prepare(`
+        SELECT COUNT(*) AS count FROM admin_audit_logs
+        WHERE target_id = 'PAYROLL-LEGACY-CONFIRM'
+      `).get().count
+    }, beforeReplay);
+    assert.deepEqual({ ...fixture.database.prepare(`
+      SELECT status, employee_response FROM payroll_payment_attempts
+      WHERE attempt_id = 'ATT-LEGACY-CONFIRM'
+    `).get() }, {
+      status: 'employee_confirmed',
+      employee_response: 'confirmed'
+    });
+    assert.ok(fixture.payloads.some((payload) =>
+      payload.callback_query_id === 'callback-1001'
+      && payload.text === '该请求已处理。'
+    ));
+    assert.equal(fixture.payloads.filter((payload) =>
+      payload.chat_id === '9001'
+      && payload.text
+      && payload.text.includes('PAYROLL-LEGACY-CONFIRM')
+    ).length, 0);
+  } finally {
+    fixture.restore();
+  }
+});
+
+test('legacy dispute callback supports first response and replay but rejects an opposite response', async () => {
+  const fixture = flowFixture();
+  try {
+    insertLegacyCallbackPayroll(
+      fixture.database,
+      'PAYROLL-LEGACY-DISPUTE',
+      'ATT-LEGACY-DISPUTE'
+    );
+
+    await sendCallback(
+      fixture.env,
+      'pay:x:PAYROLL-LEGACY-DISPUTE',
+      1001
+    );
+    await sendCallback(
+      fixture.env,
+      'pay:x:PAYROLL-LEGACY-DISPUTE',
+      1001
+    );
+    await sendCallback(
+      fixture.env,
+      'pay:ok:PAYROLL-LEGACY-DISPUTE',
+      1001
+    );
+
+    assert.deepEqual({ ...fixture.database.prepare(`
+      SELECT status, employee_response FROM payroll_payment_attempts
+      WHERE attempt_id = 'ATT-LEGACY-DISPUTE'
+    `).get() }, {
+      status: 'employee_disputed',
+      employee_response: 'disputed'
+    });
+    assert.equal(fixture.database.prepare(`
+      SELECT COUNT(*) AS count FROM admin_audit_logs
+      WHERE target_id = 'PAYROLL-LEGACY-DISPUTE'
+    `).get().count, 1);
+    assert.equal(fixture.payloads.filter((payload) =>
+      payload.chat_id === '9001'
+      && payload.text
+      && payload.text.includes('PAYROLL-LEGACY-DISPUTE')
+    ).length, 1);
+    assert.equal(fixture.database.prepare(`
+      SELECT COUNT(*) AS count FROM salary_records
+      WHERE request_id = 'PAYROLL-LEGACY-DISPUTE'
+    `).get().count, 0);
+    assert.equal(fixture.database.prepare(`
+      SELECT COUNT(*) AS count FROM payroll_email_outbox
+      WHERE payroll_id = 'PAYROLL-LEGACY-DISPUTE'
+    `).get().count, 0);
+    assert.ok(fixture.payloads.some((payload) =>
+      payload.callback_query_id === 'callback-1001'
+      && payload.text === '该请求已处理。'
+    ));
   } finally {
     fixture.restore();
   }

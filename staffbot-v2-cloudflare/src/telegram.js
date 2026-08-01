@@ -2147,7 +2147,11 @@ async function legacyEmployeePaymentTarget(env, employeeId, payrollId) {
   if (!target
     || Number(target.attempt_count) !== 1
     || !target.attempt_id
-    || target.current_attempt_status !== 'submitted') {
+    || ![
+      'submitted',
+      'employee_confirmed',
+      'employee_disputed'
+    ].includes(target.current_attempt_status)) {
     return null;
   }
   return target;

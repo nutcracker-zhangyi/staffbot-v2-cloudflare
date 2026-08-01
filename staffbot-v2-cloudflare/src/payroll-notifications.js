@@ -239,7 +239,9 @@ function receiptPaymentMethodLines(language, payroll) {
 export function employeePaymentResponseKeyboard(attemptId, language) {
   const confirm = `pok:${attemptId}`;
   const dispute = `px:${attemptId}`;
-  if (confirm.length > 64 || dispute.length > 64) {
+  const encoder = new TextEncoder();
+  if (encoder.encode(confirm).byteLength > 64
+    || encoder.encode(dispute).byteLength > 64) {
     throw new Error('payment attempt callback data is too long');
   }
   return {

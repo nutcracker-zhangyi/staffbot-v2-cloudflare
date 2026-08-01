@@ -70,3 +70,31 @@ test('renders every supported language without unresolved fields', () => {
     assert.doesNotMatch(message, /\{[a-z_]+\}/);
   }
 });
+
+test('payment response callbacks enforce the 64-byte Telegram limit', () => {
+  const boundary = payrollNotifications.employeePaymentResponseKeyboard(
+    'A'.repeat(60),
+    'zh'
+  );
+  assert.equal(
+    new TextEncoder().encode(
+      boundary.inline_keyboard[0][0].callback_data
+    ).byteLength,
+    64
+  );
+  assert.throws(
+    () => payrollNotifications.employeePaymentResponseKeyboard(
+      'A'.repeat(61),
+      'zh'
+    ),
+    /callback data is too long/
+  );
+  assert.ok(`pok:${'员'.repeat(21)}`.length <= 64);
+  assert.throws(
+    () => payrollNotifications.employeePaymentResponseKeyboard(
+      '员'.repeat(21),
+      'zh'
+    ),
+    /callback data is too long/
+  );
+});
