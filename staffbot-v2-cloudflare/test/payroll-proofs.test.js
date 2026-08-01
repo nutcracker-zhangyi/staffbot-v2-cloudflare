@@ -466,6 +466,63 @@ test('Telegram completion final SQL rejects a proof race without partial state',
   }
 });
 
+test('Telegram completion audit uses the final submitted split after a split race', async () => {
+  const fixture = proofFixture();
+  try {
+    fixture.database.exec(`
+      UPDATE payroll_disbursements SET accepts_cash = 1
+      WHERE payroll_id = 'PAYROLL-1';
+      INSERT INTO payroll_payment_proofs (
+        proof_id, payroll_id, attempt_id, method, object_key,
+        telegram_file_id, mime_type, size_bytes, sort_order,
+        uploaded_by, uploaded_at
+      ) VALUES
+        ('RACE-P1', 'PAYROLL-1', 'ATTEMPT-CURRENT', 'bank', 'race-p1', 'T1',
+         'image/jpeg', 1, 1, 'ADMIN-1', '2026-07-16T04:00:00.000Z'),
+        ('RACE-P2', 'PAYROLL-1', 'ATTEMPT-CURRENT', 'usdt', 'race-p2', 'T2',
+         'image/jpeg', 1, 1, 'ADMIN-1', '2026-07-16T04:00:00.000Z'),
+        ('RACE-P3', 'PAYROLL-1', 'ATTEMPT-CURRENT', 'cash', 'race-p3', 'T3',
+         'image/jpeg', 1, 1, 'ADMIN-1', '2026-07-16T04:00:00.000Z');
+    `);
+    let changed = false;
+    fixture.env.DB = createD1(fixture.database, {
+      beforeBatchStatement(sql) {
+        if (changed || !sql.includes("SET status = 'submitted'")) return;
+        changed = true;
+        fixture.database.prepare(`
+          UPDATE payroll_payment_attempts
+          SET bank_micros = 0, usdt_micros = 0, cash_micros = 100000000
+          WHERE attempt_id = 'ATTEMPT-CURRENT'
+        `).run();
+      }
+    });
+
+    await completePayrollProofs(
+      fixture.env,
+      'ADMIN-1',
+      'PAYROLL-1',
+      new Date('2026-07-16T05:00:00.000Z')
+    );
+
+    assert.deepEqual(
+      { ...fixture.database.prepare(`
+        SELECT bank_micros, usdt_micros, cash_micros
+        FROM payroll_disbursements WHERE payroll_id = 'PAYROLL-1'
+      `).get() },
+      { bank_micros: 0, usdt_micros: 0, cash_micros: 100_000_000 }
+    );
+    const audit = fixture.database.prepare(`
+      SELECT details_json FROM admin_audit_logs
+      WHERE action = 'complete_payroll_proofs'
+    `).get();
+    assert.deepEqual(JSON.parse(audit.details_json), {
+      required_methods: ['cash']
+    });
+  } finally {
+    fixture.database.close();
+  }
+});
+
 test('supports attempt-scoped proof order and compatibility-null metadata', () => {
   const fixture = proofFixture();
   try {
@@ -601,14 +658,20 @@ test('Telegram upload cleans the new object when the current draft closes before
     }
   });
   try {
-    await assert.rejects(storeTelegramProof(
-      fixture.env,
-      'ADMIN-1',
-      'PAYROLL-1',
-      'bank',
-      [{ file_id: 'RACE-PHOTO', file_size: 3 }],
-      new Date('2026-07-16T04:00:00.000Z')
-    ), /payroll proof upload conflict/);
+    await assert.rejects(
+      storeTelegramProof(
+        fixture.env,
+        'ADMIN-1',
+        'PAYROLL-1',
+        'bank',
+        [{ file_id: 'RACE-PHOTO', file_size: 3 }],
+        new Date('2026-07-16T04:00:00.000Z')
+      ),
+      (error) => {
+        assert.equal(error.message, 'payroll proof upload conflict');
+        return true;
+      }
+    );
     assert.equal(fixture.database.prepare(`
       SELECT COUNT(*) AS total FROM payroll_payment_proofs
     `).get().total, 0);
@@ -620,7 +683,7 @@ test('Telegram upload cleans the new object when the current draft closes before
   }
 });
 
-test('Telegram upload preserves the database conflict when R2 cleanup also fails', async () => {
+test('Telegram upload persists exact cleanup context without replacing the database conflict', async () => {
   const fixture = proofFixture();
   const originalFetch = globalThis.fetch;
   const originalConsoleError = console.error;
@@ -653,18 +716,110 @@ test('Telegram upload preserves the database conflict when R2 cleanup also fails
     }
   });
   try {
-    await assert.rejects(storeTelegramProof(
-      fixture.env,
-      'ADMIN-1',
-      'PAYROLL-1',
-      'bank',
-      [{ file_id: 'RACE-PHOTO', file_size: 3 }],
-      new Date('2026-07-16T04:00:00.000Z')
-    ), /payroll proof upload conflict/);
-    assert.equal(cleanupErrors.length, 1);
-    assert.equal(cleanupErrors[0][0], 'payroll proof R2 cleanup failed');
+    await assert.rejects(
+      storeTelegramProof(
+        fixture.env,
+        'ADMIN-1',
+        'PAYROLL-1',
+        'bank',
+        [{ file_id: 'RACE-PHOTO', file_size: 3 }],
+        new Date('2026-07-16T04:00:00.000Z')
+      ),
+      (error) => {
+        assert.equal(error.message, 'payroll proof upload conflict');
+        return true;
+      }
+    );
+    assert.equal(cleanupErrors.length, 0);
+    const log = fixture.database.prepare(`
+      SELECT level, event, payload_json FROM bot_logs
+      WHERE event = 'payroll_proof_r2_cleanup_failed'
+    `).get();
+    assert.equal(log.level, 'error');
+    const payload = JSON.parse(log.payload_json);
+    assert.equal(payload.payroll_id, 'PAYROLL-1');
+    assert.equal(payload.attempt_id, 'ATTEMPT-CURRENT');
+    assert.match(payload.proof_id, /^PROOF-/);
+    assert.equal(
+      payload.object_key,
+      `payroll/STORE-1/PAYROLL-1/bank/${payload.proof_id}.jpg`
+    );
+    assert.equal(payload.cleanup_error, 'R2 cleanup failed');
     assert.equal(fixture.database.prepare(`
       SELECT COUNT(*) AS total FROM payroll_payment_proofs
+    `).get().total, 0);
+  } finally {
+    console.error = originalConsoleError;
+    globalThis.fetch = originalFetch;
+    fixture.database.close();
+  }
+});
+
+test('Telegram upload logs structured cleanup context when persistence also fails', async () => {
+  const fixture = proofFixture();
+  const originalFetch = globalThis.fetch;
+  const originalConsoleError = console.error;
+  const cleanupErrors = [];
+  globalThis.fetch = async (url) => {
+    if (String(url).includes('/getFile')) {
+      return {
+        async json() {
+          return { ok: true, result: { file_path: 'photos/race.jpg' } };
+        }
+      };
+    }
+    return new Response(new Uint8Array([1, 2, 3]), {
+      headers: { 'content-type': 'image/jpeg' }
+    });
+  };
+  fixture.env.PAYROLL_PROOFS.delete = async () => {
+    throw new Error('R2 cleanup failed');
+  };
+  console.error = (...args) => cleanupErrors.push(args);
+  let closed = false;
+  fixture.env.DB = createD1(fixture.database, {
+    beforeRun(sql) {
+      if (!closed && sql.includes('INSERT INTO payroll_payment_proofs')) {
+        closed = true;
+        fixture.database.prepare(`
+          UPDATE payroll_payment_attempts SET status = 'abandoned'
+          WHERE attempt_id = 'ATTEMPT-CURRENT'
+        `).run();
+      }
+      if (sql.includes('INSERT INTO bot_logs')) {
+        throw new Error('bot log write failed');
+      }
+    }
+  });
+  try {
+    await assert.rejects(
+      storeTelegramProof(
+        fixture.env,
+        'ADMIN-1',
+        'PAYROLL-1',
+        'bank',
+        [{ file_id: 'RACE-PHOTO', file_size: 3 }],
+        new Date('2026-07-16T04:00:00.000Z')
+      ),
+      (error) => {
+        assert.equal(error.message, 'payroll proof upload conflict');
+        return true;
+      }
+    );
+    assert.equal(cleanupErrors.length, 1);
+    assert.equal(cleanupErrors[0][0], 'payroll proof R2 cleanup failed');
+    const context = cleanupErrors[0][1];
+    assert.equal(context.payroll_id, 'PAYROLL-1');
+    assert.equal(context.attempt_id, 'ATTEMPT-CURRENT');
+    assert.match(context.proof_id, /^PROOF-/);
+    assert.equal(
+      context.object_key,
+      `payroll/STORE-1/PAYROLL-1/bank/${context.proof_id}.jpg`
+    );
+    assert.equal(context.cleanup_error, 'R2 cleanup failed');
+    assert.equal(context.logging_error, 'bot log write failed');
+    assert.equal(fixture.database.prepare(`
+      SELECT COUNT(*) AS total FROM bot_logs
     `).get().total, 0);
   } finally {
     console.error = originalConsoleError;

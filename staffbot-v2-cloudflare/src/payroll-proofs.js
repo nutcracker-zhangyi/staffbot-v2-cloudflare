@@ -1,4 +1,4 @@
-import { makeId } from './audit.js';
+import { logEvent, makeId } from './audit.js';
 import { isStoreAdmin } from './stores.js';
 import { downloadTelegramImage } from './telegram-images.js';
 
@@ -34,6 +34,34 @@ function maximumProofBytes(env) {
   return Number.isSafeInteger(configured) && configured > 0
     ? configured
     : DEFAULT_MAX_PROOF_BYTES;
+}
+
+async function reportProofCleanupFailure(env, context, cleanupError) {
+  const details = {
+    store_id: context.store_id,
+    object_key: context.object_key,
+    proof_id: context.proof_id,
+    payroll_id: context.payroll_id,
+    attempt_id: context.attempt_id,
+    cleanup_error: cleanupError && cleanupError.message
+      ? cleanupError.message
+      : String(cleanupError)
+  };
+  try {
+    await logEvent(
+      env,
+      'error',
+      'payroll_proof_r2_cleanup_failed',
+      details
+    );
+  } catch (loggingError) {
+    console.error('payroll proof R2 cleanup failed', {
+      ...details,
+      logging_error: loggingError && loggingError.message
+        ? loggingError.message
+        : String(loggingError)
+    });
+  }
 }
 
 async function proofPayroll(env, adminId, payrollId, method) {
@@ -168,7 +196,13 @@ export async function storeTelegramProof(
     try {
       await env.PAYROLL_PROOFS.delete(key);
     } catch (cleanupError) {
-      console.error('payroll proof R2 cleanup failed', cleanupError);
+      await reportProofCleanupFailure(env, {
+        store_id: payroll.store_id,
+        object_key: key,
+        proof_id: proofId,
+        payroll_id: payroll.payroll_id,
+        attempt_id: payroll.current_payment_attempt_id
+      }, cleanupError);
     }
     throw error;
   }
@@ -350,29 +384,43 @@ export async function completePayrollProofs(
         store_id, admin_id, action, target_id,
         details_json, created_at
       )
-      SELECT ?, ?, 'complete_payroll_proofs', ?, ?, ?
-      WHERE EXISTS (
-        SELECT 1 FROM payroll_disbursements
-        WHERE payroll_id = ?
-          AND status = 'awaiting_employee_confirmation'
-          AND updated_at = ?
-      )
+      SELECT d.store_id, ?, 'complete_payroll_proofs', d.payroll_id,
+        json_object(
+          'required_methods', json(COALESCE((
+            SELECT json_group_array(method)
+            FROM (
+              SELECT 'bank' AS method, 1 AS method_order
+              WHERE a.bank_micros > 0
+              UNION ALL
+              SELECT 'usdt', 2 WHERE a.usdt_micros > 0
+              UNION ALL
+              SELECT 'cash', 3 WHERE a.cash_micros > 0
+              ORDER BY method_order
+            )
+          ), '[]'))
+        ), ?
+      FROM payroll_disbursements d
+      JOIN payroll_payment_attempts a
+        ON a.attempt_id = d.current_payment_attempt_id
+       AND a.payroll_id = d.payroll_id
+      WHERE d.payroll_id = ?
+        AND d.status = 'awaiting_employee_confirmation'
+        AND d.updated_at = ?
+        AND a.status = 'submitted'
+        AND a.submitted_by = ?
+        AND a.submitted_at = ?
     `).bind(
-      payroll.store_id,
       String(adminId),
-      payroll.payroll_id,
-      JSON.stringify({
-        required_methods: ['bank', 'usdt', 'cash'].filter(
-          (method) => Number(payroll[`${method}_micros`]) > 0
-        )
-      }),
       nowIso,
       payroll.payroll_id,
+      nowIso,
+      String(adminId),
       nowIso
     )
   ]);
   if (Number(results[0] && results[0].meta.changes) !== 1
-    || Number(results[1] && results[1].meta.changes) !== 1) {
+    || Number(results[1] && results[1].meta.changes) !== 1
+    || Number(results[2] && results[2].meta.changes) !== 1) {
     throw new Error('payroll proof completion conflict');
   }
   return env.DB.prepare(`
