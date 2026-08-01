@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import worker from '../src/index.js';
+import { executeManageClient } from './helpers/manage-dom.js';
 
 function context() {
   return { waitUntil() {} };
@@ -91,18 +92,105 @@ test('manage assets have explicit content types and no-cache service worker', as
   assert.equal(serviceWorker.headers.get('cache-control'), 'no-cache');
 });
 
-test('manage client exposes login and authenticated shell placeholders', async () => {
+test('manage client transitions through login, authenticated navigation, and logout', async () => {
   const response = await worker.fetch(
     new Request('https://staffbot.test/manage/app.js'),
     env,
     context()
   );
-  const client = await response.text();
+  const requests = [];
+  let authenticated = false;
+  const browser = await executeManageClient(await response.text(), {
+    async fetch(path, options = {}) {
+      const method = options.method || 'GET';
+      requests.push({
+        path,
+        method,
+        body: options.body ? JSON.parse(options.body) : null
+      });
+      if (path === '/api/admin/me' && !authenticated) {
+        return new Response(JSON.stringify({
+          ok: false,
+          error: 'unauthorized'
+        }), { status: 401 });
+      }
+      if (path === '/api/admin/login/start') {
+        return new Response(JSON.stringify({ ok: true }));
+      }
+      if (path === '/api/admin/login/verify') {
+        authenticated = true;
+        return new Response(JSON.stringify({ ok: true }));
+      }
+      if (path === '/api/admin/me') {
+        return new Response(JSON.stringify({
+          ok: true,
+          telegram_id: 'ADMIN-1',
+          global_admin: true
+        }));
+      }
+      if (path === '/api/admin/logout') {
+        authenticated = false;
+        return new Response(JSON.stringify({ ok: true }));
+      }
+      return new Response(JSON.stringify({
+        ok: false,
+        error: 'not_found'
+      }), { status: 404 });
+    }
+  });
 
-  assert.match(client, /\/api\/admin\/login\/start/);
-  assert.match(client, /\/api\/admin\/login\/verify/);
-  assert.match(client, /\/api\/admin\/me/);
-  assert.match(client, /<nav[^>]*aria-label="Bottom navigation"/);
+  const telegramId = browser.document.getElementById('telegram-id');
+  const loginCode = browser.document.getElementById('login-code');
+  assert.ok(telegramId);
+  assert.ok(loginCode);
+  assert.equal(browser.document.querySelector(
+    'nav[aria-label="Bottom navigation"]'
+  ), null);
+
+  telegramId.value = 'ADMIN-1';
+  loginCode.value = '123456';
+  await browser.document.getElementById('send-code').click();
+  assert.equal(
+    browser.document.getElementById('login-status').textContent,
+    '验证码已发送'
+  );
+
+  await browser.document.getElementById('verify-code').click();
+  assert.equal(
+    browser.document.getElementById('session-admin').textContent,
+    '已登录：ADMIN-1'
+  );
+  const navigation = browser.document.querySelector(
+    'nav[aria-label="Bottom navigation"]'
+  );
+  assert.ok(navigation);
+  assert.deepEqual(
+    Array.from(navigation.children, (button) => button.textContent),
+    ['工作台', '待办', '员工', '更多']
+  );
+  assert.equal(
+    navigation.children[0].getAttribute('aria-current'),
+    'page'
+  );
+
+  await browser.document.getElementById('logout').click();
+  assert.ok(browser.document.getElementById('telegram-id'));
+  assert.equal(browser.document.getElementById('session-admin'), null);
+  assert.deepEqual(requests, [
+    { path: '/api/admin/me', method: 'GET', body: null },
+    {
+      path: '/api/admin/login/start',
+      method: 'POST',
+      body: { telegram_id: 'ADMIN-1' }
+    },
+    {
+      path: '/api/admin/login/verify',
+      method: 'POST',
+      body: { telegram_id: 'ADMIN-1', code: '123456' }
+    },
+    { path: '/api/admin/me', method: 'GET', body: null },
+    { path: '/api/admin/logout', method: 'POST', body: null }
+  ]);
 });
 
 test('unknown manage assets and non-GET manage requests remain not found', async () => {
