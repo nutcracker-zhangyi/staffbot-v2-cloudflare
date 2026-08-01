@@ -94,8 +94,8 @@ h1, h2, p { margin-top: 0; }
 const MANAGE_MANIFEST = JSON.stringify({
   name: 'StaffBot 管理端',
   short_name: 'StaffBot',
-  start_url: '/manage',
-  scope: '/manage',
+  start_url: '/manage/',
+  scope: '/manage/',
   display: 'standalone',
   background_color: '#ffffff',
   theme_color: '#111827',
@@ -109,7 +109,7 @@ const MANAGE_MANIFEST = JSON.stringify({
 
 const MANAGE_SERVICE_WORKER = `const CACHE_NAME = 'staffbot-manage-shell-v1';
 const SHELL_URLS = [
-  '/manage',
+  '/manage/',
   '/manage/app.js',
   '/manage/styles.css',
   '/manage/manifest.webmanifest',

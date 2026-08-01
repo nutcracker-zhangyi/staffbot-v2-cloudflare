@@ -15,8 +15,8 @@ or real-device operation was performed during the local implementation stage.
 | Check | Result | Evidence |
 | --- | --- | --- |
 | Syntax | PASS | `npm run check` |
-| Focused PWA behavior | PASS | 76/76 in `test/manage-page.test.js` and `test/manage-security.test.js` |
-| Full regression | PASS | 554/554 via `npm test` |
+| Focused PWA behavior | PASS | 98/98 in the manage page, security, and routing test files |
+| Full regression | PASS | 567/567 via `npm test` |
 | Whitespace | PASS | `git diff --check` |
 | Manifest | PASS | Response fetched and parsed as JSON; install metadata and security/cache headers asserted |
 | Service worker | PASS | Real `/manage/sw.js` response executed in a fake Worker global |
@@ -41,7 +41,7 @@ evidence remain pending.
 | Backfill reconciliation counts | PENDING | Not queried remotely |
 | Staging deployment/version | PENDING | Not deployed |
 | `GET /` staging health | PENDING | Not requested |
-| `/manage` shell and manifest | PENDING | Not requested |
+| `/manage/` shell and manifest | PENDING | Not requested |
 | `/admin` unchanged/staging marker | PENDING | Not requested |
 
 ## Real-device and business-flow acceptance

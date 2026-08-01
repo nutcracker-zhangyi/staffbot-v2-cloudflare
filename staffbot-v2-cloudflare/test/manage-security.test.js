@@ -121,7 +121,8 @@ test('manage manifest is parseable and contains complete install metadata', asyn
   const manifest = await response.json();
   assert.equal(manifest.name, 'StaffBot 管理端');
   assert.equal(manifest.short_name, 'StaffBot');
-  assert.equal(manifest.start_url, '/manage');
+  assert.equal(manifest.start_url, '/manage/');
+  assert.equal(manifest.scope, '/manage/');
   assert.equal(manifest.display, 'standalone');
   assert.equal(manifest.theme_color, '#111827');
   assert.deepEqual(manifest.icons, [{
@@ -137,7 +138,7 @@ test('manage service worker installs exactly the fixed shell and removes old cac
   const install = await serviceWorker.dispatch('install');
   await install.lifetime;
   assert.deepEqual(serviceWorker.calls.addAll, [[
-    '/manage',
+    '/manage/',
     '/manage/app.js',
     '/manage/styles.css',
     '/manage/manifest.webmanifest',
@@ -149,6 +150,22 @@ test('manage service worker installs exactly the fixed shell and removes old cac
   await activate.lifetime;
   assert.deepEqual(serviceWorker.calls.cacheDelete, ['staffbot-manage-shell-v0']);
   assert.equal(serviceWorker.calls.clientsClaim, 1);
+});
+
+test('manage launch URL is routable inside the default service-worker scope', async () => {
+  const redirect = await manageAsset('/manage');
+  assert.equal(redirect.status, 308);
+  assert.equal(new URL(redirect.headers.get('location')).pathname, '/manage/');
+
+  const launch = await manageAsset('/manage/');
+  assert.equal(launch.status, 200);
+  assert.equal(launch.headers.get('content-type'), 'text/html; charset=utf-8');
+
+  const manifest = await (await manageAsset('/manage/manifest.webmanifest')).json();
+  const defaultScope = new URL('./', 'https://staffbot.test/manage/sw.js').pathname;
+  assert.equal(defaultScope, '/manage/');
+  assert.ok(manifest.start_url.startsWith(defaultScope));
+  assert.equal(manifest.start_url, defaultScope);
 });
 
 test('manage service worker is cache-first only for exact same-origin shell GET requests', async () => {

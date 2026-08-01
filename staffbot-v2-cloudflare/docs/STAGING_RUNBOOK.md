@@ -58,7 +58,7 @@ gates. Passing local tests does not authorize a remote migration or deploy.
 
 ```bash
 npm run check
-node --test test/manage-page.test.js test/manage-security.test.js
+node --test test/manage-page.test.js test/manage-security.test.js test/manage-routing.test.js
 npm test
 git diff --check
 ```
@@ -79,7 +79,7 @@ npx wrangler d1 execute staffbot_v2_staging --env staging --remote --command \
   "SELECT name FROM sqlite_master WHERE type='table' AND name IN ('admin_task_claims','payroll_payment_attempts') ORDER BY name"
 npx wrangler deploy --env staging
 curl -fsS https://staffbot-v2-staging.staffbot-v2.workers.dev/
-curl -fsS https://staffbot-v2-staging.staffbot-v2.workers.dev/manage
+curl -fsS https://staffbot-v2-staging.staffbot-v2.workers.dev/manage/
 curl -fsS https://staffbot-v2-staging.staffbot-v2.workers.dev/manage/manifest.webmanifest
 curl -fsS https://staffbot-v2-staging.staffbot-v2.workers.dev/admin
 ```

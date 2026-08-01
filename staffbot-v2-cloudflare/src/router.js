@@ -46,6 +46,10 @@ export default {
     }
 
     if (request.method === 'GET' && url.pathname === '/manage') {
+      return Response.redirect(new URL('/manage/', url), 308);
+    }
+
+    if (request.method === 'GET' && url.pathname === '/manage/') {
       return manageDocument(manageHtml(env));
     }
 

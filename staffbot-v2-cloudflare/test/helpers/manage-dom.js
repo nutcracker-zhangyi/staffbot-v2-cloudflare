@@ -134,6 +134,7 @@ export async function executeManageClient(source, {
 }) {
   const document = new BrowserDocument();
   const serviceWorkerRegistrations = [];
+  const serviceWorkerRegistrationDetails = [];
   const listeners = new Map();
   const timers = new Map();
   let timerId = 0;
@@ -151,9 +152,17 @@ export async function executeManageClient(source, {
   const navigator = {
     onLine: online,
     serviceWorker: {
-      async register(path) {
+      async register(path, options = {}) {
         serviceWorkerRegistrations.push(path);
-        return { scope: path };
+        const script = new URL(path, 'https://staffbot.test');
+        const scope = options.scope
+          ? new URL(options.scope, script).pathname
+          : new URL('./', script).pathname;
+        serviceWorkerRegistrationDetails.push({
+          script: script.pathname,
+          scope
+        });
+        return { scope };
       }
     }
   };
@@ -224,6 +233,7 @@ export async function executeManageClient(source, {
   return {
     document,
     serviceWorkerRegistrations,
+    serviceWorkerRegistrationDetails,
     objectUrls,
     async clickButton(label) {
       const button = document.buttons.find((item) => item.textContent === label);

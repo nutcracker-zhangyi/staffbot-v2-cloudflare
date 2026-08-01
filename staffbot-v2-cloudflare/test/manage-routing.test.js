@@ -73,7 +73,7 @@ function manageRequest(path, options = {}) {
 
 test('serves the manage shell and assets without changing admin', async () => {
   for (const path of [
-    '/manage',
+    '/manage/',
     '/manage/app.js',
     '/manage/styles.css',
     '/manage/manifest.webmanifest',
@@ -99,7 +99,7 @@ test('serves the manage shell and assets without changing admin', async () => {
 
 test('manage document uses external assets and strict manage headers', async () => {
   const response = await worker.fetch(
-    new Request('https://staffbot.test/manage'),
+    new Request('https://staffbot.test/manage/'),
     env,
     context()
   );

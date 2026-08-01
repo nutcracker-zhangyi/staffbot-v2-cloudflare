@@ -22,6 +22,7 @@ const state = {
   claimTimer: 0,
   online: navigator.onLine,
   decisionMode: '',
+  takeoverMode: '',
   message: '',
   requestGeneration: 0,
   taskListGeneration: 0,
@@ -137,6 +138,7 @@ function resetAuthenticatedState() {
   clearPayrollState();
   state.online = navigator.onLine;
   state.decisionMode = '';
+  state.takeoverMode = '';
   state.message = '';
   state.taskListGeneration = 0;
   state.mutationBusy = false;
@@ -169,6 +171,7 @@ function shell(content) {
       state.currentTask = null;
       clearPayrollState();
       state.decisionMode = '';
+      state.takeoverMode = '';
       state.message = '';
       state.authorityStale = false;
       state.renewRetry = null;
@@ -285,6 +288,7 @@ function clearPayrollState() {
   state.paymentAmounts = { bank: '', usdt: '', cash: '' };
   state.paymentErrors = { bank: '', usdt: '', cash: '' };
   state.paymentBusy = false;
+  state.takeoverMode = '';
 }
 
 function clearAttemptTransientState() {
@@ -467,6 +471,16 @@ function renderPayrollDetail() {
   const handler = claimIsActive(payroll.claim)
     ? '当前处理人：' + escapeHtml(payroll.claim.claimed_by)
     : '当前未领取';
+  const occupiedByOther = claimOwnedByOther(payroll.claim);
+  const payrollAction = state.payrollMode === 'dossier' && payrollCanStart(payroll)
+    ? occupiedByOther
+      ? '<button id="takeover" class="danger" type="button"'
+        + disabled(!state.online || state.paymentBusy || state.authorityStale)
+        + '>负责人接管</button>'
+      : '<button id="start-payroll-payment" type="button"'
+        + disabled(!state.online || state.paymentBusy || state.authorityStale)
+        + '>领取并开始付款</button>'
+    : '';
   shell('<button id="back-to-payroll" class="text-button" type="button">← 返回工资</button>'
     + '<article class="detail-card payroll-dossier"><div class="task-card-top">'
     + '<span class="type-badge">工资档案</span><span>'
@@ -487,10 +501,8 @@ function renderPayrollDetail() {
       : '') + '</section>'
     + payrollAttemptsSection(detail.attempts)
     + historySection(detail.history)
-    + (state.payrollMode === 'dossier' && payrollCanStart(payroll)
-      ? '<button id="start-payroll-payment" type="button"'
-        + disabled(!state.online || state.paymentBusy || claimOwnedByOther(payroll.claim))
-        + '>领取并开始付款</button>' : '')
+    + payrollAction
+    + takeoverPanel('payroll', state.paymentBusy)
     + payment + '</article>');
   document.getElementById('back-to-payroll').onclick = () => {
     state.requestGeneration += 1;
@@ -501,6 +513,25 @@ function renderPayrollDetail() {
   };
   const start = document.getElementById('start-payroll-payment');
   if (start) start.onclick = startPayrollPayment;
+  const takeoverButton = document.getElementById('takeover');
+  if (takeoverButton) takeoverButton.onclick = () => {
+    if (!state.online || state.paymentBusy || state.authorityStale) return;
+    state.takeoverMode = 'payroll';
+    renderPayrollDetail();
+  };
+  const takeoverConfirm = document.getElementById('takeover-confirm');
+  if (takeoverConfirm) takeoverConfirm.onclick = takeoverCurrentPayroll;
+  const takeoverCancel = document.getElementById('takeover-cancel');
+  if (takeoverCancel) takeoverCancel.onclick = () => {
+    state.takeoverMode = '';
+    renderPayrollDetail();
+  };
+  for (const attempt of detail.attempts || []) {
+    const retry = document.getElementById(
+      'retry-payroll-notification-' + attempt.attempt_id
+    );
+    if (retry) retry.onclick = () => retryPayrollNotification(attempt.attempt_id);
+  }
   bindPaymentControls();
   if (payrollCanStart(payroll)) startPayrollClaimTimer();
   else stopClaimTimer();
@@ -529,6 +560,11 @@ function payrollAttemptsSection(attempts) {
       + (attempt.employee_response
         ? '<p class="meta">员工反馈：' + escapeHtml(attempt.employee_response) + ' · '
           + escapeHtml(formatDateTime(attempt.employee_responded_at)) + '</p>' : '')
+      + (payrollNotificationRetryable(attempt.attempt_id)
+        ? '<button id="retry-payroll-notification-' + escapeHtml(attempt.attempt_id)
+          + '" class="secondary" type="button"'
+          + disabled(!state.online || state.paymentBusy || state.authorityStale)
+          + '>重试 Telegram 通知</button>' : '')
       + '<div class="proof-grid">' + (attempt.proofs || []).map((proof) => (
         '<figure class="proof-card"><img src="' + escapeHtml(proof.url || privateProofUrl(proof.proof_id))
           + '" alt="' + escapeHtml(paymentMethodLabel(proof.method)) + '付款回执" loading="lazy">'
@@ -541,6 +577,24 @@ function payrollAttemptsSection(attempts) {
           + '</figure>'
       )).join('') + '</div></article>').join('')
     + '</div></section>';
+}
+
+function payrollNotificationRetryable(attemptId) {
+  const detail = state.currentPayroll;
+  const attempt = detail && detail.attempts.find(
+    (item) => String(item.attempt_id) === String(attemptId)
+  );
+  if (
+    !detail
+    || detail.payroll.status !== 'awaiting_employee_confirmation'
+    || !attempt
+    || attempt.status !== 'submitted'
+  ) return false;
+  return latestNotificationAction(
+    detail.history,
+    new Set(['payroll_notification_failed', 'payroll_notification_sent']),
+    String(attemptId)
+  ) === 'payroll_notification_failed';
 }
 
 function privateProofUrl(proofId) {
@@ -732,6 +786,87 @@ function canSavePaymentSplit() {
   if (!canMutatePayment()) return false;
   const totals = paymentTotals();
   return totals.valid && totals.difference === 0n;
+}
+
+async function takeoverCurrentPayroll() {
+  if (
+    !state.currentPayroll
+    || !state.online
+    || state.paymentBusy
+    || state.authorityStale
+    || !payrollCanStart(state.currentPayroll.payroll)
+    || !claimOwnedByOther(state.currentPayroll.payroll.claim)
+  ) return;
+  const reasonField = document.getElementById('takeover-reason');
+  const reason = reasonField ? reasonField.value.trim() : '';
+  if (!reason) {
+    const error = document.getElementById('takeover-error');
+    if (error) error.textContent = '请填写接管原因';
+    return;
+  }
+  const payroll = state.currentPayroll.payroll;
+  const generation = state.requestGeneration;
+  const key = payrollKey();
+  state.paymentBusy = true;
+  renderPayrollDetail();
+  try {
+    await api('/api/manage/tasks/payroll/'
+      + encodeURIComponent(payroll.payroll_id) + '/takeover', {
+      method: 'POST', body: JSON.stringify({ reason })
+    });
+    if (!payrollRequestIsCurrent(generation, key)) return;
+    state.takeoverMode = '';
+    await refreshPayrollAfterReconnect('工资任务已接管');
+  } catch (error) {
+    if (!payrollRequestIsCurrent(generation, key)) return;
+    const message = error.status === 403
+      ? '当前账号无权接管，已刷新最新工资状态'
+      : error.status === 409
+        ? '工资任务接管冲突，已刷新最新状态'
+        : '工资任务接管失败，已刷新最新状态';
+    await refreshPayrollAfterReconnect(message);
+  } finally {
+    if (payrollRequestIsCurrent(generation, key)) {
+      state.paymentBusy = false;
+      renderPayrollDetail();
+    }
+  }
+}
+
+async function retryPayrollNotification(attemptId) {
+  const expectedAttemptId = String(attemptId);
+  if (
+    !state.currentPayroll
+    || !state.online
+    || state.paymentBusy
+    || state.authorityStale
+    || !payrollNotificationRetryable(expectedAttemptId)
+  ) return;
+  const payroll = state.currentPayroll.payroll;
+  const generation = state.requestGeneration;
+  const key = payrollKey();
+  state.paymentBusy = true;
+  renderPayrollDetail();
+  try {
+    await api(payrollPath(payroll.store_id, payroll.payroll_id)
+      + '/attempts/' + encodeURIComponent(expectedAttemptId)
+      + '/notify/retry', { method: 'POST' });
+    if (!payrollRequestIsCurrent(generation, key)) return;
+    await refreshPayrollAfterReconnect('Telegram 通知已发送');
+  } catch (error) {
+    if (!payrollRequestIsCurrent(generation, key)) return;
+    const message = error.status === 403
+      ? '当前账号无权重试通知，已刷新最新工资状态'
+      : error.status === 409
+        ? 'Telegram 通知发送冲突，已刷新最新工资状态'
+        : 'Telegram 通知发送失败，已刷新最新工资状态';
+    await refreshPayrollAfterReconnect(message);
+  } finally {
+    if (payrollRequestIsCurrent(generation, key)) {
+      state.paymentBusy = false;
+      renderPayrollDetail();
+    }
+  }
 }
 
 async function startPayrollPayment() {
@@ -1112,6 +1247,45 @@ function claimIsActive(claim) {
   );
 }
 
+function takeoverPanel(mode, busy) {
+  if (state.takeoverMode !== mode) return '';
+  return '<div class="confirm-panel"><label for="takeover-reason">接管原因（必填）</label>'
+    + '<textarea id="takeover-reason" rows="3"></textarea>'
+    + '<p id="takeover-error" class="error" role="alert"></p>'
+    + '<button id="takeover-confirm" type="button"'
+    + disabled(!state.online || busy || state.authorityStale) + '>确认接管</button>'
+    + '<button id="takeover-cancel" class="secondary" type="button">取消</button></div>';
+}
+
+function latestNotificationAction(history, actions, attemptId = '') {
+  const rows = Array.isArray(history) ? history : [];
+  for (let index = rows.length - 1; index >= 0; index -= 1) {
+    const item = rows[index];
+    if (!actions.has(item.action)) continue;
+    if (attemptId && String(item.details && item.details.attempt_id || '') !== attemptId) continue;
+    return item.action;
+  }
+  return '';
+}
+
+function approvalNotificationRetryable(detail = state.currentTask) {
+  const actions = new Set([
+    'approval_notification_failed',
+    'approval_notification_retry_claimed',
+    'approval_notification_retried',
+    'approval_notification_sent'
+  ]);
+  const type = String(detail && detail.task && detail.task.task_type || '');
+  const rows = Array.isArray(detail && detail.history) ? detail.history : [];
+  for (let index = rows.length - 1; index >= 0; index -= 1) {
+    const item = rows[index];
+    if (!actions.has(item.action)) continue;
+    if (String(item.details && item.details.task_type || '') !== type) continue;
+    return item.action === 'approval_notification_failed';
+  }
+  return false;
+}
+
 function renderTaskDetail() {
   const detail = state.currentTask;
   const task = detail.task;
@@ -1135,13 +1309,23 @@ function renderTaskDetail() {
       + '<button id="reject-confirm" type="button"' + disabled(!canDecide) + '>确认拒绝</button>'
       + '<button id="decision-cancel" class="secondary" type="button">取消</button></div>';
   }
+  const occupiedByOther = pending && claimOwnedByOther(claim);
   const claimAction = !pending ? '' : owned
     ? '<button id="release" class="secondary" type="button"'
       + disabled(!state.online || state.mutationBusy || state.authorityStale) + '>释放</button>'
-    : '<button id="claim" type="button"'
+    : occupiedByOther
+      ? '<button id="takeover" class="danger" type="button"'
+        + disabled(!state.online || state.mutationBusy || state.authorityStale)
+        + '>负责人接管</button>'
+      : '<button id="claim" type="button"'
       + disabled(
         !state.online || state.mutationBusy || state.authorityStale || claimIsActive(claim)
       ) + '>领取</button>';
+  const retryNotification = !pending && approvalNotificationRetryable(detail)
+    ? '<button id="retry-approval-notification" class="secondary" type="button"'
+      + disabled(!state.online || state.mutationBusy || state.authorityStale)
+      + '>重试 Telegram 通知</button>'
+    : '';
   const requestFacts = Object.entries(detail.request || {}).map(([key, value]) => (
     '<div><dt>' + escapeHtml(factLabel(key)) + '</dt><dd>' + escapeHtml(factValue(key, value)) + '</dd></div>'
   )).join('');
@@ -1159,6 +1343,7 @@ function renderTaskDetail() {
     + '<p id="claim-status" class="claim-status">' + handler + '</p>'
     + '<p id="decision-status" class="decision-status">' + escapeHtml(result) + '</p>'
     + '<div class="claim-actions">' + claimAction + '</div>'
+    + takeoverPanel('approval', state.mutationBusy)
     + '<section><h3>申请信息</h3><dl class="facts">' + requestFacts + '</dl></section>'
     + employeeSection(detail.employee)
     + attachmentSection(detail.attachments)
@@ -1166,12 +1351,13 @@ function renderTaskDetail() {
     + '<div id="approval-actions" class="approval-actions" aria-disabled="' + (!canDecide) + '">'
     + '<button id="approve" type="button"' + disabled(!canDecide) + '>批准</button>'
     + '<button id="reject" class="danger" type="button"' + disabled(!canDecide) + '>拒绝</button></div>'
-    + decision + '</article>');
+    + decision + retryNotification + '</article>');
 
   document.getElementById('back-to-tasks').onclick = () => {
     state.requestGeneration += 1;
     state.currentTask = null;
     state.decisionMode = '';
+    state.takeoverMode = '';
     state.message = '';
     state.authorityStale = false;
     state.renewRetry = null;
@@ -1182,6 +1368,21 @@ function renderTaskDetail() {
   if (claimButton) claimButton.onclick = claimCurrentTask;
   const releaseButton = document.getElementById('release');
   if (releaseButton) releaseButton.onclick = releaseCurrentTask;
+  const takeoverButton = document.getElementById('takeover');
+  if (takeoverButton) takeoverButton.onclick = () => {
+    if (!state.online || state.mutationBusy || state.authorityStale) return;
+    state.takeoverMode = 'approval';
+    renderTaskDetail();
+  };
+  const takeoverConfirm = document.getElementById('takeover-confirm');
+  if (takeoverConfirm) takeoverConfirm.onclick = takeoverCurrentTask;
+  const takeoverCancel = document.getElementById('takeover-cancel');
+  if (takeoverCancel) takeoverCancel.onclick = () => {
+    state.takeoverMode = '';
+    renderTaskDetail();
+  };
+  const retryNotificationButton = document.getElementById('retry-approval-notification');
+  if (retryNotificationButton) retryNotificationButton.onclick = retryApprovalNotification;
   document.getElementById('approve').onclick = () => {
     if (!canDecide) return;
     state.decisionMode = 'approve';
@@ -1391,6 +1592,7 @@ async function openTask(type, id, directStoreId = null) {
     }
     state.currentTask = detail;
     state.decisionMode = '';
+    state.takeoverMode = '';
     state.message = '';
     renderTaskDetail();
   } catch (error) {
@@ -1458,6 +1660,100 @@ function renewCurrentClaim() {
 
 function releaseCurrentTask() {
   return mutateClaim('release');
+}
+
+async function takeoverCurrentTask() {
+  if (
+    !state.currentTask
+    || !state.online
+    || state.mutationBusy
+    || state.authorityStale
+    || !claimOwnedByOther(state.currentTask.task.claim)
+  ) return;
+  const reasonField = document.getElementById('takeover-reason');
+  const reason = reasonField ? reasonField.value.trim() : '';
+  if (!reason) {
+    const error = document.getElementById('takeover-error');
+    if (error) error.textContent = '请填写接管原因';
+    return;
+  }
+  const task = state.currentTask.task;
+  const generation = state.requestGeneration;
+  const key = currentTaskKey();
+  state.mutationBusy = true;
+  renderTaskDetail();
+  try {
+    await api('/api/manage/tasks/'
+      + encodeURIComponent(task.task_type) + '/'
+      + encodeURIComponent(task.task_id) + '/takeover', {
+      method: 'POST', body: JSON.stringify({ reason })
+    });
+    if (!requestIsCurrent(generation, key)) return;
+    state.takeoverMode = '';
+    await refreshCurrentTask('任务已接管', generation, key);
+  } catch (error) {
+    if (!requestIsCurrent(generation, key)) return;
+    if (error.status === 403 || error.status === 409) {
+      const message = error.status === 403
+        ? '当前账号无权接管，已刷新最新任务状态'
+        : '接管冲突，已刷新最新任务状态';
+      try {
+        await refreshCurrentTask(message, generation, key);
+      } catch {
+        if (requestIsCurrent(generation, key)) markAuthorityStale();
+      }
+      return;
+    }
+    state.message = '接管失败，请稍后重试';
+  } finally {
+    if (requestIsCurrent(generation, key)) {
+      state.mutationBusy = false;
+      renderTaskDetail();
+    }
+  }
+}
+
+async function retryApprovalNotification() {
+  if (
+    !state.currentTask
+    || !state.online
+    || state.mutationBusy
+    || state.authorityStale
+    || !approvalNotificationRetryable()
+  ) return;
+  const task = state.currentTask.task;
+  const generation = state.requestGeneration;
+  const key = currentTaskKey();
+  state.mutationBusy = true;
+  renderTaskDetail();
+  try {
+    const result = await api('/api/manage/stores/'
+      + encodeURIComponent(task.store_id) + '/approvals/'
+      + encodeURIComponent(task.task_type) + '/'
+      + encodeURIComponent(task.task_id) + '/notify/retry', { method: 'POST' });
+    if (!requestIsCurrent(generation, key)) return;
+    const message = result.notification && result.notification.status === 'retrying'
+      ? 'Telegram 通知正在由其他管理员重试'
+      : 'Telegram 通知已发送';
+    await refreshCurrentTask(message, generation, key);
+  } catch (error) {
+    if (!requestIsCurrent(generation, key)) return;
+    const message = error.status === 403
+      ? '当前账号无权重试通知，已刷新最新状态'
+      : error.status === 409
+        ? 'Telegram 通知重试冲突，已刷新最新状态'
+        : 'Telegram 通知发送失败，已刷新最新状态';
+    try {
+      await refreshCurrentTask(message, generation, key);
+    } catch {
+      if (requestIsCurrent(generation, key)) markAuthorityStale();
+    }
+  } finally {
+    if (requestIsCurrent(generation, key)) {
+      state.mutationBusy = false;
+      renderTaskDetail();
+    }
+  }
 }
 
 async function submitApproval(decision) {
@@ -1553,6 +1849,7 @@ async function refreshCurrentTask(
   state.currentTask = detail;
   state.tasks = tasks.tasks || [];
   state.decisionMode = '';
+  state.takeoverMode = '';
   state.message = message;
   renderTaskDetail();
 }
@@ -1739,7 +2036,7 @@ async function refreshListAfterReconnect() {
   }
 }
 
-async function refreshPayrollAfterReconnect() {
+async function refreshPayrollAfterReconnect(successMessage = '最新工资状态已刷新') {
   if (!state.currentPayroll) return;
   const payroll = state.currentPayroll.payroll;
   const key = payrollKey();
@@ -1748,6 +2045,7 @@ async function refreshPayrollAfterReconnect() {
   const generation = state.requestGeneration + 1;
   state.requestGeneration = generation;
   clearProofUploadState();
+  state.takeoverMode = '';
   state.authorityStale = true;
   state.paymentBusy = true;
   state.message = '已恢复网络，正在刷新最新工资状态';
@@ -1810,7 +2108,7 @@ async function refreshPayrollAfterReconnect() {
     state.payrollMode = sameEditableAttempt ? 'payment' : 'dossier';
     state.authorityStale = false;
     state.paymentBusy = false;
-    state.message = '最新工资状态已刷新';
+    state.message = successMessage;
     renderPayrollDetail();
   } catch {
     if (!payrollRequestIsCurrent(generation, key)) return;
