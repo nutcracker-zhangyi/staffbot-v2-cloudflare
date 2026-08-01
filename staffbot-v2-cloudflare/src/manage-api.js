@@ -28,7 +28,10 @@ import {
   saveAttemptSplit,
   submitPaymentAttempt
 } from './payroll-payment-attempts.js';
-import { deliverPaymentAttempt } from './payroll-notifications.js';
+import {
+  deliverPaymentAttempt,
+  paymentAttemptDeliveryResult
+} from './payroll-notifications.js';
 import { readPayrollPaymentQr } from './payroll-payment-qr.js';
 import {
   deleteBrowserDraftProof,
@@ -361,19 +364,26 @@ async function handleManagePayroll(request, env, session, parts) {
     } catch (error) {
       return managePayrollError(error);
     }
-    if (attempt.status !== 'submitted') {
+    const storedDelivery = await paymentAttemptDeliveryResult(
+      env,
+      session.telegram_id,
+      attemptId
+    );
+    if (!storedDelivery.current || attempt.status !== 'submitted') {
       return json({
         ok: true,
         attempt,
-        notification: { status: 'sent', retryable: false }
+        notification: {
+          status: storedDelivery.status,
+          retryable: false
+        }
       });
     }
     try {
       await deliverPaymentAttempt(
         env,
         session.telegram_id,
-        attemptId,
-        new Date()
+        attemptId
       );
       return json({
         ok: true,
@@ -403,8 +413,7 @@ async function handleManagePayroll(request, env, session, parts) {
       await deliverPaymentAttempt(
         env,
         session.telegram_id,
-        attemptId,
-        new Date()
+        attemptId
       );
       return json({
         ok: true,
@@ -501,6 +510,18 @@ function manageProof(proof) {
 
 function managePayrollError(error) {
   const message = String(error && error.message || '');
+  if (message === 'payroll proofs are incomplete') {
+    const missingMethods = Array.isArray(error && error.missing_methods)
+      ? error.missing_methods.filter(
+        (method) => ['bank', 'usdt', 'cash'].includes(method)
+      )
+      : [];
+    return json({
+      ok: false,
+      error: 'payroll_proofs_incomplete',
+      missing_methods: missingMethods
+    }, 400);
+  }
   if (message.includes('storage is not configured')) {
     return json({ ok: false, error: 'storage_not_configured' }, 503);
   }

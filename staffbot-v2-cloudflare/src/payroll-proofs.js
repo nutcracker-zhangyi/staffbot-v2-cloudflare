@@ -77,6 +77,18 @@ function isWebp(bytes) {
     && 20 + chunkSize + (chunkSize % 2) <= bytes.length;
 }
 
+export function validateProofImageBytes(bytes, mimeType) {
+  const value = bytes instanceof Uint8Array
+    ? bytes
+    : new Uint8Array(bytes);
+  const type = PROOF_TYPES[String(mimeType || '').toLowerCase()];
+  if (!type) throw new TypeError('payroll proof must be JPEG, PNG, or WebP');
+  if (!type.signature(value)) {
+    throw new TypeError('payroll proof bytes must match its image type');
+  }
+  return value;
+}
+
 function proofClock(now) {
   if (typeof now === 'function') return () => new Date(now());
   if (now !== undefined) return () => new Date(now);
@@ -96,9 +108,10 @@ async function browserImage(file) {
     throw new RangeError('payroll proof is too large');
   }
   const bytes = new Uint8Array(await file.arrayBuffer());
-  if (bytes.byteLength !== file.size || !type.signature(bytes)) {
+  if (bytes.byteLength !== file.size) {
     throw new TypeError('payroll proof bytes must match its image type');
   }
+  validateProofImageBytes(bytes, file.type);
   return {
     bytes,
     extension: type.extension,

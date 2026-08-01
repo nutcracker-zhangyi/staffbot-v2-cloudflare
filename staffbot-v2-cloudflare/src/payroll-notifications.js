@@ -10,7 +10,7 @@ import {
   sendPhotoBytes,
   telegramErrorSummary
 } from './telegram-client.js';
-import { audit } from './audit.js';
+import { validateProofImageBytes } from './payroll-proofs.js';
 import { isStoreAdmin } from './stores.js';
 
 const REMINDER_INTERVAL_MS = 24 * 60 * 60 * 1000;
@@ -372,17 +372,61 @@ export async function sendPayrollForEmployeeConfirmation(
 }
 
 const PAYMENT_DELIVERY_LEASE_MS = 15 * 60 * 1000;
-const PAYMENT_DELIVERY_ACTIONS = [
+const MAX_DELIVERY_PROOF_BYTES = 10 * 1024 * 1024;
+const DELIVERY_ACTION_SQL = `(
   'payroll_notification_delivery_claimed',
   'payroll_notification_failed',
   'payroll_notification_sent'
-];
+)`;
 
 function paymentDeliveryError(code, proofId = null) {
   const error = new Error('payroll notification failed');
   error.notification_code = code;
   if (proofId) error.proof_id = String(proofId);
   return error;
+}
+
+function deliveryLeaseLost() {
+  const error = new Error('payment notification delivery lease lost');
+  error.delivery_lease_lost = true;
+  return error;
+}
+
+function deliveryClock(now) {
+  if (typeof now === 'function') return () => new Date(now());
+  if (now !== undefined) return () => new Date(now);
+  return () => new Date();
+}
+
+function deliveryLeaseExpiry(now) {
+  return new Date(now.getTime() + PAYMENT_DELIVERY_LEASE_MS).toISOString();
+}
+
+function activeDeliveryLeaseSql() {
+  return `EXISTS (
+    SELECT 1 FROM admin_audit_logs lease
+    WHERE lease.id = (
+      SELECT state.id FROM admin_audit_logs state
+      WHERE state.store_id = ? AND state.target_id = ?
+        AND json_extract(state.details_json, '$.attempt_id') = ?
+        AND state.action IN ${DELIVERY_ACTION_SQL}
+      ORDER BY state.id DESC
+      LIMIT 1
+    )
+      AND lease.action = 'payroll_notification_delivery_claimed'
+      AND json_extract(lease.details_json, '$.lease_token') = ?
+      AND json_extract(lease.details_json, '$.expires_at') > ?
+  )`;
+}
+
+function activeDeliveryLeaseBinds(payroll, lease, checkedAt) {
+  return [
+    payroll.store_id,
+    payroll.payroll_id,
+    payroll.attempt_id,
+    lease.token,
+    checkedAt.toISOString()
+  ];
 }
 
 async function paymentAttemptForDelivery(env, adminId, attemptId) {
@@ -422,13 +466,17 @@ async function claimPaymentDelivery(env, adminId, payroll, now) {
   const staleBefore = new Date(
     now.getTime() - PAYMENT_DELIVERY_LEASE_MS
   ).toISOString();
-  const placeholders = PAYMENT_DELIVERY_ACTIONS.map(() => '?').join(', ');
+  const token = crypto.randomUUID();
+  const expiresAt = deliveryLeaseExpiry(now);
   const result = await env.DB.prepare(`
     INSERT INTO admin_audit_logs (
       store_id, admin_id, action, target_id, details_json, created_at
     )
     SELECT ?, ?, 'payroll_notification_delivery_claimed', ?,
-      json_object('attempt_id', ?, 'version', ?), ?
+      json_object(
+        'attempt_id', ?, 'version', ?,
+        'lease_token', ?, 'expires_at', ?
+      ), ?
     WHERE EXISTS (
       SELECT 1
       FROM payroll_payment_attempts a
@@ -441,14 +489,24 @@ async function claimPaymentDelivery(env, adminId, payroll, now) {
       AND COALESCE((
         SELECT CASE
           WHEN action = 'payroll_notification_delivery_claimed'
-            AND created_at > ? THEN 0
+            AND (
+              (
+                json_extract(details_json, '$.expires_at') IS NOT NULL
+                AND json_extract(details_json, '$.expires_at') <= ?
+              )
+              OR (
+                json_extract(details_json, '$.expires_at') IS NULL
+                AND created_at <= ?
+              )
+            ) THEN 1
+          WHEN action = 'payroll_notification_failed' THEN 1
           WHEN action = 'payroll_notification_sent' THEN 0
-          ELSE 1
+          ELSE 0
         END
         FROM admin_audit_logs
         WHERE store_id = ? AND target_id = ?
           AND json_extract(details_json, '$.attempt_id') = ?
-          AND action IN (${placeholders})
+          AND action IN ${DELIVERY_ACTION_SQL}
         ORDER BY id DESC
         LIMIT 1
       ), 1) = 1
@@ -458,18 +516,92 @@ async function claimPaymentDelivery(env, adminId, payroll, now) {
     payroll.payroll_id,
     payroll.attempt_id,
     Number(payroll.version),
+    token,
+    expiresAt,
     claimedAt,
     payroll.attempt_id,
+    claimedAt,
     staleBefore,
     payroll.store_id,
     payroll.payroll_id,
-    payroll.attempt_id,
-    ...PAYMENT_DELIVERY_ACTIONS
+    payroll.attempt_id
   ).run();
-  return Number(result && result.meta && result.meta.changes) === 1;
+  return Number(result && result.meta && result.meta.changes) === 1
+    ? { token, expires_at: expiresAt }
+    : null;
+}
+
+async function requirePaymentDeliveryLease(env, payroll, lease, now) {
+  const guard = activeDeliveryLeaseSql();
+  const active = await env.DB.prepare(`
+    SELECT 1 AS active
+    WHERE ${guard}
+      AND EXISTS (
+        SELECT 1 FROM payroll_payment_attempts a
+        JOIN payroll_disbursements d ON d.payroll_id = a.payroll_id
+        WHERE a.attempt_id = ? AND a.status = 'submitted'
+          AND d.current_payment_attempt_id = a.attempt_id
+          AND d.status = 'awaiting_employee_confirmation'
+          AND d.payment_sent_at IS NULL
+      )
+  `).bind(
+    ...activeDeliveryLeaseBinds(payroll, lease, now),
+    payroll.attempt_id
+  ).first();
+  if (!active) throw deliveryLeaseLost();
+}
+
+async function renewPaymentDelivery(env, adminId, payroll, lease, now) {
+  await requirePaymentDeliveryLease(env, payroll, lease, now);
+  const expiresAt = deliveryLeaseExpiry(now);
+  const guard = activeDeliveryLeaseSql();
+  const result = await env.DB.prepare(`
+    INSERT INTO admin_audit_logs (
+      store_id, admin_id, action, target_id, details_json, created_at
+    )
+    SELECT ?, ?, 'payroll_notification_delivery_claimed', ?,
+      json_object(
+        'attempt_id', ?, 'version', ?,
+        'lease_token', ?, 'expires_at', ?
+      ), ?
+    WHERE ${guard}
+      AND EXISTS (
+        SELECT 1 FROM payroll_payment_attempts a
+        JOIN payroll_disbursements d ON d.payroll_id = a.payroll_id
+        WHERE a.attempt_id = ? AND a.status = 'submitted'
+          AND d.current_payment_attempt_id = a.attempt_id
+          AND d.status = 'awaiting_employee_confirmation'
+          AND d.payment_sent_at IS NULL
+      )
+  `).bind(
+    payroll.store_id,
+    String(adminId),
+    payroll.payroll_id,
+    payroll.attempt_id,
+    Number(payroll.version),
+    lease.token,
+    expiresAt,
+    now.toISOString(),
+    ...activeDeliveryLeaseBinds(payroll, lease, now),
+    payroll.attempt_id
+  ).run();
+  if (Number(result && result.meta && result.meta.changes) !== 1) {
+    throw deliveryLeaseLost();
+  }
+  lease.expires_at = expiresAt;
 }
 
 async function proofBytes(env, proof) {
+  const expectedSize = Number(proof.size_bytes);
+  const mimeType = String(proof.mime_type || '').toLowerCase();
+  if (!['image/jpeg', 'image/png', 'image/webp'].includes(mimeType)) {
+    throw paymentDeliveryError('proof_metadata_invalid', proof.proof_id);
+  }
+  if (!Number.isSafeInteger(expectedSize)
+    || expectedSize <= 0
+    || expectedSize > MAX_DELIVERY_PROOF_BYTES) {
+    throw paymentDeliveryError('proof_metadata_invalid', proof.proof_id);
+  }
   if (!env.PAYROLL_PROOFS || typeof env.PAYROLL_PROOFS.get !== 'function') {
     throw paymentDeliveryError('storage_not_configured', proof.proof_id);
   }
@@ -480,16 +612,74 @@ async function proofBytes(env, proof) {
     throw paymentDeliveryError('proof_storage_unavailable', proof.proof_id);
   }
   if (!object) throw paymentDeliveryError('proof_missing', proof.proof_id);
+  const reportedSize = object.size;
+  if (reportedSize !== undefined && reportedSize !== null
+    && (!Number.isSafeInteger(Number(reportedSize))
+      || Number(reportedSize) !== expectedSize
+      || Number(reportedSize) > MAX_DELIVERY_PROOF_BYTES)) {
+    throw paymentDeliveryError('proof_size_mismatch', proof.proof_id);
+  }
+  let bytes;
   try {
-    if (typeof object.arrayBuffer === 'function') {
-      return new Uint8Array(await object.arrayBuffer());
+    if (object.body && typeof object.body.getReader === 'function') {
+      const reader = object.body.getReader();
+      const chunks = [];
+      let total = 0;
+      try {
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          if (!(value instanceof Uint8Array)) {
+            throw paymentDeliveryError('proof_unreadable', proof.proof_id);
+          }
+          if (total + value.byteLength > expectedSize) {
+            try {
+              await reader.cancel('payroll proof size mismatch');
+            } catch {
+              // The guarded size failure remains authoritative.
+            }
+            throw paymentDeliveryError('proof_size_mismatch', proof.proof_id);
+          }
+          chunks.push(value);
+          total += value.byteLength;
+        }
+      } finally {
+        try {
+          reader.releaseLock();
+        } catch {
+          // A cancelled stream may already have released its reader.
+        }
+      }
+      bytes = new Uint8Array(total);
+      let offset = 0;
+      for (const chunk of chunks) {
+        bytes.set(chunk, offset);
+        offset += chunk.byteLength;
+      }
+    } else if (object.body instanceof Uint8Array) {
+      bytes = object.body;
+    } else if (object.body instanceof ArrayBuffer) {
+      bytes = new Uint8Array(object.body);
+    } else if (typeof object.arrayBuffer === 'function'
+      && Number.isSafeInteger(Number(reportedSize))
+      && Number(reportedSize) <= MAX_DELIVERY_PROOF_BYTES) {
+      bytes = new Uint8Array(await object.arrayBuffer());
+    } else {
+      throw paymentDeliveryError('proof_unreadable', proof.proof_id);
     }
-    if (object.body instanceof Uint8Array) return object.body;
-    if (object.body instanceof ArrayBuffer) return new Uint8Array(object.body);
-    return new Uint8Array(await new Response(object.body).arrayBuffer());
-  } catch {
+  } catch (error) {
+    if (error && error.notification_code) throw error;
     throw paymentDeliveryError('proof_unreadable', proof.proof_id);
   }
+  if (bytes.byteLength !== expectedSize) {
+    throw paymentDeliveryError('proof_size_mismatch', proof.proof_id);
+  }
+  try {
+    validateProofImageBytes(bytes, mimeType);
+  } catch {
+    throw paymentDeliveryError('proof_bytes_invalid', proof.proof_id);
+  }
+  return bytes;
 }
 
 function largestTelegramPhotoFileId(result) {
@@ -543,6 +733,7 @@ async function recordPaymentDeliveryFailure(
   env,
   adminId,
   payroll,
+  lease,
   code,
   proofId,
   now
@@ -550,46 +741,115 @@ async function recordPaymentDeliveryFailure(
   const safeCode = String(code || 'delivery_failed').slice(0, 80);
   const safeProofId = proofId ? String(proofId).slice(0, 100) : null;
   const nowIso = now.toISOString();
-  await env.DB.batch([
+  const guard = activeDeliveryLeaseSql();
+  const results = await env.DB.batch([
     env.DB.prepare(`
       UPDATE payroll_disbursements
       SET employee_notification_error = ?, updated_at = ?
       WHERE payroll_id = ? AND current_payment_attempt_id = ?
         AND status = 'awaiting_employee_confirmation'
         AND payment_sent_at IS NULL
+        AND ${guard}
     `).bind(
       JSON.stringify({ code: safeCode, proof_id: safeProofId }),
       nowIso,
       payroll.payroll_id,
-      payroll.attempt_id
+      payroll.attempt_id,
+      ...activeDeliveryLeaseBinds(payroll, lease, now)
     ),
     env.DB.prepare(`
       INSERT INTO admin_audit_logs (
         store_id, admin_id, action, target_id, details_json, created_at
-      ) VALUES (?, ?, 'payroll_notification_failed', ?,
+      )
+      SELECT ?, ?, 'payroll_notification_failed', ?,
         json_object(
-          'attempt_id', ?, 'version', ?, 'code', ?, 'proof_id', ?
-        ), ?)
+          'attempt_id', ?, 'version', ?,
+          'lease_token', ?, 'code', ?, 'proof_id', ?
+        ), ?
+      WHERE ${guard}
     `).bind(
       payroll.store_id,
       String(adminId),
       payroll.payroll_id,
       payroll.attempt_id,
       Number(payroll.version),
+      lease.token,
       safeCode,
       safeProofId,
-      nowIso
+      nowIso,
+      ...activeDeliveryLeaseBinds(payroll, lease, now)
     )
   ]);
+  return Number(results[0] && results[0].meta.changes) === 1
+    && Number(results[1] && results[1].meta.changes) === 1;
+}
+
+export async function paymentAttemptDeliveryResult(env, adminId, attemptId) {
+  const context = await env.DB.prepare(`
+    SELECT
+      a.attempt_id, a.payroll_id, a.status,
+      d.store_id, d.current_payment_attempt_id, d.payment_sent_at
+    FROM payroll_payment_attempts a
+    JOIN payroll_disbursements d ON d.payroll_id = a.payroll_id
+    WHERE a.attempt_id = ?
+  `).bind(attemptId).first();
+  if (!context) throw new Error('payment attempt not found');
+  if (!await isStoreAdmin(env, adminId, context.store_id)) {
+    throw new Error('payroll admin permission denied');
+  }
+  const current = String(context.current_payment_attempt_id || '')
+    === String(context.attempt_id);
+  if (current && context.payment_sent_at) {
+    return { current: true, status: 'sent', retryable: false };
+  }
+  const state = await env.DB.prepare(`
+    SELECT action
+    FROM admin_audit_logs
+    WHERE store_id = ? AND target_id = ?
+      AND json_extract(details_json, '$.attempt_id') = ?
+      AND action IN (
+        'payroll_notification_failed',
+        'payroll_notification_sent'
+      )
+    ORDER BY id DESC
+    LIMIT 1
+  `).bind(
+    context.store_id,
+    context.payroll_id,
+    context.attempt_id
+  ).first();
+  let status = state && state.action === 'payroll_notification_sent'
+    ? 'sent'
+    : state && state.action === 'payroll_notification_failed'
+      ? 'failed'
+      : '';
+  if (!status) {
+    const proofs = await env.DB.prepare(`
+      SELECT
+        COUNT(*) AS total,
+        SUM(CASE WHEN telegram_delivered_at IS NOT NULL THEN 1 ELSE 0 END)
+          AS delivered
+      FROM payroll_payment_proofs
+      WHERE attempt_id = ? AND superseded_at IS NULL
+    `).bind(context.attempt_id).first();
+    const total = Number(proofs && proofs.total || 0);
+    const delivered = Number(proofs && proofs.delivered || 0);
+    status = total > 0 && delivered === total
+      ? 'sent'
+      : delivered > 0
+        ? 'failed'
+        : 'not_recorded';
+  }
+  return { current, status, retryable: current && status === 'failed' };
 }
 
 export async function deliverPaymentAttempt(
   env,
   adminId,
   attemptId,
-  now = new Date()
+  now
 ) {
-  const deliveredAt = new Date(now);
+  const clock = deliveryClock(now);
   const payroll = await paymentAttemptForDelivery(
     env,
     adminId,
@@ -598,7 +858,13 @@ export async function deliverPaymentAttempt(
   if (payroll.payment_sent_at) {
     return { status: 'sent', attempt_id: payroll.attempt_id };
   }
-  if (!await claimPaymentDelivery(env, adminId, payroll, deliveredAt)) {
+  const lease = await claimPaymentDelivery(
+    env,
+    adminId,
+    payroll,
+    clock()
+  );
+  if (!lease) {
     const current = await env.DB.prepare(`
       SELECT payment_sent_at FROM payroll_disbursements
       WHERE payroll_id = ? AND current_payment_attempt_id = ?
@@ -627,14 +893,41 @@ export async function deliverPaymentAttempt(
         ? String(proof.telegram_file_id)
         : null;
       if (fileId) {
+        await renewPaymentDelivery(
+          env,
+          adminId,
+          payroll,
+          lease,
+          clock()
+        );
         result = await sendPhoto(
           env,
           payroll.telegram_id,
           fileId,
           caption
         );
+        await requirePaymentDeliveryLease(
+          env,
+          payroll,
+          lease,
+          clock()
+        );
       } else {
+        await renewPaymentDelivery(
+          env,
+          adminId,
+          payroll,
+          lease,
+          clock()
+        );
         const bytes = await proofBytes(env, proof);
+        await renewPaymentDelivery(
+          env,
+          adminId,
+          payroll,
+          lease,
+          clock()
+        );
         result = await sendPhotoBytes(
           env,
           payroll.telegram_id,
@@ -642,6 +935,12 @@ export async function deliverPaymentAttempt(
           proof.file_name || `${proof.proof_id}`,
           proof.mime_type,
           caption
+        );
+        await requirePaymentDeliveryLease(
+          env,
+          payroll,
+          lease,
+          clock()
         );
         if (result && result.ok) {
           try {
@@ -661,6 +960,8 @@ export async function deliverPaymentAttempt(
           proof.proof_id
         );
       }
+      const checkpointAt = clock();
+      const guard = activeDeliveryLeaseSql();
       const checkpoint = await env.DB.prepare(`
         UPDATE payroll_payment_proofs
         SET telegram_file_id = ?, telegram_delivered_at = ?
@@ -675,21 +976,27 @@ export async function deliverPaymentAttempt(
               AND d.status = 'awaiting_employee_confirmation'
               AND d.payment_sent_at IS NULL
           )
+          AND ${guard}
       `).bind(
         fileId,
-        deliveredAt.toISOString(),
+        checkpointAt.toISOString(),
         proof.proof_id,
         payroll.attempt_id,
-        payroll.attempt_id
+        payroll.attempt_id,
+        ...activeDeliveryLeaseBinds(payroll, lease, checkpointAt)
       ).run();
       if (Number(checkpoint && checkpoint.meta && checkpoint.meta.changes) !== 1) {
-        throw paymentDeliveryError(
-          'proof_checkpoint_conflict',
-          proof.proof_id
-        );
+        throw deliveryLeaseLost();
       }
     }
 
+    await renewPaymentDelivery(
+      env,
+      adminId,
+      payroll,
+      lease,
+      clock()
+    );
     const result = await sendMessage(
       env,
       payroll.telegram_id,
@@ -707,6 +1014,12 @@ export async function deliverPaymentAttempt(
         ]]
       }
     );
+    await requirePaymentDeliveryLease(
+      env,
+      payroll,
+      lease,
+      clock()
+    );
     if (!result || !result.ok) {
       const summary = telegramErrorSummary(result);
       throw paymentDeliveryError(
@@ -716,55 +1029,85 @@ export async function deliverPaymentAttempt(
       );
     }
 
-    const sentAt = deliveredAt.toISOString();
-    const updated = await env.DB.prepare(`
-      UPDATE payroll_disbursements
-      SET payment_sent_at = ?, employee_notification_error = NULL,
-          updated_at = ?
-      WHERE payroll_id = ? AND current_payment_attempt_id = ?
-        AND status = 'awaiting_employee_confirmation'
-        AND payment_sent_at IS NULL
-        AND EXISTS (
-          SELECT 1 FROM payroll_payment_attempts
-          WHERE attempt_id = ? AND status = 'submitted'
+    const sentAt = clock();
+    const sentAtIso = sentAt.toISOString();
+    const guard = activeDeliveryLeaseSql();
+    const results = await env.DB.batch([
+      env.DB.prepare(`
+        UPDATE payroll_disbursements
+        SET payment_sent_at = ?, employee_notification_error = NULL,
+            updated_at = ?
+        WHERE payroll_id = ? AND current_payment_attempt_id = ?
+          AND status = 'awaiting_employee_confirmation'
+          AND payment_sent_at IS NULL
+          AND EXISTS (
+            SELECT 1 FROM payroll_payment_attempts
+            WHERE attempt_id = ? AND status = 'submitted'
+          )
+          AND NOT EXISTS (
+            SELECT 1 FROM payroll_payment_proofs
+            WHERE attempt_id = ? AND superseded_at IS NULL
+              AND telegram_delivered_at IS NULL
+          )
+          AND ${guard}
+      `).bind(
+        sentAtIso,
+        sentAtIso,
+        payroll.payroll_id,
+        payroll.attempt_id,
+        payroll.attempt_id,
+        payroll.attempt_id,
+        ...activeDeliveryLeaseBinds(payroll, lease, sentAt)
+      ),
+      env.DB.prepare(`
+        INSERT INTO admin_audit_logs (
+          store_id, admin_id, action, target_id, details_json, created_at
         )
-        AND NOT EXISTS (
-          SELECT 1 FROM payroll_payment_proofs
-          WHERE attempt_id = ? AND superseded_at IS NULL
-            AND telegram_delivered_at IS NULL
-        )
-    `).bind(
-      sentAt,
-      sentAt,
-      payroll.payroll_id,
-      payroll.attempt_id,
-      payroll.attempt_id,
-      payroll.attempt_id
-    ).run();
-    if (Number(updated && updated.meta && updated.meta.changes) !== 1) {
-      throw paymentDeliveryError('summary_checkpoint_conflict');
+        SELECT ?, ?, 'payroll_notification_sent', ?,
+          json_object(
+            'attempt_id', ?, 'version', ?, 'lease_token', ?
+          ), ?
+        WHERE ${guard}
+          AND EXISTS (
+            SELECT 1 FROM payroll_disbursements
+            WHERE payroll_id = ? AND current_payment_attempt_id = ?
+              AND payment_sent_at = ?
+          )
+      `).bind(
+        payroll.store_id,
+        String(adminId),
+        payroll.payroll_id,
+        payroll.attempt_id,
+        Number(payroll.version),
+        lease.token,
+        sentAtIso,
+        ...activeDeliveryLeaseBinds(payroll, lease, sentAt),
+        payroll.payroll_id,
+        payroll.attempt_id,
+        sentAtIso
+      )
+    ]);
+    if (Number(results[0] && results[0].meta.changes) !== 1
+      || Number(results[1] && results[1].meta.changes) !== 1) {
+      throw deliveryLeaseLost();
     }
-    await audit(
-      env,
-      payroll.store_id,
-      adminId,
-      'payroll_notification_sent',
-      payroll.payroll_id,
-      { attempt_id: payroll.attempt_id, version: Number(payroll.version) }
-    );
     return { status: 'sent', attempt_id: payroll.attempt_id };
   } catch (error) {
+    if (error && error.delivery_lease_lost) throw error;
     const code = error && error.notification_code
       ? error.notification_code
       : 'delivery_failed';
-    await recordPaymentDeliveryFailure(
+    const failedAt = clock();
+    const recorded = await recordPaymentDeliveryFailure(
       env,
       adminId,
       payroll,
+      lease,
       code,
       error && error.proof_id ? error.proof_id : null,
-      deliveredAt
+      failedAt
     );
+    if (!recorded) throw deliveryLeaseLost();
     if (error && error.message === 'payroll notification failed') throw error;
     throw paymentDeliveryError(code);
   }

@@ -10,7 +10,21 @@ import { createD1 } from './helpers/d1.js';
 
 const schema = readFileSync(new URL('../db/schema.sql', import.meta.url), 'utf8');
 
-function fixture({ attemptStatus = 'submitted', claim = false } = {}) {
+function pngBytes() {
+  const bytes = new Uint8Array(33);
+  bytes.set([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+  new DataView(bytes.buffer).setUint32(8, 13);
+  bytes.set([0x49, 0x48, 0x44, 0x52], 12);
+  new DataView(bytes.buffer).setUint32(16, 1);
+  new DataView(bytes.buffer).setUint32(20, 1);
+  return bytes;
+}
+
+function fixture({
+  attemptStatus = 'submitted',
+  claim = false,
+  idempotencyHash = null
+} = {}) {
   const database = new DatabaseSync(':memory:');
   database.exec(schema);
   database.exec(`
@@ -59,10 +73,12 @@ function fixture({ attemptStatus = 'submitted', claim = false } = {}) {
     INSERT INTO payroll_payment_attempts (
       attempt_id, payroll_id, version, status,
       bank_micros, usdt_micros, cash_micros,
+      idempotency_key_hash,
       created_at, updated_at
     ) VALUES (
       'ATTEMPT-1', 'PAYROLL-1', 2, '${attemptStatus}',
       70000000, 30000000, 0,
+      ${idempotencyHash ? `'${idempotencyHash}'` : 'NULL'},
       '2026-07-16T03:20:00.000Z', '2026-07-16T03:20:00.000Z'
     );
     INSERT INTO payroll_payment_proofs (
@@ -74,7 +90,7 @@ function fixture({ attemptStatus = 'submitted', claim = false } = {}) {
        'TG-EXISTING', 'image/jpeg', 4, 1, 'ADMIN-1',
        '2026-07-16T03:30:00.000Z'),
       ('PROOF-USDT', 'PAYROLL-1', 'ATTEMPT-1', 'usdt', 'usdt-key',
-       NULL, 'image/png', 5, 1, 'ADMIN-1',
+       NULL, 'image/png', 33, 1, 'ADMIN-1',
        '2026-07-16T03:31:00.000Z');
   `);
   if (claim) {
@@ -91,7 +107,7 @@ function fixture({ attemptStatus = 'submitted', claim = false } = {}) {
   }
   const objects = new Map([
     ['bank-key', new Uint8Array([1, 2, 3, 4])],
-    ['usdt-key', new Uint8Array([5, 6, 7, 8, 9])]
+    ['usdt-key', pngBytes()]
   ]);
   return {
     database,
@@ -104,7 +120,11 @@ function fixture({ attemptStatus = 'submitted', claim = false } = {}) {
       PAYROLL_PROOFS: {
         async get(key) {
           const bytes = objects.get(key);
-          return bytes ? { body: bytes, async arrayBuffer() { return bytes.buffer; } } : null;
+          return bytes ? {
+            body: bytes,
+            size: bytes.byteLength,
+            async arrayBuffer() { return bytes.buffer; }
+          } : null;
         }
       }
     }
@@ -158,6 +178,16 @@ function manageRequest(env, path, { idempotencyKey, csrf = true } = {}) {
       ...(idempotencyKey === undefined ? {} : { 'idempotency-key': idempotencyKey })
     }
   }), env, { waitUntil() {} });
+}
+
+async function hashKey(value) {
+  const digest = await crypto.subtle.digest(
+    'SHA-256',
+    new TextEncoder().encode(value)
+  );
+  return Array.from(new Uint8Array(digest))
+    .map((byte) => byte.toString(16).padStart(2, '0'))
+    .join('');
 }
 
 test('sendPhotoBytes uploads exact bytes and metadata without exposing the bot token', async () => {
@@ -479,4 +509,413 @@ test('a persistent delivery lease prevents concurrent proof and summary sends', 
     telegram.restore();
     fixtureValue.database.close();
   }
+});
+
+test('an expired worker is fenced after an in-flight photo while its successor completes', async () => {
+  const fixtureValue = fixture();
+  let nowIso = '2026-07-16T04:00:00.000Z';
+  let firstPhotoResolve;
+  let releaseFirstResolve;
+  const firstPhoto = new Promise((resolve) => { firstPhotoResolve = resolve; });
+  const releaseFirst = new Promise((resolve) => { releaseFirstResolve = resolve; });
+  let callNumber = 0;
+  let successorFinished = false;
+  let staleWrites = 0;
+  fixtureValue.env.DB = createD1(fixtureValue.database, {
+    beforeRun() {
+      if (successorFinished) staleWrites += 1;
+    },
+    beforeBatchStatement() {
+      if (successorFinished) staleWrites += 1;
+    }
+  });
+  const originalFetch = globalThis.fetch;
+  const calls = [];
+  globalThis.fetch = async (url, options) => {
+    callNumber += 1;
+    const method = String(url).split('/').pop();
+    calls.push(method);
+    if (callNumber === 1) {
+      firstPhotoResolve();
+      await releaseFirst;
+    }
+    if (method === 'sendPhoto' && options.body instanceof FormData) {
+      return { json: async () => ({
+        ok: true,
+        result: { photo: [{ file_id: 'TG-B', file_size: 33 }] }
+      }) };
+    }
+    return { json: async () => ({ ok: true, result: { message_id: callNumber } }) };
+  };
+  try {
+    const staleWorker = deliverPaymentAttempt(
+      fixtureValue.env,
+      'ADMIN-1',
+      'ATTEMPT-1',
+      () => new Date(nowIso)
+    );
+    await firstPhoto;
+    nowIso = '2026-07-16T04:16:00.000Z';
+    let successor;
+    let successorError = null;
+    try {
+      successor = await deliverPaymentAttempt(
+        fixtureValue.env,
+        'ADMIN-1',
+        'ATTEMPT-1',
+        () => new Date(nowIso)
+      );
+    } catch (error) {
+      successorError = error;
+    }
+    successorFinished = true;
+    releaseFirstResolve();
+    const staleOutcome = await staleWorker.then(
+      (value) => ({ value }),
+      (error) => ({ error })
+    );
+    if (successorError) throw successorError;
+    assert.equal(successor.status, 'sent');
+    assert.match(staleOutcome.error && staleOutcome.error.message || '', /delivery lease lost/);
+
+    assert.deepEqual(calls, ['sendPhoto', 'sendPhoto', 'sendPhoto', 'sendMessage']);
+    assert.equal(staleWrites, 0);
+    assert.equal(fixtureValue.database.prepare(`
+      SELECT employee_notification_error FROM payroll_disbursements
+      WHERE payroll_id = 'PAYROLL-1'
+    `).get().employee_notification_error, null);
+    const deliveryActions = fixtureValue.database.prepare(`
+      SELECT action FROM admin_audit_logs
+      WHERE target_id = 'PAYROLL-1'
+      ORDER BY id
+    `).all().map((row) => row.action);
+    assert.equal(deliveryActions.at(-1), 'payroll_notification_sent');
+    assert.equal(deliveryActions.includes('payroll_notification_failed'), false);
+    assert.ok(fixtureValue.database.prepare(`
+      SELECT COUNT(DISTINCT json_extract(details_json, '$.lease_token')) AS tokens
+      FROM admin_audit_logs
+      WHERE action = 'payroll_notification_delivery_claimed'
+    `).get().tokens === 2);
+  } finally {
+    globalThis.fetch = originalFetch;
+    fixtureValue.database.close();
+  }
+});
+
+test('a non-current same-key replay returns its stored delivery result without Telegram', async () => {
+  const key = 'old-attempt-key';
+  const fixtureValue = fixture({ idempotencyHash: await hashKey(key) });
+  const telegram = installTelegram();
+  try {
+    fixtureValue.database.exec(`
+      UPDATE payroll_payment_proofs
+      SET telegram_delivered_at = '2026-07-16T04:00:00.000Z';
+      INSERT INTO payroll_payment_attempts (
+        attempt_id, payroll_id, version, status,
+        bank_micros, usdt_micros, cash_micros, created_at, updated_at
+      ) VALUES (
+        'ATTEMPT-2', 'PAYROLL-1', 3, 'submitted',
+        100000000, 0, 0,
+        '2026-07-16T05:00:00.000Z', '2026-07-16T05:00:00.000Z'
+      );
+      UPDATE payroll_disbursements
+      SET current_payment_attempt_id = 'ATTEMPT-2', payment_sent_at = NULL
+      WHERE payroll_id = 'PAYROLL-1';
+      INSERT INTO admin_audit_logs (
+        store_id, admin_id, action, target_id, details_json, created_at
+      ) VALUES (
+        'STORE-1', 'ADMIN-1', 'payroll_notification_sent', 'PAYROLL-1',
+        '{"attempt_id":"ATTEMPT-1","version":2}',
+        '2026-07-16T04:00:00.000Z'
+      );
+    `);
+    const response = await manageRequest(
+      fixtureValue.env,
+      '/api/manage/stores/STORE-1/payroll/PAYROLL-1/attempts/ATTEMPT-1/submit',
+      { idempotencyKey: key }
+    );
+    assert.equal(response.status, 200);
+    assert.deepEqual((await response.json()).notification, {
+      status: 'sent', retryable: false
+    });
+    assert.equal(telegram.calls.length, 0);
+  } finally {
+    telegram.restore();
+    fixtureValue.database.close();
+  }
+});
+
+test('a migrated non-current replay with no delivery state is safe and never retryable', async () => {
+  const key = 'migrated-old-key';
+  const fixtureValue = fixture({ idempotencyHash: await hashKey(key) });
+  const telegram = installTelegram();
+  try {
+    fixtureValue.database.exec(`
+      INSERT INTO payroll_payment_attempts (
+        attempt_id, payroll_id, version, status,
+        bank_micros, usdt_micros, cash_micros, created_at, updated_at
+      ) VALUES (
+        'ATTEMPT-2', 'PAYROLL-1', 3, 'draft',
+        100000000, 0, 0,
+        '2026-07-16T05:00:00.000Z', '2026-07-16T05:00:00.000Z'
+      );
+      UPDATE payroll_disbursements
+      SET current_payment_attempt_id = 'ATTEMPT-2',
+          status = 'awaiting_admin_payment', payment_sent_at = NULL
+      WHERE payroll_id = 'PAYROLL-1';
+    `);
+    const response = await manageRequest(
+      fixtureValue.env,
+      '/api/manage/stores/STORE-1/payroll/PAYROLL-1/attempts/ATTEMPT-1/submit',
+      { idempotencyKey: key }
+    );
+    assert.equal(response.status, 200);
+    assert.deepEqual((await response.json()).notification, {
+      status: 'not_recorded', retryable: false
+    });
+    assert.equal(telegram.calls.length, 0);
+  } finally {
+    telegram.restore();
+    fixtureValue.database.close();
+  }
+});
+
+test('a non-current failed delivery replay stays failed and cannot be retried', async () => {
+  const key = 'failed-old-key';
+  const fixtureValue = fixture({ idempotencyHash: await hashKey(key) });
+  const telegram = installTelegram();
+  try {
+    fixtureValue.database.exec(`
+      INSERT INTO payroll_payment_attempts (
+        attempt_id, payroll_id, version, status,
+        bank_micros, usdt_micros, cash_micros, created_at, updated_at
+      ) VALUES (
+        'ATTEMPT-2', 'PAYROLL-1', 3, 'draft',
+        100000000, 0, 0,
+        '2026-07-16T05:00:00.000Z', '2026-07-16T05:00:00.000Z'
+      );
+      UPDATE payroll_disbursements
+      SET current_payment_attempt_id = 'ATTEMPT-2',
+          status = 'awaiting_admin_payment', payment_sent_at = NULL
+      WHERE payroll_id = 'PAYROLL-1';
+      INSERT INTO admin_audit_logs (
+        store_id, admin_id, action, target_id, details_json, created_at
+      ) VALUES (
+        'STORE-1', 'ADMIN-1', 'payroll_notification_failed', 'PAYROLL-1',
+        '{"attempt_id":"ATTEMPT-1","version":2,"code":"proof_missing"}',
+        '2026-07-16T04:00:00.000Z'
+      );
+    `);
+    const response = await manageRequest(
+      fixtureValue.env,
+      '/api/manage/stores/STORE-1/payroll/PAYROLL-1/attempts/ATTEMPT-1/submit',
+      { idempotencyKey: key }
+    );
+    assert.equal(response.status, 200);
+    assert.deepEqual((await response.json()).notification, {
+      status: 'failed', retryable: false
+    });
+    assert.equal(telegram.calls.length, 0);
+  } finally {
+    telegram.restore();
+    fixtureValue.database.close();
+  }
+});
+
+test('missing payment proofs return a stable client error and leave the draft claimed', async () => {
+  const fixtureValue = fixture({ attemptStatus: 'draft', claim: true });
+  const telegram = installTelegram();
+  try {
+    fixtureValue.database.exec(`
+      DELETE FROM payroll_payment_proofs WHERE method = 'usdt';
+    `);
+    const response = await manageRequest(
+      fixtureValue.env,
+      '/api/manage/stores/STORE-1/payroll/PAYROLL-1/attempts/ATTEMPT-1/submit',
+      { idempotencyKey: 'missing-proof-key' }
+    );
+    assert.equal(response.status, 400);
+    assert.deepEqual(await response.json(), {
+      ok: false,
+      error: 'payroll_proofs_incomplete',
+      missing_methods: ['usdt']
+    });
+    assert.equal(fixtureValue.database.prepare(`
+      SELECT status FROM payroll_payment_attempts WHERE attempt_id = 'ATTEMPT-1'
+    `).get().status, 'draft');
+    assert.equal(fixtureValue.database.prepare(`
+      SELECT COUNT(*) AS count FROM admin_task_claims
+      WHERE task_type = 'payroll' AND task_id = 'PAYROLL-1'
+    `).get().count, 1);
+    assert.equal(telegram.calls.length, 0);
+  } finally {
+    telegram.restore();
+    fixtureValue.database.close();
+  }
+});
+
+test('R2 delivery rejects oversized streams, metadata mismatch, and invalid image bytes before Telegram', async (context) => {
+  await context.test('bounded stream cancels after the database size', async () => {
+    const fixtureValue = fixture();
+    let cancelled = false;
+    const chunks = [pngBytes(), new Uint8Array([1])];
+    fixtureValue.env.PAYROLL_PROOFS.get = async () => ({
+      body: {
+        getReader() {
+          return {
+            async read() {
+              return chunks.length
+                ? { done: false, value: chunks.shift() }
+                : { done: true, value: undefined };
+            },
+            async cancel() { cancelled = true; },
+            releaseLock() {}
+          };
+        }
+      }
+    });
+    const telegram = installTelegram();
+    try {
+      await assert.rejects(
+        deliverPaymentAttempt(
+          fixtureValue.env, 'ADMIN-1', 'ATTEMPT-1', new Date('2026-07-16T04:00:00.000Z')
+        ),
+        /payroll notification failed/
+      );
+      assert.equal(cancelled, true);
+      assert.equal(telegram.calls.length, 1);
+      assert.equal(fixtureValue.database.prepare(`
+        SELECT telegram_delivered_at FROM payroll_payment_proofs
+        WHERE proof_id = 'PROOF-USDT'
+      `).get().telegram_delivered_at, null);
+      assert.deepEqual(JSON.parse(fixtureValue.database.prepare(`
+        SELECT employee_notification_error FROM payroll_disbursements
+        WHERE payroll_id = 'PAYROLL-1'
+      `).get().employee_notification_error), {
+        code: 'proof_size_mismatch', proof_id: 'PROOF-USDT'
+      });
+    } finally {
+      telegram.restore();
+      fixtureValue.database.close();
+    }
+  });
+
+  await context.test('invalid DB MIME avoids the private object read', async () => {
+    const fixtureValue = fixture();
+    fixtureValue.database.prepare(`
+      UPDATE payroll_payment_proofs SET mime_type = 'application/octet-stream'
+      WHERE proof_id = 'PROOF-USDT'
+    `).run();
+    let r2Reads = 0;
+    fixtureValue.env.PAYROLL_PROOFS.get = async () => { r2Reads += 1; return null; };
+    const telegram = installTelegram();
+    try {
+      await assert.rejects(
+        deliverPaymentAttempt(
+          fixtureValue.env, 'ADMIN-1', 'ATTEMPT-1', new Date('2026-07-16T04:00:00.000Z')
+        ),
+        /payroll notification failed/
+      );
+      assert.equal(r2Reads, 0);
+      assert.equal(telegram.calls.length, 1);
+    } finally {
+      telegram.restore();
+      fixtureValue.database.close();
+    }
+  });
+
+  await context.test('reported object size and image magic must match metadata', async () => {
+    const fixtureValue = fixture();
+    let arrayBufferReads = 0;
+    fixtureValue.env.PAYROLL_PROOFS.get = async () => ({
+      size: 33,
+      async arrayBuffer() {
+        arrayBufferReads += 1;
+        return new Uint8Array(33).buffer;
+      }
+    });
+    const telegram = installTelegram();
+    try {
+      await assert.rejects(
+        deliverPaymentAttempt(
+          fixtureValue.env, 'ADMIN-1', 'ATTEMPT-1', new Date('2026-07-16T04:00:00.000Z')
+        ),
+        /payroll notification failed/
+      );
+      assert.equal(arrayBufferReads, 1);
+      assert.equal(telegram.calls.length, 1);
+      assert.deepEqual(JSON.parse(fixtureValue.database.prepare(`
+        SELECT employee_notification_error FROM payroll_disbursements
+        WHERE payroll_id = 'PAYROLL-1'
+      `).get().employee_notification_error), {
+        code: 'proof_bytes_invalid', proof_id: 'PROOF-USDT'
+      });
+    } finally {
+      telegram.restore();
+      fixtureValue.database.close();
+    }
+  });
+
+  await context.test('arrayBuffer fallback requires a trusted reported size', async () => {
+    const fixtureValue = fixture();
+    let arrayBufferReads = 0;
+    fixtureValue.env.PAYROLL_PROOFS.get = async () => ({
+      async arrayBuffer() {
+        arrayBufferReads += 1;
+        return pngBytes().buffer;
+      }
+    });
+    const telegram = installTelegram();
+    try {
+      await assert.rejects(
+        deliverPaymentAttempt(
+          fixtureValue.env, 'ADMIN-1', 'ATTEMPT-1', new Date('2026-07-16T04:00:00.000Z')
+        ),
+        /payroll notification failed/
+      );
+      assert.equal(arrayBufferReads, 0);
+      assert.equal(telegram.calls.length, 1);
+      assert.deepEqual(JSON.parse(fixtureValue.database.prepare(`
+        SELECT employee_notification_error FROM payroll_disbursements
+        WHERE payroll_id = 'PAYROLL-1'
+      `).get().employee_notification_error), {
+        code: 'proof_unreadable', proof_id: 'PROOF-USDT'
+      });
+    } finally {
+      telegram.restore();
+      fixtureValue.database.close();
+    }
+  });
+
+  await context.test('reported size mismatch stops before reading object bytes', async () => {
+    const fixtureValue = fixture();
+    let arrayBufferReads = 0;
+    fixtureValue.env.PAYROLL_PROOFS.get = async () => ({
+      size: 34,
+      async arrayBuffer() {
+        arrayBufferReads += 1;
+        return pngBytes().buffer;
+      }
+    });
+    const telegram = installTelegram();
+    try {
+      await assert.rejects(
+        deliverPaymentAttempt(
+          fixtureValue.env, 'ADMIN-1', 'ATTEMPT-1', new Date('2026-07-16T04:00:00.000Z')
+        ),
+        /payroll notification failed/
+      );
+      assert.equal(arrayBufferReads, 0);
+      assert.equal(telegram.calls.length, 1);
+      assert.deepEqual(JSON.parse(fixtureValue.database.prepare(`
+        SELECT employee_notification_error FROM payroll_disbursements
+        WHERE payroll_id = 'PAYROLL-1'
+      `).get().employee_notification_error), {
+        code: 'proof_size_mismatch', proof_id: 'PROOF-USDT'
+      });
+    } finally {
+      telegram.restore();
+      fixtureValue.database.close();
+    }
+  });
 });
