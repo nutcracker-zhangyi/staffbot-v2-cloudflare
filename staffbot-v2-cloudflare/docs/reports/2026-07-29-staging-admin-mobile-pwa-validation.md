@@ -1,7 +1,8 @@
 # Admin Mobile PWA Staging Validation
 
 - Validation date: 2026-08-01
-- Local/deployed implementation commit: `9da4f4979b44d39ebc3533c1349b299bc0ece8a2`
+- Previously deployed implementation commit: `9da4f4979b44d39ebc3533c1349b299bc0ece8a2`
+- Local fix round 4 commit: recorded in the Task 14 SDD report after commit
 - Staging Worker version: `f1a0be2e-081b-4223-bd6a-87869e0e7ecb`
 - Staging URL: `https://staffbot-v2-staging.staffbot-v2.workers.dev`
 - Target environment: staging only
@@ -15,12 +16,13 @@ real-device and authenticated business-flow acceptance.
 | Check | Result | Evidence |
 | --- | --- | --- |
 | Syntax | PASS | `npm run check` |
-| Focused PWA behavior | PASS | 103/103 in the manage page, security, and routing test files |
-| Full regression | PASS | 572/572 via `npm test` |
+| Focused PWA behavior | PASS | 105/105 in the manage page, security, and routing test files |
+| Full regression | PASS | 575/575 via `npm test` |
 | Whitespace | PASS | `git diff --check` |
 | Manifest | PASS | Response fetched and parsed as JSON; install metadata and security/cache headers asserted |
-| Service worker | PASS | Real `/manage/sw.js` response executed in a fake Worker global |
+| Service worker | PASS | Real `/manage/sw.js` responses for two Worker version IDs executed in a fake Worker global |
 | Fixed shell install | PASS | Exactly five approved shell URLs cached; install failure propagates |
+| Cache rotation | PASS | Worker version changes the cache name; activate removes only old own-prefix caches; missing metadata uses a stable safe fallback |
 | Cache boundary | PASS | Cache-first only for exact same-origin shell GET; API, proof, query variant, cross-origin, and non-GET use network only |
 | Offline safety | PASS | Persistent banner and mutation guards exercised for login, approvals, splits, uploads, and submit |
 | Reconnect safety | PASS | Approval and payroll remain locked until session, stores, and current authority are reloaded; refresh failure remains read-only |

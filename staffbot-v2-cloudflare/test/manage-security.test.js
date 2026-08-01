@@ -13,15 +13,16 @@ function workerContext() {
   return { waitUntil() {} };
 }
 
-async function manageAsset(path) {
+async function manageAsset(path, bindings = {}) {
   return worker.fetch(
     new Request(`https://staffbot.test${path}`),
-    { ENVIRONMENT: 'staging' },
+    { ENVIRONMENT: 'staging', ...bindings },
     workerContext()
   );
 }
 
 async function executeServiceWorker({
+  bindings = { CF_VERSION_METADATA: { id: 'v1' } },
   cachedResponse = null,
   cacheNames = [
     'staffbot-manage-shell-v0',
@@ -33,6 +34,7 @@ async function executeServiceWorker({
   const listeners = new Map();
   const calls = {
     addAll: [],
+    cacheOpen: [],
     cacheMatch: [],
     cacheDelete: [],
     clientsClaim: 0,
@@ -64,7 +66,10 @@ async function executeServiceWorker({
     }
   };
   const caches = {
-    async open() { return cache; },
+    async open(name) {
+      calls.cacheOpen.push(name);
+      return cache;
+    },
     async keys() { return Array.from(cacheNames); },
     async delete(name) {
       calls.cacheDelete.push(name);
@@ -75,8 +80,9 @@ async function executeServiceWorker({
     calls.network.push({ method: request.method, url: request.url });
     return new Response(`network:${request.method}:${request.url}`);
   };
-  const response = await manageAsset('/manage/sw.js');
-  vm.runInNewContext(await response.text(), {
+  const response = await manageAsset('/manage/sw.js', bindings);
+  const source = await response.text();
+  vm.runInNewContext(source, {
     self,
     caches,
     fetch: networkFetch,
@@ -88,6 +94,8 @@ async function executeServiceWorker({
 
   return {
     calls,
+    self,
+    source,
     async dispatch(type, request) {
       let lifetime;
       let responsePromise;
@@ -150,6 +158,65 @@ test('manage service worker installs exactly the fixed shell and removes old cac
   await activate.lifetime;
   assert.deepEqual(serviceWorker.calls.cacheDelete, ['staffbot-manage-shell-v0']);
   assert.equal(serviceWorker.calls.clientsClaim, 1);
+});
+
+test('manage service worker rotates its exact shell cache with each Worker version', async () => {
+  const firstCache = 'staffbot-manage-shell-version-one';
+  const secondCache = 'staffbot-manage-shell-version-two';
+  const first = await executeServiceWorker({
+    bindings: { CF_VERSION_METADATA: { id: 'version-one' } },
+    cacheNames: []
+  });
+  const second = await executeServiceWorker({
+    bindings: { CF_VERSION_METADATA: { id: 'version-two' } },
+    cacheNames: [firstCache, secondCache, 'unrelated-app-cache']
+  });
+
+  assert.notEqual(first.source, second.source);
+  const firstInstall = await first.dispatch('install');
+  await firstInstall.lifetime;
+  assert.deepEqual(first.calls.cacheOpen, [firstCache]);
+
+  const secondInstall = await second.dispatch('install');
+  await secondInstall.lifetime;
+  assert.deepEqual(second.calls.cacheOpen, [secondCache]);
+  assert.deepEqual(second.calls.addAll, [[
+    '/manage/',
+    '/manage/app.js',
+    '/manage/styles.css',
+    '/manage/manifest.webmanifest',
+    '/manage/icon.svg'
+  ]]);
+  const secondActivate = await second.dispatch('activate');
+  await secondActivate.lifetime;
+  assert.deepEqual(second.calls.cacheDelete, [firstCache]);
+  assert.equal(second.calls.cacheDelete.includes('unrelated-app-cache'), false);
+});
+
+test('manage service worker has a stable fallback and safely bounds version cache names', async () => {
+  const fallbackResponse = await manageAsset('/manage/sw.js', {});
+  const repeatedFallbackResponse = await manageAsset('/manage/sw.js', {});
+  const fallbackSource = await fallbackResponse.text();
+  assert.equal(fallbackSource, await repeatedFallbackResponse.text());
+
+  const fallback = await executeServiceWorker({ bindings: {}, cacheNames: [] });
+  const fallbackInstall = await fallback.dispatch('install');
+  await fallbackInstall.lifetime;
+  assert.deepEqual(fallback.calls.cacheOpen, ['staffbot-manage-shell-local']);
+
+  const unsafe = await executeServiceWorker({
+    bindings: {
+      CF_VERSION_METADATA: {
+        id: `release';self.pwned=true;//${'x'.repeat(200)}`
+      }
+    },
+    cacheNames: []
+  });
+  const unsafeInstall = await unsafe.dispatch('install');
+  await unsafeInstall.lifetime;
+  assert.equal(unsafe.self.pwned, undefined);
+  assert.match(unsafe.calls.cacheOpen[0], /^staffbot-manage-shell-[A-Za-z0-9._-]{1,80}$/);
+  assert.ok(unsafe.calls.cacheOpen[0].length <= 'staffbot-manage-shell-'.length + 80);
 });
 
 test('manage launch URL is routable inside the default service-worker scope', async () => {

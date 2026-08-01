@@ -107,7 +107,9 @@ const MANAGE_MANIFEST = JSON.stringify({
   }]
 });
 
-const MANAGE_SERVICE_WORKER = `const CACHE_NAME = 'staffbot-manage-shell-v1';
+const MANAGE_CACHE_PREFIX = 'staffbot-manage-shell-';
+const MANAGE_CACHE_VERSION_LIMIT = 80;
+const MANAGE_SERVICE_WORKER = `const CACHE_NAME = __MANAGE_CACHE_NAME__;
 const SHELL_URLS = [
   '/manage/',
   '/manage/app.js',
@@ -155,6 +157,23 @@ self.addEventListener('fetch', (event) => {
 });
 `;
 
+function manageServiceWorker(env) {
+  const rawVersion = env
+    && env.CF_VERSION_METADATA
+    && typeof env.CF_VERSION_METADATA.id === 'string'
+    ? env.CF_VERSION_METADATA.id.trim()
+    : '';
+  const safeVersion = rawVersion
+    .replace(/[^A-Za-z0-9._-]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, MANAGE_CACHE_VERSION_LIMIT) || 'local';
+  const cacheName = MANAGE_CACHE_PREFIX + safeVersion;
+  return MANAGE_SERVICE_WORKER.replace(
+    '__MANAGE_CACHE_NAME__',
+    JSON.stringify(cacheName)
+  );
+}
+
 const MANAGE_ICON = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-label="StaffBot">
   <rect width="512" height="512" rx="112" fill="#111827"/>
   <path d="M144 152h224v56H224v48h112v56H224v96h-80z" fill="#fff"/>
@@ -172,6 +191,9 @@ export function handleManageAsset(request, env, url) {
   const asset = ASSETS.get(url.pathname);
   if (!asset) return null;
   const [body, contentType] = asset;
+  const responseBody = url.pathname === '/manage/sw.js'
+    ? manageServiceWorker(env)
+    : body;
   const headers = {
     'content-type': contentType,
     ...manageSecurityHeaders()
@@ -180,5 +202,5 @@ export function handleManageAsset(request, env, url) {
     url.pathname === '/manage/sw.js'
     || url.pathname === '/manage/manifest.webmanifest'
   ) headers['cache-control'] = 'no-cache';
-  return new Response(body, { headers });
+  return new Response(responseBody, { headers });
 }

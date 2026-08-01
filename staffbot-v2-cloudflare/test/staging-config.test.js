@@ -15,6 +15,17 @@ test('declares a separate staging Worker and bindings', () => {
   assert.match(config, /bucket_name\s*=\s*"staffbot-v2-payroll-proofs-staging"/);
 });
 
+test('declares version metadata for production and staging independently', () => {
+  assert.match(
+    config,
+    /\[version_metadata\]\s+binding\s*=\s*"CF_VERSION_METADATA"/
+  );
+  assert.match(
+    config,
+    /\[env\.staging\.version_metadata\]\s+binding\s*=\s*"CF_VERSION_METADATA"/
+  );
+});
+
 test('declares staging safety variables explicitly', () => {
   assert.match(config, /\[env\.staging\.vars\][\s\S]*ENVIRONMENT\s*=\s*"staging"/);
   assert.match(config, /\[env\.staging\.vars\][\s\S]*PAYROLL_LEDGER_READ_MODE\s*=\s*"ledger"/);

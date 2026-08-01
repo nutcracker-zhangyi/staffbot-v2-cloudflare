@@ -65,8 +65,12 @@ git diff --check
 
 The focused tests execute the manifest response as JSON and execute the real
 service-worker response in a fake Worker global. They verify the fixed app
-shell, network-only business requests, cache cleanup, install failure, offline
-mutation guards, and authoritative reconnect behavior.
+shell, network-only business requests, version-specific cache rotation, scoped
+cache cleanup, install failure, offline mutation guards, and authoritative
+reconnect behavior. Keep both `[version_metadata]` and
+`[env.staging.version_metadata]` bound to `CF_VERSION_METADATA`; bindings are
+not inherited by Wrangler environments. Local runs without the binding use the
+stable `staffbot-manage-shell-local` fallback.
 
 ### Staging database and deploy gate
 
@@ -81,6 +85,7 @@ npx wrangler deploy --env staging
 curl -fsS https://staffbot-v2-staging.staffbot-v2.workers.dev/
 curl -fsS https://staffbot-v2-staging.staffbot-v2.workers.dev/manage/
 curl -fsS https://staffbot-v2-staging.staffbot-v2.workers.dev/manage/manifest.webmanifest
+curl -fsS https://staffbot-v2-staging.staffbot-v2.workers.dev/manage/sw.js
 curl -fsS https://staffbot-v2-staging.staffbot-v2.workers.dev/admin
 ```
 
@@ -88,6 +93,9 @@ Record the migration output, deployed Worker version, smoke responses, and
 browser/device acceptance in
 `docs/reports/2026-07-29-staging-admin-mobile-pwa-validation.md`. Leave every
 unperformed item as `PENDING`; never infer a pass from local automation.
+The service-worker response must contain a `staffbot-manage-shell-...` cache
+name derived from the deployed Worker version. After a later staging deploy,
+confirm that this name changes and the installed PWA loads the new app shell.
 
 ## Refresh staging data
 
