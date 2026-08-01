@@ -328,12 +328,16 @@ async function directApprovalBrowser({
   pathname = '/manage/tasks/income/INC-1',
   search = '?store=STORE-1',
   stores = [{ store_id: 'STORE-1', name: 'Tokyo Club' }],
-  detailForPath = () => completedApprovalDetail()
+  detailForPath = () => completedApprovalDetail(),
+  tasksStatus = 200,
+  tasksGate = null,
+  now
 } = {}) {
   const requests = [];
   const browser = await executeManageClient(MANAGE_CLIENT, {
     pathname,
     search,
+    now,
     async fetch(path, options = {}) {
       requests.push({ path, method: options.method || 'GET' });
       if (path === '/api/admin/me') return json({ ok: true });
@@ -341,7 +345,23 @@ async function directApprovalBrowser({
         return json({ telegram_id: 'ADMIN-1', csrf_token: 'CSRF-1' });
       }
       if (path === '/api/manage/stores') return json({ stores });
-      if (path === '/api/manage/tasks?') return json({ tasks: [] });
+      if (path === '/api/manage/tasks?') {
+        if (tasksGate) return tasksGate.promise;
+        return tasksStatus === 200
+          ? json({ tasks: [] })
+          : json({ ok: false, error: 'tasks_unavailable' }, tasksStatus);
+      }
+      if (path.endsWith('/renew')) {
+        return json({
+          ok: true,
+          claim: {
+            claimed_by: 'ADMIN-1',
+            claimed_at: '2026-07-29T01:45:00.000Z',
+            lease_expires_at: '2099-07-29T02:15:00.000Z',
+            active: true
+          }
+        });
+      }
       if (path.includes('/approvals/')) return json(detailForPath(path));
       return json({ ok: false, error: 'not_found' }, 404);
     }
@@ -367,6 +387,103 @@ test('a completed approval deep link opens exact authorized detail without a pen
   assert.match(app.browser.document.app.textContent, /已通过/);
   assert.equal(app.browser.document.getElementById('approve').disabled, true);
   assert.equal(app.requests.some((request) => request.method !== 'GET'), false);
+});
+
+test('a completed approval never renews a residual owned claim', async () => {
+  const now = new Date('2026-07-29T02:00:00.000Z').getTime();
+  const app = await directApprovalBrowser({
+    now,
+    detailForPath: () => {
+      const detail = completedApprovalDetail();
+      detail.task.claim = {
+        claimed_by: 'ADMIN-1',
+        claimed_at: '2026-07-29T01:45:00.000Z',
+        lease_expires_at: '2026-07-29T02:04:00.000Z',
+        active: true
+      };
+      return detail;
+    }
+  });
+  await app.browser.advanceTimers(5 * 60 * 1000);
+
+  assert.equal(app.requests.some((request) => request.method === 'POST'), false);
+  assert.match(app.browser.document.app.textContent, /已通过/);
+});
+
+test('a direct task still opens when the pending task list is unavailable', async () => {
+  const app = await directApprovalBrowser({ tasksStatus: 503 });
+
+  assert.match(app.browser.document.app.textContent, /已通过/);
+  assert.match(app.browser.document.getElementById('app-message').textContent, /待办列表暂时无法加载/);
+  assert.ok(app.requests.some((request) => request.path.includes('/approvals/')));
+  assert.ok(app.browser.navigationLabels().includes('待办'));
+});
+
+test('a late task-list failure cannot add a message after navigation leaves the direct task', async () => {
+  const gate = deferred();
+  const app = await directApprovalBrowser({ tasksGate: gate });
+  assert.match(app.browser.document.app.textContent, /已通过/);
+
+  await app.browser.clickButton('更多');
+  assert.match(app.browser.document.app.textContent, /已登录：ADMIN-1/);
+  gate.resolve(json({ ok: false, error: 'tasks_unavailable' }, 503));
+  await new Promise((resolve) => setImmediate(resolve));
+  await new Promise((resolve) => setImmediate(resolve));
+
+  assert.match(app.browser.document.app.textContent, /已登录：ADMIN-1/);
+  assert.doesNotMatch(app.browser.document.app.textContent, /待办列表暂时无法加载|当前任务仍可查看/);
+});
+
+test('a late task-list failure from an old session cannot contaminate a new session', async () => {
+  const firstTasks = deferred();
+  let adminId = 'ADMIN-1';
+  let taskCalls = 0;
+  const browser = await executeManageClient(MANAGE_CLIENT, {
+    pathname: '/manage/tasks/income/INC-1',
+    search: '?store=STORE-1',
+    async fetch(path) {
+      if (path === '/api/admin/me') return json({ ok: true });
+      if (path === '/api/manage/session') {
+        return json({ telegram_id: adminId, csrf_token: adminId + '-CSRF' });
+      }
+      if (path === '/api/manage/stores') {
+        return json({ stores: [{ store_id: 'STORE-1', name: adminId + ' Store' }] });
+      }
+      if (path === '/api/manage/tasks?') {
+        taskCalls += 1;
+        return taskCalls === 1 ? firstTasks.promise : json({ tasks: [] });
+      }
+      if (path.includes('/approvals/')) {
+        const detail = completedApprovalDetail({ storeName: adminId + ' Store' });
+        detail.task.employee_name = adminId === 'ADMIN-1' ? 'Alice' : 'Bob';
+        detail.employee.display_name = detail.task.employee_name;
+        return json(detail);
+      }
+      if (path === '/api/admin/logout') return json({ ok: true });
+      if (path === '/api/admin/login/verify') {
+        adminId = 'ADMIN-2';
+        return json({ ok: true });
+      }
+      return json({ ok: false, error: 'not_found' }, 404);
+    }
+  });
+  assert.match(browser.document.app.textContent, /Alice/);
+
+  await browser.clickButton('更多');
+  await browser.clickButton('退出登录');
+  browser.document.getElementById('telegram-id').value = 'ADMIN-2';
+  browser.document.getElementById('login-code').value = '123456';
+  await browser.clickButton('登录');
+  assert.match(browser.document.app.textContent, /Bob/);
+  assert.match(browser.document.app.textContent, /ADMIN-2/);
+
+  firstTasks.resolve(json({ ok: false, error: 'tasks_unavailable' }, 503));
+  await new Promise((resolve) => setImmediate(resolve));
+  await new Promise((resolve) => setImmediate(resolve));
+
+  assert.match(browser.document.app.textContent, /Bob/);
+  assert.match(browser.document.app.textContent, /ADMIN-2/);
+  assert.doesNotMatch(browser.document.app.textContent, /待办列表暂时无法加载|当前任务仍可查看|Alice/);
 });
 
 test('task deep links reject missing duplicate blank and unauthorized stores before detail fetch', async (context) => {
@@ -840,6 +957,8 @@ function payrollFixture({
   initialTasks = [],
   pathname = '/manage',
   search = '',
+  tasksStatus = 200,
+  now,
   draftFallbackAttempt = null,
   confirm = () => true
 } = {}) {
@@ -865,6 +984,7 @@ function payrollFixture({
         confirm,
         pathname,
         search,
+        now,
         async fetch(path, options = {}) {
           const method = options.method || 'GET';
           requests.push({ path, method, headers: options.headers, body: options.body });
@@ -880,7 +1000,11 @@ function payrollFixture({
                 : [])
             ] });
           }
-          if (path === '/api/manage/tasks?') return json({ tasks: structuredClone(initialTasks) });
+          if (path === '/api/manage/tasks?') {
+            return tasksStatus === 200
+              ? json({ tasks: structuredClone(initialTasks) })
+              : json({ ok: false, error: 'tasks_unavailable' }, tasksStatus);
+          }
           if (path === '/api/manage/tasks?store_id=STORE-1&type=payroll') {
             const matching = {
               task_type: 'payroll', task_id: dossier.payroll.payroll_id,
@@ -911,6 +1035,10 @@ function payrollFixture({
             return json(structuredClone(dossier));
           }
           if (path === '/api/manage/tasks/payroll/PAYROLL-1/claim') {
+            dossier.payroll.claim = structuredClone(activeClaim);
+            return json({ ok: true, claim: activeClaim });
+          }
+          if (path === '/api/manage/tasks/payroll/PAYROLL-1/renew') {
             dossier.payroll.claim = structuredClone(activeClaim);
             return json({ ok: true, claim: activeClaim });
           }
@@ -1007,6 +1135,68 @@ test('a completed payroll deep link opens its dossier without a pending task or 
   assert.equal(app.requests.some((request) => request.method === 'POST'), false);
 });
 
+test('a confirmed payroll never renews a residual owned claim', async () => {
+  const completed = payrollDossier();
+  completed.payroll.status = 'confirmed';
+  completed.payroll.claim = {
+    claimed_by: 'ADMIN-1',
+    claimed_at: '2026-07-29T01:45:00.000Z',
+    lease_expires_at: '2026-07-29T02:04:00.000Z',
+    active: true
+  };
+  const app = payrollFixture({
+    initialDossier: completed,
+    pathname: '/manage/tasks/payroll/PAYROLL-1',
+    search: '?store=STORE-1',
+    now: new Date('2026-07-29T02:00:00.000Z').getTime()
+  });
+  const browser = await app.browser();
+  await browser.advanceTimers(5 * 60 * 1000);
+
+  assert.equal(app.requests.some((request) => request.method === 'POST'), false);
+  assert.match(browser.document.app.textContent, /工资档案/);
+});
+
+test('an editable payroll still renews its owned active claim', async () => {
+  const editable = payrollDossier({
+    claim: {
+      claimed_by: 'ADMIN-1',
+      claimed_at: '2026-07-29T01:45:00.000Z',
+      lease_expires_at: '2026-07-29T02:04:00.000Z',
+      active: true
+    }
+  });
+  const app = payrollFixture({
+    initialDossier: editable,
+    pathname: '/manage/tasks/payroll/PAYROLL-1',
+    search: '?store=STORE-1',
+    now: new Date('2026-07-29T02:00:00.000Z').getTime()
+  });
+  const browser = await app.browser();
+  await browser.advanceTimers(4 * 60 * 1000);
+
+  assert.equal(app.requests.filter((request) =>
+    request.path === '/api/manage/tasks/payroll/PAYROLL-1/renew'
+    && request.method === 'POST'
+  ).length, 1);
+});
+
+test('a direct payroll dossier still opens when the pending task list is unavailable', async () => {
+  const completed = payrollDossier();
+  completed.payroll.status = 'confirmed';
+  completed.payroll.claim = null;
+  const app = payrollFixture({
+    initialDossier: completed,
+    pathname: '/manage/tasks/payroll/PAYROLL-1',
+    search: '?store=STORE-1',
+    tasksStatus: 503
+  });
+  const browser = await app.browser();
+
+  assert.match(browser.document.app.textContent, /工资档案/);
+  assert.match(browser.document.getElementById('app-message').textContent, /待办列表暂时无法加载/);
+});
+
 test('a payroll deep link rejects a dossier with mismatched store or id', async (context) => {
   for (const [name, field, value] of [
     ['store', 'store_id', 'STORE-2'],
@@ -1026,6 +1216,34 @@ test('a payroll deep link rejects a dossier with mismatched store or id', async 
       assert.doesNotMatch(browser.document.app.textContent, /工资档案/);
     });
   }
+});
+
+test('payroll deep-link identity rejects a delimiter collision without adoption', async () => {
+  const collision = payrollDossier();
+  collision.payroll.store_id = 'A:B';
+  collision.payroll.payroll_id = 'C';
+  const requests = [];
+  const browser = await executeManageClient(MANAGE_CLIENT, {
+    pathname: '/manage/tasks/payroll/B%3AC',
+    search: '?store=A',
+    async fetch(path, options = {}) {
+      requests.push({ path, method: options.method || 'GET' });
+      if (path === '/api/admin/me') return json({ ok: true });
+      if (path === '/api/manage/session') {
+        return json({ telegram_id: 'ADMIN-1', csrf_token: 'CSRF-1' });
+      }
+      if (path === '/api/manage/stores') {
+        return json({ stores: [{ store_id: 'A', name: 'Expected Store' }] });
+      }
+      if (path === '/api/manage/tasks?') return json({ tasks: [] });
+      if (path === '/api/manage/stores/A/payroll/B%3AC') return json(collision);
+      return json({ ok: false, error: 'not_found' }, 404);
+    }
+  });
+
+  assert.ok(requests.some((request) => request.path === '/api/manage/stores/A/payroll/B%3AC'));
+  assert.match(browser.document.app.textContent, /工资记录不存在或无权查看/);
+  assert.doesNotMatch(browser.document.app.textContent, /工资档案/);
 });
 
 test('payroll payment enables submit only for an exact evidenced integer-micros split', async () => {

@@ -386,16 +386,29 @@ async function loadPayroll({ render = true, generation = state.requestGeneration
   return state.payroll;
 }
 
+function payrollIdentity(value) {
+  const payroll = value && value.payroll ? value.payroll : value;
+  return {
+    storeId: String(payroll && payroll.store_id != null ? payroll.store_id : ''),
+    payrollId: String(payroll && payroll.payroll_id != null ? payroll.payroll_id : '')
+  };
+}
+
+function payrollIdentityMatches(value, expected) {
+  const actual = payrollIdentity(value);
+  return actual.storeId === expected.storeId
+    && actual.payrollId === expected.payrollId;
+}
+
 function payrollKey(detail = state.currentPayroll) {
-  const payroll = detail && detail.payroll;
-  return payroll ? payroll.store_id + ':' + payroll.payroll_id : '';
+  return payrollIdentity(detail);
 }
 
 function payrollRequestIsCurrent(generation, key) {
   return Boolean(
     state.session
     && generation === state.requestGeneration
-    && key === payrollKey()
+    && payrollIdentityMatches(state.currentPayroll, key)
   );
 }
 
@@ -413,11 +426,11 @@ async function openPayrollItem(item) {
   const generation = state.requestGeneration + 1;
   state.requestGeneration = generation;
   clearPayrollState();
-  const key = item.store_id + ':' + item.payroll_id;
+  const key = payrollIdentity(item);
   try {
     const detail = await api(payrollPath(item.store_id, item.payroll_id));
     if (generation !== state.requestGeneration || !state.session) return;
-    if (!detail.payroll || detail.payroll.store_id + ':' + detail.payroll.payroll_id !== key) {
+    if (!detail.payroll || !payrollIdentityMatches(detail, key)) {
       state.message = '工资记录不存在或无权查看';
       renderCurrent();
       return;
@@ -482,7 +495,8 @@ function renderPayrollDetail() {
   const start = document.getElementById('start-payroll-payment');
   if (start) start.onclick = startPayrollPayment;
   bindPaymentControls();
-  startPayrollClaimTimer();
+  if (payrollCanStart(payroll)) startPayrollClaimTimer();
+  else stopClaimTimer();
 }
 
 function payrollCanStart(payroll) {
@@ -708,7 +722,11 @@ function canSavePaymentSplit() {
 }
 
 async function startPayrollPayment() {
-  if (!state.currentPayroll || !state.online || state.paymentBusy || state.authorityStale) return;
+  if (!state.currentPayroll
+    || !payrollCanStart(state.currentPayroll.payroll)
+    || !state.online
+    || state.paymentBusy
+    || state.authorityStale) return;
   const generation = state.requestGeneration;
   const key = payrollKey();
   const payroll = state.currentPayroll.payroll;
@@ -941,7 +959,7 @@ async function refreshPayrollDossier(message, generation = state.requestGenerati
   const payroll = state.currentPayroll.payroll;
   const detail = await api(payrollPath(payroll.store_id, payroll.payroll_id));
   if (!payrollRequestIsCurrent(generation, key)) return;
-  if (!detail.payroll || detail.payroll.store_id + ':' + detail.payroll.payroll_id !== key) {
+  if (!detail.payroll || !payrollIdentityMatches(detail, key)) {
     throw new Error('invalid_payroll_detail');
   }
   adoptPayrollDossier(detail);
@@ -984,6 +1002,7 @@ function startPayrollClaimTimer() {
   stopClaimTimer();
   if (!state.currentPayroll) return;
   const payroll = state.currentPayroll.payroll;
+  if (!payrollCanStart(payroll)) return;
   const claim = payroll.claim;
   if (!claimIsActive(claim) || state.authorityStale) return;
   const remaining = new Date(claim.lease_expires_at).getTime() - Date.now();
@@ -993,7 +1012,8 @@ function startPayrollClaimTimer() {
     const renewIn = Math.min(5 * 60 * 1000, Math.max(0, remaining - 30 * 1000));
     state.claimTimer = setTimeout(async () => {
       state.claimTimer = 0;
-      if (!payrollRequestIsCurrent(generation, key)) return;
+      if (!payrollRequestIsCurrent(generation, key)
+        || !payrollCanStart(state.currentPayroll.payroll)) return;
       try {
         const result = await api('/api/manage/tasks/payroll/'
           + encodeURIComponent(payroll.payroll_id) + '/renew', { method: 'POST' });
@@ -1169,7 +1189,8 @@ function renderTaskDetail() {
     state.decisionMode = '';
     renderTaskDetail();
   };
-  startClaimTimer();
+  if (pending) startClaimTimer();
+  else stopClaimTimer();
 }
 
 function disabled(value) {
@@ -1228,6 +1249,40 @@ function historySection(history) {
 function currentTaskKey() {
   const task = state.currentTask && state.currentTask.task;
   return task ? task.task_type + ':' + task.task_id : '';
+}
+
+function currentDirectPageIdentity() {
+  if (state.currentTask && state.currentTask.task) {
+    const task = state.currentTask.task;
+    return {
+      kind: 'approval',
+      storeId: String(task.store_id),
+      type: String(task.task_type),
+      id: String(task.task_id)
+    };
+  }
+  if (state.currentPayroll && state.currentPayroll.payroll) {
+    const payroll = payrollIdentity(state.currentPayroll);
+    return {
+      kind: 'payroll',
+      storeId: payroll.storeId,
+      type: 'payroll',
+      id: payroll.payrollId
+    };
+  }
+  return null;
+}
+
+function directPageIsCurrent(expected) {
+  const current = currentDirectPageIdentity();
+  return Boolean(
+    expected
+    && current
+    && current.kind === expected.kind
+    && current.storeId === expected.storeId
+    && current.type === expected.type
+    && current.id === expected.id
+  );
 }
 
 function requestIsCurrent(generation, key = '') {
@@ -1342,6 +1397,7 @@ async function mutateClaim(action) {
     || state.authorityStale
   ) return;
   const task = state.currentTask.task;
+  if (task.status !== 'pending') return;
   const generation = state.requestGeneration;
   const key = currentTaskKey();
   state.mutationBusy = true;
@@ -1383,6 +1439,7 @@ function claimCurrentTask() {
 }
 
 function renewCurrentClaim() {
+  if (!state.currentTask || state.currentTask.task.status !== 'pending') return;
   return mutateClaim('renew');
 }
 
@@ -1513,6 +1570,7 @@ function startClaimTimer() {
   stopClaimTimer();
   if (!state.currentTask) return;
   const task = state.currentTask.task;
+  if (task.status !== 'pending') return;
   const claim = task.claim;
   if (!claimIsActive(claim) || state.authorityStale) return;
   const remaining = new Date(claim.lease_expires_at).getTime() - Date.now();
@@ -1526,7 +1584,8 @@ function startClaimTimer() {
       const retryAtExpiry = retry.nextAt >= new Date(claim.lease_expires_at).getTime();
       state.claimTimer = setTimeout(() => {
         state.claimTimer = 0;
-        if (!requestIsCurrent(generation, key)) return;
+        if (!requestIsCurrent(generation, key)
+          || state.currentTask.task.status !== 'pending') return;
         if (retryAtExpiry || !claimIsActive(state.currentTask.task.claim)) {
           renderTaskDetail();
         } else {
@@ -1542,14 +1601,16 @@ function startClaimTimer() {
     const renewIn = Math.min(5 * 60 * 1000, Math.max(0, remaining - 30 * 1000));
     state.claimTimer = setTimeout(() => {
       state.claimTimer = 0;
-      if (requestIsCurrent(generation, key)) renewCurrentClaim();
+      if (requestIsCurrent(generation, key)
+        && state.currentTask.task.status === 'pending') renewCurrentClaim();
     }, renewIn);
     return;
   }
 
   state.claimTimer = setTimeout(() => {
     state.claimTimer = 0;
-    if (requestIsCurrent(generation, key)) renderTaskDetail();
+    if (requestIsCurrent(generation, key)
+      && state.currentTask.task.status === 'pending') renderTaskDetail();
   }, Math.max(0, remaining) + 1);
 }
 
@@ -1607,7 +1668,7 @@ async function refreshPayrollAfterReconnect() {
       api('/api/manage/stores/' + encodeURIComponent(payroll.store_id) + '/payroll')
     ]);
     if (!payrollRequestIsCurrent(generation, key)) return;
-    if (!detail.payroll || detail.payroll.store_id + ':' + detail.payroll.payroll_id !== key) {
+    if (!detail.payroll || !payrollIdentityMatches(detail, key)) {
       throw new Error('invalid_payroll_detail');
     }
     const listItem = (payrollList.payroll || []).find((item) => item.payroll_id === payroll.payroll_id);
@@ -1689,8 +1750,27 @@ async function boot() {
     state.csrfToken = state.session.csrf_token || '';
     const stores = await api('/api/manage/stores');
     state.stores = stores.stores || [];
-    await loadTasks();
-    await openReturnPath();
+    const directTaskPath = /^\/manage\/tasks\/[^/]+\/[^/]+$/
+      .test(String(location.pathname || ''));
+    if (directTaskPath) {
+      await openReturnPath();
+      const directGeneration = state.requestGeneration;
+      const directSession = state.session;
+      const directPage = currentDirectPageIdentity();
+      try {
+        await loadTasks({ render: false });
+      } catch {
+        if (state.session !== directSession
+          || state.requestGeneration !== directGeneration
+          || !directPageIsCurrent(directPage)) return;
+        state.message = '待办列表暂时无法加载，当前任务仍可查看';
+        const message = document.getElementById('app-message');
+        if (message) message.textContent = state.message;
+      }
+    } else {
+      await loadTasks();
+      await openReturnPath();
+    }
   } catch {
     resetAuthenticatedState();
     loginView();
