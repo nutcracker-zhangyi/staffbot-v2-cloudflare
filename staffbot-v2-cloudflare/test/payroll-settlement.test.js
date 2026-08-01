@@ -132,6 +132,7 @@ test('canonical schema contains the personal payroll contract', () => {
       'payment_sent_at',
       'disputed_at',
       'confirmed_at',
+      'current_payment_attempt_id',
       'created_at',
       'updated_at'
     ]
@@ -156,9 +157,11 @@ test('canonical schema contains the personal payroll contract', () => {
     [
       'proof_id',
       'payroll_id',
+      'attempt_id',
       'method',
       'object_key',
       'telegram_file_id',
+      'telegram_delivered_at',
       'file_name',
       'mime_type',
       'size_bytes',
@@ -166,6 +169,25 @@ test('canonical schema contains the personal payroll contract', () => {
       'uploaded_by',
       'superseded_at',
       'uploaded_at'
+    ]
+  );
+  assert.deepEqual(
+    columnNames(database, 'payroll_payment_attempts'),
+    [
+      'attempt_id',
+      'payroll_id',
+      'version',
+      'status',
+      'bank_micros',
+      'usdt_micros',
+      'cash_micros',
+      'submitted_by',
+      'submitted_at',
+      'employee_response',
+      'idempotency_key_hash',
+      'employee_responded_at',
+      'created_at',
+      'updated_at'
     ]
   );
   assert.deepEqual(
@@ -438,6 +460,13 @@ test('uses a valid saved payment profile for the initial positive status', async
       member,
       payrollCutoff('2026-07-01', 16, 0, 'Asia/Tokyo'),
       new Date('2026-07-16T04:00:00.000Z')
+    );
+    assert.equal(
+      fixture.database.prepare(`
+        SELECT COUNT(*) AS total
+        FROM payroll_payment_attempts
+      `).get().total,
+      0
     );
 
     assert.equal(result.payroll.status, 'awaiting_admin_payment');

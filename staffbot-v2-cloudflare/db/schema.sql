@@ -278,6 +278,7 @@ CREATE TABLE IF NOT EXISTS payroll_disbursements (
   payment_sent_at TEXT,
   disputed_at TEXT,
   confirmed_at TEXT,
+  current_payment_attempt_id TEXT,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL,
   UNIQUE (store_id, telegram_id, scheduled_date)
@@ -289,13 +290,79 @@ CREATE INDEX IF NOT EXISTS idx_payroll_disbursements_due
 CREATE INDEX IF NOT EXISTS idx_payroll_disbursements_store_status
   ON payroll_disbursements (store_id, status, scheduled_date);
 
+CREATE TABLE IF NOT EXISTS payroll_payment_attempts (
+  attempt_id TEXT PRIMARY KEY,
+  payroll_id TEXT NOT NULL,
+  version INTEGER NOT NULL
+    CHECK (typeof(version) = 'integer' AND version > 0),
+  status TEXT NOT NULL
+    CHECK (status IN (
+      'draft',
+      'submitted',
+      'employee_confirmed',
+      'employee_disputed',
+      'abandoned'
+    )),
+  bank_micros INTEGER NOT NULL DEFAULT 0
+    CHECK (typeof(bank_micros) = 'integer' AND bank_micros >= 0),
+  usdt_micros INTEGER NOT NULL DEFAULT 0
+    CHECK (typeof(usdt_micros) = 'integer' AND usdt_micros >= 0),
+  cash_micros INTEGER NOT NULL DEFAULT 0
+    CHECK (typeof(cash_micros) = 'integer' AND cash_micros >= 0),
+  submitted_by TEXT,
+  submitted_at TEXT,
+  employee_response TEXT
+    CHECK (
+      employee_response IS NULL
+      OR employee_response IN ('confirmed', 'disputed')
+    ),
+  idempotency_key_hash TEXT,
+  employee_responded_at TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  UNIQUE (payroll_id, version)
+);
+
+CREATE INDEX IF NOT EXISTS idx_payroll_payment_attempts_payroll_version
+  ON payroll_payment_attempts (payroll_id, version);
+
+CREATE INDEX IF NOT EXISTS idx_payroll_payment_attempts_status_updated
+  ON payroll_payment_attempts (status, updated_at);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_payroll_payment_attempts_idempotency
+  ON payroll_payment_attempts (payroll_id, idempotency_key_hash)
+  WHERE idempotency_key_hash IS NOT NULL;
+
+CREATE TRIGGER IF NOT EXISTS trg_payroll_payment_attempt_amounts_immutable
+BEFORE UPDATE OF payroll_id, version, bank_micros, usdt_micros, cash_micros
+ON payroll_payment_attempts
+WHEN OLD.status <> 'draft' AND (
+  NEW.payroll_id IS NOT OLD.payroll_id
+  OR NEW.version IS NOT OLD.version
+  OR NEW.bank_micros IS NOT OLD.bank_micros
+  OR NEW.usdt_micros IS NOT OLD.usdt_micros
+  OR NEW.cash_micros IS NOT OLD.cash_micros
+)
+BEGIN
+  SELECT RAISE(ABORT, 'payment attempt amounts are immutable');
+END;
+
+CREATE TRIGGER IF NOT EXISTS trg_payroll_payment_attempt_delete_immutable
+BEFORE DELETE ON payroll_payment_attempts
+WHEN OLD.status <> 'draft'
+BEGIN
+  SELECT RAISE(ABORT, 'submitted payment attempts are immutable');
+END;
+
 CREATE TABLE IF NOT EXISTS payroll_payment_proofs (
   proof_id TEXT PRIMARY KEY,
   payroll_id TEXT NOT NULL,
+  attempt_id TEXT,
   method TEXT NOT NULL
     CHECK (method IN ('bank', 'usdt', 'cash')),
   object_key TEXT NOT NULL UNIQUE,
-  telegram_file_id TEXT NOT NULL,
+  telegram_file_id TEXT,
+  telegram_delivered_at TEXT,
   file_name TEXT,
   mime_type TEXT NOT NULL,
   size_bytes INTEGER NOT NULL
@@ -304,12 +371,19 @@ CREATE TABLE IF NOT EXISTS payroll_payment_proofs (
     CHECK (typeof(sort_order) = 'integer' AND sort_order > 0),
   uploaded_by TEXT NOT NULL,
   superseded_at TEXT,
-  uploaded_at TEXT NOT NULL,
-  UNIQUE (payroll_id, method, sort_order)
+  uploaded_at TEXT NOT NULL
 );
 
 CREATE INDEX IF NOT EXISTS idx_payroll_proofs_payroll_method
   ON payroll_payment_proofs (payroll_id, method, sort_order);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_payroll_proofs_attempt_order
+  ON payroll_payment_proofs (attempt_id, method, sort_order)
+  WHERE attempt_id IS NOT NULL;
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_payroll_proofs_legacy_order
+  ON payroll_payment_proofs (payroll_id, method, sort_order)
+  WHERE attempt_id IS NULL;
 
 CREATE TABLE IF NOT EXISTS payroll_email_outbox (
   payroll_id TEXT PRIMARY KEY,

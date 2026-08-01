@@ -398,6 +398,55 @@ test('reports missing active proofs for every non-zero split method', async () =
   }
 });
 
+test('supports attempt-scoped proof order and compatibility-null metadata', () => {
+  const fixture = proofFixture();
+  try {
+    fixture.database.exec(`
+      INSERT INTO payroll_payment_attempts (
+        attempt_id, payroll_id, version, status,
+        bank_micros, created_at, updated_at
+      ) VALUES
+        (
+          'ATTEMPT-1', 'PAYROLL-1', 1, 'submitted',
+          100000000, '2026-07-16T04:00:00.000Z',
+          '2026-07-16T04:00:00.000Z'
+        ),
+        (
+          'ATTEMPT-2', 'PAYROLL-1', 2, 'draft',
+          100000000, '2026-07-16T05:00:00.000Z',
+          '2026-07-16T05:00:00.000Z'
+        );
+      INSERT INTO payroll_payment_proofs (
+        proof_id, payroll_id, attempt_id, method, object_key,
+        telegram_file_id, mime_type, size_bytes, sort_order,
+        uploaded_by, uploaded_at
+      ) VALUES
+        (
+          'ATTEMPT-PROOF-1', 'PAYROLL-1', 'ATTEMPT-1', 'bank',
+          'attempt-1-proof', NULL, 'image/jpeg', 1, 1,
+          'ADMIN-1', '2026-07-16T04:00:00.000Z'
+        ),
+        (
+          'ATTEMPT-PROOF-2', 'PAYROLL-1', 'ATTEMPT-2', 'bank',
+          'attempt-2-proof', NULL, 'image/jpeg', 1, 1,
+          'ADMIN-1', '2026-07-16T05:00:00.000Z'
+        );
+    `);
+    assert.throws(() => fixture.database.exec(`
+      INSERT INTO payroll_payment_proofs (
+        proof_id, payroll_id, attempt_id, method, object_key,
+        mime_type, size_bytes, sort_order, uploaded_by, uploaded_at
+      ) VALUES (
+        'ATTEMPT-PROOF-3', 'PAYROLL-1', 'ATTEMPT-2', 'bank',
+        'attempt-2-proof-duplicate-order', 'image/jpeg', 1, 1,
+        'ADMIN-1', '2026-07-16T05:01:00.000Z'
+      );
+    `), /UNIQUE constraint failed/);
+  } finally {
+    fixture.database.close();
+  }
+});
+
 test('deletes only the new R2 object when proof metadata insertion fails', async () => {
   const fixture = proofFixture();
   const originalFetch = globalThis.fetch;

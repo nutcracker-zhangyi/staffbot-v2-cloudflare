@@ -7,6 +7,41 @@ const schema = readFileSync(
   new URL('../db/schema.sql', import.meta.url),
   'utf8'
 );
+const migration021 = readFileSync(
+  new URL('../db/migrations/021_personal_payroll_cycle.sql', import.meta.url),
+  'utf8'
+);
+const migration022 = readFileSync(
+  new URL('../db/migrations/022_usdt_payment_qr.sql', import.meta.url),
+  'utf8'
+);
+const migration024 = readFileSync(
+  new URL('../db/migrations/024_payroll_payment_attempts.sql', import.meta.url),
+  'utf8'
+);
+
+function legacyPayrollDatabase() {
+  const database = new DatabaseSync(':memory:');
+  database.exec(`
+    CREATE TABLE store_members (
+      store_id TEXT NOT NULL,
+      telegram_id TEXT NOT NULL,
+      display_name TEXT,
+      role TEXT NOT NULL DEFAULT 'employee',
+      status TEXT NOT NULL DEFAULT 'active',
+      commission_rate REAL NOT NULL DEFAULT 0.6,
+      cycle_start TEXT NOT NULL,
+      joined_at TEXT NOT NULL,
+      absence_check_enabled INTEGER NOT NULL DEFAULT 1,
+      absence_check_enabled_at TEXT,
+      updated_at TEXT NOT NULL,
+      PRIMARY KEY (store_id, telegram_id)
+    );
+  `);
+  database.exec(migration021);
+  database.exec(migration022);
+  return database;
+}
 
 test('canonical schema enforces manage CSRF and leased claims', () => {
   const db = new DatabaseSync(':memory:');
@@ -36,6 +71,39 @@ test('canonical schema enforces manage CSRF and leased claims', () => {
     '2026-08-01T00:15:00.000Z',
     '2026-08-01T00:00:00.000Z'
   ));
+});
+
+test('canonical schema enforces payment attempt states and unique identities', () => {
+  const db = new DatabaseSync(':memory:');
+  db.exec(schema);
+  const insertAttempt = db.prepare(`
+    INSERT INTO payroll_payment_attempts (
+      attempt_id, payroll_id, version, status,
+      bank_micros, usdt_micros, cash_micros,
+      idempotency_key_hash, created_at, updated_at
+    ) VALUES (?, ?, ?, ?, ?, 0, 0, ?, ?, ?)
+  `);
+  const timestamp = '2026-08-01T00:00:00.000Z';
+  insertAttempt.run(
+    'ATTEMPT-1', 'PAYROLL-1', 1, 'draft', 100,
+    'HASH-1', timestamp, timestamp
+  );
+  assert.throws(() => insertAttempt.run(
+    'ATTEMPT-2', 'PAYROLL-1', 1, 'submitted', 100,
+    'HASH-2', timestamp, timestamp
+  ), /UNIQUE constraint failed/);
+  assert.throws(() => insertAttempt.run(
+    'ATTEMPT-3', 'PAYROLL-1', 2, 'unknown', 100,
+    'HASH-3', timestamp, timestamp
+  ), /CHECK constraint failed/);
+  assert.throws(() => insertAttempt.run(
+    'ATTEMPT-4', 'PAYROLL-1', 2, 'draft', 100,
+    'HASH-1', timestamp, timestamp
+  ), /UNIQUE constraint failed/);
+  assert.throws(() => insertAttempt.run(
+    'ATTEMPT-5', 'PAYROLL-2', 1, 'draft', 0.5,
+    null, timestamp, timestamp
+  ), /CHECK constraint failed/);
 });
 
 test('migration preserves existing admin sessions', () => {
@@ -68,5 +136,263 @@ test('migration preserves existing admin sessions', () => {
   assert.equal(
     db.prepare(`SELECT csrf_token FROM admin_sessions`).get().csrf_token,
     null
+  );
+});
+
+test('migration 024 backfills one immutable version and preserves proof metadata', () => {
+  const database = legacyPayrollDatabase();
+  database.exec(`
+    INSERT INTO payroll_disbursements (
+      payroll_id, store_id, telegram_id, payroll_start_date,
+      scheduled_date, cycle_day, period_start, cutoff_at,
+      amount_snapshot_micros, currency, status,
+      accepts_bank, accepts_usdt, accepts_cash,
+      bank_details_snapshot, usdt_details_snapshot, usdt_qr_id_snapshot,
+      bank_micros, usdt_micros, cash_micros, current_admin_id,
+      payment_sent_at, created_at, updated_at
+    ) VALUES (
+      'PAYROLL-1', 'STORE-1', 'EMP-1', '2026-07-01',
+      '2026-07-16', 16, '2026-07-01T03:00:00.000Z',
+      '2026-07-16T03:00:00.000Z', 100000000, '₫',
+      'awaiting_employee_confirmation', 1, 1, 0,
+      'BANK-DETAILS', 'USDT-DETAILS', 'QR-1',
+      70000000, 30000000, 0, 'ADMIN-1',
+      '2026-07-16T05:00:00.000Z',
+      '2026-07-16T03:00:00.000Z',
+      '2026-07-16T05:00:00.000Z'
+    );
+    INSERT INTO payroll_payment_proofs (
+      proof_id, payroll_id, method, object_key, telegram_file_id,
+      file_name, mime_type, size_bytes, sort_order, uploaded_by,
+      superseded_at, uploaded_at
+    ) VALUES (
+      'PROOF-1', 'PAYROLL-1', 'bank',
+      'payroll/STORE-1/PAYROLL-1/bank/PROOF-1.jpg', 'TG-FILE-1',
+      'receipt.jpg', 'image/jpeg', 321, 1, 'ADMIN-1',
+      '2026-07-16T05:30:00.000Z', '2026-07-16T04:00:00.000Z'
+    );
+  `);
+
+  database.exec(migration024);
+  database.exec(migration024);
+
+  assert.deepEqual(
+    { ...database.prepare(`
+      SELECT
+        attempt_id, payroll_id, version, status,
+        bank_micros, usdt_micros, cash_micros,
+        submitted_by, submitted_at
+      FROM payroll_payment_attempts
+      WHERE payroll_id = 'PAYROLL-1'
+    `).get() },
+    {
+      attempt_id: 'ATTEMPT:LEGACY:PAYROLL-1',
+      payroll_id: 'PAYROLL-1',
+      version: 1,
+      status: 'submitted',
+      bank_micros: 70_000_000,
+      usdt_micros: 30_000_000,
+      cash_micros: 0,
+      submitted_by: 'ADMIN-1',
+      submitted_at: '2026-07-16T05:00:00.000Z'
+    }
+  );
+  assert.equal(
+    database.prepare(`
+      SELECT current_payment_attempt_id
+      FROM payroll_disbursements
+      WHERE payroll_id = 'PAYROLL-1'
+    `).get().current_payment_attempt_id,
+    'ATTEMPT:LEGACY:PAYROLL-1'
+  );
+  assert.deepEqual(
+    { ...database.prepare(`
+      SELECT
+        attempt_id, payroll_id, method, object_key, telegram_file_id,
+        file_name, mime_type, size_bytes, sort_order, uploaded_by,
+        superseded_at, uploaded_at, telegram_delivered_at
+      FROM payroll_payment_proofs
+      WHERE proof_id = 'PROOF-1'
+    `).get() },
+    {
+      attempt_id: 'ATTEMPT:LEGACY:PAYROLL-1',
+      payroll_id: 'PAYROLL-1',
+      method: 'bank',
+      object_key: 'payroll/STORE-1/PAYROLL-1/bank/PROOF-1.jpg',
+      telegram_file_id: 'TG-FILE-1',
+      file_name: 'receipt.jpg',
+      mime_type: 'image/jpeg',
+      size_bytes: 321,
+      sort_order: 1,
+      uploaded_by: 'ADMIN-1',
+      superseded_at: '2026-07-16T05:30:00.000Z',
+      uploaded_at: '2026-07-16T04:00:00.000Z',
+      telegram_delivered_at: '2026-07-16T05:00:00.000Z'
+    }
+  );
+  assert.throws(() => database.prepare(`
+    UPDATE payroll_payment_attempts
+    SET bank_micros = 1
+    WHERE attempt_id = 'ATTEMPT:LEGACY:PAYROLL-1'
+  `).run(), /payment attempt amounts are immutable/);
+});
+
+test('migration 024 maps legacy statuses and backfills only evidenced payrolls', () => {
+  const database = legacyPayrollDatabase();
+  const insertPayroll = database.prepare(`
+    INSERT INTO payroll_disbursements (
+      payroll_id, store_id, telegram_id, payroll_start_date,
+      scheduled_date, cycle_day, period_start, cutoff_at,
+      amount_snapshot_micros, currency, status,
+      bank_micros, usdt_micros, cash_micros,
+      payment_sent_at, disputed_at, confirmed_at,
+      created_at, updated_at
+    ) VALUES (
+      :payroll_id, 'STORE-1', :telegram_id, '2026-07-01',
+      :scheduled_date, :cycle_day, '2026-07-01T03:00:00.000Z',
+      :cutoff_at, 100000000, '₫', :status,
+      :bank_micros, 0, 0, :payment_sent_at, :disputed_at, :confirmed_at,
+      '2026-07-16T03:00:00.000Z', :updated_at
+    )
+  `);
+  const rows = [
+    {
+      payroll_id: 'CONFIRMED', telegram_id: 'EMP-1',
+      scheduled_date: '2026-07-16', cycle_day: 16,
+      cutoff_at: '2026-07-16T03:00:00.000Z', status: 'confirmed',
+      bank_micros: 100_000_000,
+      payment_sent_at: '2026-07-16T05:00:00.000Z',
+      disputed_at: null, confirmed_at: '2026-07-16T06:00:00.000Z',
+      updated_at: '2026-07-16T06:00:00.000Z'
+    },
+    {
+      payroll_id: 'DISPUTED', telegram_id: 'EMP-2',
+      scheduled_date: '2026-07-16', cycle_day: 16,
+      cutoff_at: '2026-07-16T03:00:00.000Z', status: 'disputed',
+      bank_micros: 0, payment_sent_at: null,
+      disputed_at: '2026-07-16T06:30:00.000Z', confirmed_at: null,
+      updated_at: '2026-07-16T06:30:00.000Z'
+    },
+    {
+      payroll_id: 'AWAITING-CONFIRMATION', telegram_id: 'EMP-3',
+      scheduled_date: '2026-07-16', cycle_day: 16,
+      cutoff_at: '2026-07-16T03:00:00.000Z',
+      status: 'awaiting_employee_confirmation', bank_micros: 0,
+      payment_sent_at: null, disputed_at: null, confirmed_at: null,
+      updated_at: '2026-07-16T05:00:00.000Z'
+    },
+    {
+      payroll_id: 'UNSTARTED', telegram_id: 'EMP-4',
+      scheduled_date: '2026-07-16', cycle_day: 16,
+      cutoff_at: '2026-07-16T03:00:00.000Z',
+      status: 'awaiting_admin_payment', bank_micros: 0,
+      payment_sent_at: null, disputed_at: null, confirmed_at: null,
+      updated_at: '2026-07-16T03:00:00.000Z'
+    },
+    {
+      payroll_id: 'PROOF-ONLY', telegram_id: 'EMP-5',
+      scheduled_date: '2026-07-16', cycle_day: 16,
+      cutoff_at: '2026-07-16T03:00:00.000Z',
+      status: 'awaiting_admin_payment', bank_micros: 0,
+      payment_sent_at: null, disputed_at: null, confirmed_at: null,
+      updated_at: '2026-07-16T04:00:00.000Z'
+    }
+  ];
+  for (const row of rows) insertPayroll.run(row);
+  database.exec(`
+    INSERT INTO payroll_payment_proofs (
+      proof_id, payroll_id, method, object_key, telegram_file_id,
+      mime_type, size_bytes, sort_order, uploaded_by, uploaded_at
+    ) VALUES (
+      'PROOF-ONLY-1', 'PROOF-ONLY', 'cash', 'proof-only', 'TG-PROOF',
+      'image/png', 10, 1, 'ADMIN-1', '2026-07-16T04:00:00.000Z'
+    );
+  `);
+
+  database.exec(migration024);
+
+  assert.deepEqual(
+    database.prepare(`
+      SELECT payroll_id, status, employee_response, employee_responded_at
+      FROM payroll_payment_attempts
+      ORDER BY payroll_id
+    `).all().map((row) => ({ ...row })),
+    [
+      {
+        payroll_id: 'AWAITING-CONFIRMATION', status: 'submitted',
+        employee_response: null, employee_responded_at: null
+      },
+      {
+        payroll_id: 'CONFIRMED', status: 'employee_confirmed',
+        employee_response: 'confirmed',
+        employee_responded_at: '2026-07-16T06:00:00.000Z'
+      },
+      {
+        payroll_id: 'DISPUTED', status: 'employee_disputed',
+        employee_response: 'disputed',
+        employee_responded_at: '2026-07-16T06:30:00.000Z'
+      },
+      {
+        payroll_id: 'PROOF-ONLY', status: 'submitted',
+        employee_response: null, employee_responded_at: null
+      }
+    ]
+  );
+  assert.equal(
+    database.prepare(`
+      SELECT current_payment_attempt_id
+      FROM payroll_disbursements
+      WHERE payroll_id = 'UNSTARTED'
+    `).get().current_payment_attempt_id,
+    null
+  );
+  assert.deepEqual(
+    { ...database.prepare(`
+      SELECT attempt_id, telegram_delivered_at
+      FROM payroll_payment_proofs
+      WHERE proof_id = 'PROOF-ONLY-1'
+    `).get() },
+    {
+      attempt_id: 'ATTEMPT:LEGACY:PROOF-ONLY',
+      telegram_delivered_at: null
+    }
+  );
+});
+
+test('migration 024 is repeatable without duplicating attempts or proofs', () => {
+  const database = legacyPayrollDatabase();
+  database.exec(`
+    INSERT INTO payroll_disbursements (
+      payroll_id, store_id, telegram_id, payroll_start_date,
+      scheduled_date, cycle_day, period_start, cutoff_at,
+      amount_snapshot_micros, currency, status,
+      bank_micros, usdt_micros, cash_micros,
+      created_at, updated_at
+    ) VALUES (
+      'PAYROLL-1', 'STORE-1', 'EMP-1', '2026-07-01',
+      '2026-07-16', 16, '2026-07-01T03:00:00.000Z',
+      '2026-07-16T03:00:00.000Z', 100000000, '₫',
+      'awaiting_admin_payment', 100000000, 0, 0,
+      '2026-07-16T03:00:00.000Z', '2026-07-16T03:00:00.000Z'
+    );
+  `);
+
+  database.exec(migration024);
+  database.exec(migration024);
+
+  assert.equal(
+    database.prepare(`SELECT COUNT(*) AS total FROM payroll_payment_attempts`)
+      .get().total,
+    1
+  );
+  assert.equal(
+    database.prepare(`SELECT COUNT(*) AS total FROM payroll_disbursements`)
+      .get().total,
+    1
+  );
+  assert.equal(
+    database.prepare(`SELECT COUNT(*) AS total FROM payroll_payment_proofs`)
+      .get().total,
+    0
   );
 });
