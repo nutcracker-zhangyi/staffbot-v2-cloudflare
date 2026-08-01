@@ -1,14 +1,75 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import { DatabaseSync } from 'node:sqlite';
 
 import worker from '../src/index.js';
+import { createD1 } from './helpers/d1.js';
 import { executeManageClient } from './helpers/manage-dom.js';
+
+const schema = readFileSync(new URL('../db/schema.sql', import.meta.url), 'utf8');
 
 function context() {
   return { waitUntil() {} };
 }
 
 const env = { ENVIRONMENT: 'staging' };
+
+function manageApiFixture() {
+  const database = new DatabaseSync(':memory:');
+  database.exec(schema);
+  const now = '2026-07-29T03:00:00.000Z';
+  for (const [storeId, name] of [['STORE-1', 'Tokyo Club'], ['STORE-2', 'Osaka Club']]) {
+    database.prepare(`
+      INSERT INTO stores (store_id, name, currency, created_at, updated_at)
+      VALUES (?, ?, '₫', ?, ?)
+    `).run(storeId, name, now, now);
+  }
+  for (const [storeId, adminId] of [['STORE-1', 'ADMIN-1'], ['STORE-2', 'ADMIN-2']]) {
+    database.prepare(`
+      INSERT INTO store_members (
+        store_id, telegram_id, display_name, role, status,
+        cycle_start, joined_at, updated_at
+      ) VALUES (?, ?, ?, 'admin', 'active', '2026-07-01', ?, ?)
+    `).run(storeId, adminId, adminId, now, now);
+  }
+  for (const [storeId, employeeId, requestId] of [
+    ['STORE-1', 'EMP-1', 'INC/1'],
+    ['STORE-2', 'EMP-2', 'INC-2']
+  ]) {
+    database.prepare(`
+      INSERT INTO store_members (
+        store_id, telegram_id, display_name, role, status,
+        cycle_start, joined_at, updated_at
+      ) VALUES (?, ?, ?, 'employee', 'active', '2026-07-01', ?, ?)
+    `).run(storeId, employeeId, employeeId, now, now);
+    database.prepare(`
+      INSERT INTO pending_income (
+        request_id, store_id, telegram_id, income, commission_rate,
+        commission_income, fine, status, submitted_at
+      ) VALUES (?, ?, ?, 100, 0.6, 60, 0, 'pending', ?)
+    `).run(requestId, storeId, employeeId, now);
+  }
+  database.prepare(`
+    INSERT INTO admin_sessions (
+      token, telegram_id, expires_at, created_at, csrf_token
+    ) VALUES ('SESSION-1', 'ADMIN-1', '2099-01-01T00:00:00.000Z', ?, 'CSRF-1')
+  `).run(now);
+  return {
+    database,
+    env: {
+      ADMIN_IDS: '',
+      ENVIRONMENT: 'staging',
+      DB: createD1(database)
+    }
+  };
+}
+
+function manageRequest(path, options = {}) {
+  const headers = new Headers(options.headers);
+  headers.set('cookie', 'staffbot_admin_session=SESSION-1');
+  return new Request(`https://staffbot.test${path}`, { ...options, headers });
+}
 
 test('serves the manage shell and assets without changing admin', async () => {
   for (const path of [
@@ -205,4 +266,143 @@ test('unknown manage assets and non-GET manage requests remain not found', async
       error: 'not_found'
     });
   }
+});
+
+test('manage API requires a session and returns session plus authorized stores', async () => {
+  const fixture = manageApiFixture();
+  const unauthorized = await worker.fetch(
+    new Request('https://staffbot.test/api/manage/session'),
+    fixture.env,
+    context()
+  );
+  assert.equal(unauthorized.status, 401);
+  assert.deepEqual(await unauthorized.json(), { ok: false, error: 'unauthorized' });
+
+  const session = await worker.fetch(
+    manageRequest('/api/manage/session'),
+    fixture.env,
+    context()
+  );
+  assert.equal(session.status, 200);
+  assert.deepEqual(await session.json(), {
+    ok: true,
+    telegram_id: 'ADMIN-1',
+    global_admin: false,
+    csrf_token: 'CSRF-1'
+  });
+
+  const stores = await worker.fetch(
+    manageRequest('/api/manage/stores'),
+    fixture.env,
+    context()
+  );
+  assert.deepEqual(await stores.json(), {
+    ok: true,
+    stores: [{
+      store_id: 'STORE-1',
+      name: 'Tokyo Club',
+      currency: '₫',
+      timezone: 'Asia/Tokyo'
+    }]
+  });
+});
+
+test('manage task API decodes ids and rejects another store', async () => {
+  const fixture = manageApiFixture();
+  const tasks = await worker.fetch(
+    manageRequest('/api/manage/tasks?store_id=STORE-1&type=income'),
+    fixture.env,
+    context()
+  );
+  assert.equal(tasks.status, 200);
+  assert.deepEqual(
+    (await tasks.json()).tasks.map((task) => task.task_id),
+    ['INC/1']
+  );
+
+  const forbiddenList = await worker.fetch(
+    manageRequest('/api/manage/tasks?store_id=STORE-2&type=income'),
+    fixture.env,
+    context()
+  );
+  assert.equal(forbiddenList.status, 403);
+
+  const forbiddenClaim = await worker.fetch(
+    manageRequest('/api/manage/tasks/income/INC-2/claim', {
+      method: 'POST',
+      headers: { 'x-csrf-token': 'CSRF-1' }
+    }),
+    fixture.env,
+    context()
+  );
+  assert.equal(forbiddenClaim.status, 403);
+
+  const encodedClaim = await worker.fetch(
+    manageRequest('/api/manage/tasks/income/INC%2F1/claim', {
+      method: 'POST',
+      headers: { 'x-csrf-token': 'CSRF-1' }
+    }),
+    fixture.env,
+    context()
+  );
+  assert.equal(encodedClaim.status, 200);
+  assert.equal((await encodedClaim.json()).claim.task_id, 'INC/1');
+});
+
+test('manage mutations require exact CSRF and map occupied claims to conflict', async () => {
+  const fixture = manageApiFixture();
+  const missingCsrf = await worker.fetch(
+    manageRequest('/api/manage/tasks/income/INC%2F1/claim', { method: 'POST' }),
+    fixture.env,
+    context()
+  );
+  assert.equal(missingCsrf.status, 403);
+  assert.deepEqual(await missingCsrf.json(), { ok: false, error: 'forbidden' });
+
+  fixture.database.prepare(`
+    INSERT INTO admin_task_claims (
+      task_type, task_id, store_id, claimed_by,
+      claimed_at, lease_expires_at, updated_at
+    ) VALUES ('income', 'INC/1', 'STORE-1', 'ADMIN-2',
+      datetime('now'), '2099-01-01T00:00:00.000Z', datetime('now'))
+  `).run();
+  const occupied = await worker.fetch(
+    manageRequest('/api/manage/tasks/income/INC%2F1/claim', {
+      method: 'POST',
+      headers: { 'x-csrf-token': 'CSRF-1' }
+    }),
+    fixture.env,
+    context()
+  );
+  assert.equal(occupied.status, 409);
+  assert.deepEqual(await occupied.json(), { ok: false, error: 'task_claimed' });
+});
+
+test('manage API claims, renews, and releases through persisted D1 state', async () => {
+  const fixture = manageApiFixture();
+  const request = (action) => manageRequest(
+    `/api/manage/tasks/income/INC%2F1/${action}`,
+    { method: 'POST', headers: { 'x-csrf-token': 'CSRF-1' } }
+  );
+
+  const claimed = await worker.fetch(request('claim'), fixture.env, context());
+  assert.equal(claimed.status, 200);
+  const firstClaim = (await claimed.json()).claim;
+  assert.equal(firstClaim.claimed_by, 'ADMIN-1');
+  assert.equal(
+    new Date(firstClaim.lease_expires_at).getTime() - new Date(firstClaim.updated_at).getTime(),
+    15 * 60 * 1000
+  );
+
+  const renewed = await worker.fetch(request('renew'), fixture.env, context());
+  assert.equal(renewed.status, 200);
+  assert.equal((await renewed.json()).claim.claimed_by, 'ADMIN-1');
+
+  const released = await worker.fetch(request('release'), fixture.env, context());
+  assert.equal(released.status, 200);
+  assert.deepEqual(await released.json(), { ok: true, claim: null });
+  assert.equal(
+    fixture.database.prepare(`SELECT COUNT(*) AS total FROM admin_task_claims`).get().total,
+    0
+  );
 });

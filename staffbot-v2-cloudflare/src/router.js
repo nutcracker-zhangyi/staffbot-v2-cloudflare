@@ -4,6 +4,7 @@ import { processAbsenceFines } from './absence.js';
 import { logEvent } from './audit.js';
 import { html, json, manageDocument } from './http.js';
 import { handleManageAsset } from './manage-assets.js';
+import { handleManageApi } from './manage-api.js';
 import { manageHtml } from './manage-page.js';
 import { deliverPayrollEmailOutbox } from './payroll-email.js';
 import { deliverPayrollNotifications } from './payroll-notifications.js';
@@ -49,6 +50,10 @@ export default {
     if (request.method === 'GET' && url.pathname.startsWith('/manage/')) {
       const asset = handleManageAsset(request, env, url);
       if (asset) return asset;
+    }
+
+    if (url.pathname.startsWith('/api/manage/')) {
+      return handleManageApi(request, env, url, ctx);
     }
 
     if (url.pathname.startsWith('/api/admin/')) {
