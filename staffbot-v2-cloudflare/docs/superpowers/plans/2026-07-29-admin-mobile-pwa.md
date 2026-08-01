@@ -109,11 +109,34 @@
 Create `test/manage-migrations.test.js` with checks that execute the canonical schema and migration against an old-schema fixture:
 
 ```js
-test('canonical schema contains manage CSRF and leased claims', () => {
-  assert.match(schema, /csrf_token TEXT/);
-  assert.match(schema, /CREATE TABLE IF NOT EXISTS admin_task_claims/);
-  assert.match(schema, /PRIMARY KEY \(task_type, task_id\)/);
-  assert.match(schema, /idx_admin_task_claims_store_expiry/);
+test('canonical schema enforces manage CSRF and leased claims', () => {
+  const db = new DatabaseSync(':memory:');
+  db.exec(schema);
+  const sessionColumns = db.prepare(`
+    PRAGMA table_info(admin_sessions)
+  `).all().map((column) => column.name);
+  assert.ok(sessionColumns.includes('csrf_token'));
+  db.prepare(`
+    INSERT INTO admin_task_claims (
+      task_type, task_id, store_id, claimed_by,
+      claimed_at, lease_expires_at, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?)
+  `).run(
+    'payroll', 'PAYROLL-1', 'STORE-1', 'ADMIN-1',
+    '2026-08-01T00:00:00.000Z',
+    '2026-08-01T00:15:00.000Z',
+    '2026-08-01T00:00:00.000Z'
+  );
+  assert.throws(() => db.prepare(`
+    INSERT INTO admin_task_claims (
+      task_type, task_id, store_id, claimed_by,
+      claimed_at, lease_expires_at, updated_at
+    ) VALUES ('unknown', 'TASK-2', 'STORE-1', 'ADMIN-1', ?, ?, ?)
+  `).run(
+    '2026-08-01T00:00:00.000Z',
+    '2026-08-01T00:15:00.000Z',
+    '2026-08-01T00:00:00.000Z'
+  ));
 });
 
 test('migration preserves existing admin sessions', () => {
@@ -765,31 +788,38 @@ git commit -m "feat: add claim-protected mobile approvals"
 - Modify: `src/manage-page.js`
 - Modify: `src/manage-assets.js`
 - Create: `test/manage-page.test.js`
+- Create: `test/helpers/manage-dom.js`
 
 **Interfaces:**
 - Consumes: session, stores, tasks, claims, approval detail, approve, and reject APIs from Tasks 2–5.
 - Produces: browser functions `loadTasks()`, `openTask(type, id)`, `claimCurrentTask()`, `renewCurrentClaim()`, `releaseCurrentTask()`, and `submitApproval(decision)`.
 
-- [ ] **Step 1: Write failing document and client contract tests**
+- [ ] **Step 1: Write a failing client behavior test**
 
-Parse the generated JavaScript with `new Function` and check required UI markers:
+Run the actual generated client in a deterministic minimal DOM harness. Mock
+only the HTTP boundary; assert the rendered and interactive result, not the
+client source text:
 
 ```js
-test('manage client contains the four-tab task-first contract', () => {
-  new Function(MANAGE_APP_JS);
-  for (const marker of [
-    'data-nav="tasks"',
-    'data-nav="approvals"',
-    'data-nav="payroll"',
-    'data-nav="more"',
-    'data-store-filter',
-    'data-task-claim',
-    'data-task-release',
-    'data-approval-approve',
-    'data-approval-reject'
-  ]) {
-    assert.match(MANAGE_APP_JS, new RegExp(marker));
-  }
+test('manage client renders task-first navigation and claims a task', async () => {
+  const browser = manageDom({
+    session: { telegram_id: 'ADMIN-1', csrf_token: 'CSRF-1' },
+    stores: [{ store_id: 'STORE-1', name: 'Tokyo Club' }],
+    tasks: [{
+      task_type: 'income', task_id: 'INC-1', store_id: 'STORE-1',
+      employee_name: 'Alice', status: 'pending', claim: null
+    }]
+  });
+  await browser.run(MANAGE_APP_JS);
+  assert.deepEqual(browser.navigationLabels(), [
+    '待办', '审批', '工资', '更多'
+  ]);
+  await browser.clickButton('领取');
+  assert.deepEqual(browser.lastRequest(), {
+    method: 'POST',
+    path: '/api/manage/tasks/income/INC-1/claim',
+    csrf: 'CSRF-1'
+  });
 });
 ```
 
@@ -851,7 +881,8 @@ git add \
   staffbot-v2-cloudflare/src/manage-client.js \
   staffbot-v2-cloudflare/src/manage-page.js \
   staffbot-v2-cloudflare/src/manage-assets.js \
-  staffbot-v2-cloudflare/test/manage-page.test.js
+  staffbot-v2-cloudflare/test/manage-page.test.js \
+  staffbot-v2-cloudflare/test/helpers/manage-dom.js
 git commit -m "feat: build task-first mobile approval ui"
 ```
 
@@ -1261,24 +1292,25 @@ git commit -m "feat: add private mobile payroll proof uploads"
 - Consumes: payroll list, dossier, claim, draft, split, proof upload/delete, and private proof APIs.
 - Produces: browser functions `openPayroll()`, `startPayrollPayment()`, `savePaymentDraft()`, `uploadProof()`, `deleteDraftProof()`, and `submitPayrollPayment()`.
 
-- [ ] **Step 1: Add failing payroll UI contract tests**
+- [ ] **Step 1: Add a failing payroll UI behavior test**
 
-Assert the generated client includes dossier history, all three split fields, method proof zones, preview/delete actions, exact-total display, handler, and one final submit button:
+Reuse the minimal DOM harness with a mocked dossier. Exercise the real client
+and assert values and enabled actions from rendered state:
 
 ```js
-for (const marker of [
-  'data-payroll-history',
-  'name="bank_micros"',
-  'name="usdt_micros"',
-  'name="cash_micros"',
-  'data-proof-method="bank"',
-  'data-proof-method="usdt"',
-  'data-proof-method="cash"',
-  'data-proof-delete',
-  'data-payment-submit'
-]) {
-  assert.match(MANAGE_APP_JS, new RegExp(marker));
-}
+test('payroll payment enables submit only for an exact evidenced split', async () => {
+  const browser = manageDom({ payroll: payrollDossier });
+  await browser.run(MANAGE_APP_JS);
+  await browser.openPayroll('PAYROLL-1');
+  browser.enterAmount('bank', '70');
+  browser.enterAmount('usdt', '30');
+  assert.equal(browser.text('差额'), '0');
+  assert.equal(browser.button('提交付款并通知员工').disabled, true);
+  await browser.upload('bank', jpegProof);
+  await browser.upload('usdt', pngProof);
+  assert.equal(browser.button('提交付款并通知员工').disabled, false);
+  assert.equal(browser.paymentHistory().length, 1);
+});
 ```
 
 - [ ] **Step 2: Run the page test and verify RED**
@@ -1726,9 +1758,11 @@ git commit -m "feat: link admin notifications to mobile tasks"
 - Consumes: all prior APIs and UI.
 - Produces: installable manifest, app-shell-only service worker, online/offline mutation guards, and final staging evidence.
 
-- [ ] **Step 1: Add failing installability and cache-safety tests**
+- [ ] **Step 1: Add failing installability and cache-safety behavior tests**
 
-Assert the manifest has name, short name, standalone display, start URL `/manage`, theme/background colors, and SVG icon. Assert service worker caches only:
+Fetch and parse the manifest response. Execute the service-worker asset in a
+fake worker global, trigger `install` and `fetch`, and assert calls made to the
+cache and network boundaries. The install event must cache exactly:
 
 ```js
 [
