@@ -1296,3 +1296,43 @@ test('draft fallback adoption clears transient state owned by the prior attempt'
   assert.doesNotMatch(browser.document.app.textContent, /old-attempt.jpg/);
   assert.equal(browser.objectUrls.size, 0);
 });
+
+test('task refresh keeps the server urgency time and stable-id order', async () => {
+  const base = {
+    ...task,
+    store_id: 'STORE-2',
+    store_name: 'Osaka Club',
+    claim: null
+  };
+  const initialTasks = [
+    { ...base, task_id: 'UNKNOWN-Z', employee_name: 'Unknown-Z', urgency: 'unknown', submitted_at: null },
+    { ...base, task_id: 'UNKNOWN-A', employee_name: 'Unknown-A', urgency: undefined, submitted_at: null },
+    { ...base, task_id: 'MEDIUM-LATE', employee_name: 'Medium-Late', urgency: 500, submitted_at: '2026-07-29T02:00:00.000Z' },
+    { ...base, task_id: 'MEDIUM-EARLY', employee_name: 'Medium-Early', urgency: 500, submitted_at: '2026-07-29T01:00:00.000Z' }
+  ];
+  const app = payrollFixture({ initialTasks });
+  const browser = await app.browser();
+  await browser.clickButton('工资');
+  await browser.clickButton('查看工资档案');
+  await browser.clickButton('领取并开始付款');
+  app.setManageTasks([{
+    task_type: 'payroll', task_id: 'PAYROLL-1', store_id: 'STORE-1',
+    store_name: 'Tokyo Club', employee_name: 'Highest-Payroll',
+    status: 'awaiting_admin_payment', urgency: 900,
+    submitted_at: '2026-07-29T03:00:00.000Z',
+    claim: {
+      claimed_by: 'ADMIN-1', claimed_at: '2026-07-29T02:00:00.000Z',
+      lease_expires_at: '2099-07-29T02:15:00.000Z', active: true
+    }
+  }]);
+  await browser.setOnline(false);
+  await browser.setOnline(true);
+  await browser.clickButton('待办');
+
+  const text = browser.document.app.textContent;
+  const positions = [
+    'Highest-Payroll', 'Medium-Early', 'Medium-Late', 'Unknown-A', 'Unknown-Z'
+  ].map((label) => text.indexOf(label));
+  assert.ok(positions.every((position) => position >= 0));
+  assert.deepEqual(positions, [...positions].sort((left, right) => left - right));
+});

@@ -1011,6 +1011,25 @@ function urgencyLabel(value) {
   return '普通';
 }
 
+function compareManageTasks(left, right) {
+  const leftUrgency = Number(left && left.urgency);
+  const rightUrgency = Number(right && right.urgency);
+  const normalizedLeftUrgency = Number.isFinite(leftUrgency) ? leftUrgency : 0;
+  const normalizedRightUrgency = Number.isFinite(rightUrgency) ? rightUrgency : 0;
+  if (normalizedLeftUrgency !== normalizedRightUrgency) {
+    return normalizedRightUrgency - normalizedLeftUrgency;
+  }
+  const leftSubmittedAt = String(left && left.submitted_at);
+  const rightSubmittedAt = String(right && right.submitted_at);
+  if (leftSubmittedAt !== rightSubmittedAt) {
+    return leftSubmittedAt < rightSubmittedAt ? -1 : 1;
+  }
+  const leftTaskId = String(left && left.task_id);
+  const rightTaskId = String(right && right.task_id);
+  if (leftTaskId === rightTaskId) return 0;
+  return leftTaskId < rightTaskId ? -1 : 1;
+}
+
 function formatMoney(micros, currency) {
   const amount = BigInt(micros || 0);
   const negative = amount < 0n;
@@ -1228,7 +1247,7 @@ async function loadTasks({ render = true, generation = state.requestGeneration }
     || listGeneration !== state.taskListGeneration
     || queryPath !== taskQueryPath()
   ) return state.tasks;
-  state.tasks = result.tasks || [];
+  state.tasks = (result.tasks || []).slice().sort(compareManageTasks);
   if (render) renderCurrent();
   return state.tasks;
 }
@@ -1563,7 +1582,7 @@ async function refreshPayrollAfterReconnect() {
     adoptPayrollDossier(detail);
     state.tasks = state.tasks.filter((task) => !(
       task.task_type === 'payroll' && task.store_id === payroll.store_id
-    )).concat(taskRows);
+    )).concat(taskRows).sort(compareManageTasks);
     state.payroll = state.payroll.filter((item) => item.store_id !== payroll.store_id)
       .concat(payrollList.payroll || []);
     const sameEditableAttempt = Boolean(
