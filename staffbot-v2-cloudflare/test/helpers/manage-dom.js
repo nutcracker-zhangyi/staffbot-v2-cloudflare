@@ -22,8 +22,11 @@ class BrowserElement {
     this.disabled = attributes.has('disabled');
     this.id = attributes.get('id') || '';
     this.onclick = null;
+    this.oninput = null;
+    this.onchange = null;
     this.textContent = text;
-    this.value = '';
+    this.value = attributes.get('value') || '';
+    this.files = [];
     this._innerHTML = '';
   }
 
@@ -125,7 +128,8 @@ export async function executeManageClient(source, {
   fetch,
   pathname = '/manage',
   online = true,
-  now: initialNow = Date.now()
+  now: initialNow = Date.now(),
+  confirm = () => true
 }) {
   const document = new BrowserDocument();
   const serviceWorkerRegistrations = [];
@@ -153,6 +157,20 @@ export async function executeManageClient(source, {
     }
   };
   const location = { pathname };
+  const objectUrls = new Set();
+  let objectUrlId = 0;
+  class BrowserURL extends URL {
+    static createObjectURL() {
+      objectUrlId += 1;
+      const value = `blob:manage-${objectUrlId}`;
+      objectUrls.add(value);
+      return value;
+    }
+
+    static revokeObjectURL(value) {
+      objectUrls.delete(value);
+    }
+  }
   const window = {
     document,
     navigator,
@@ -177,7 +195,8 @@ export async function executeManageClient(source, {
     },
     clearTimeout(id) {
       timers.delete(id);
-    }
+    },
+    confirm
   };
   const browser = vm.createContext({
     console,
@@ -187,7 +206,11 @@ export async function executeManageClient(source, {
     navigator,
     window,
     Date: BrowserDate,
+    URL: BrowserURL,
     URLSearchParams,
+    Blob,
+    File,
+    FormData,
     setInterval: window.setInterval,
     clearInterval: window.clearInterval,
     setTimeout: window.setTimeout,
@@ -200,6 +223,7 @@ export async function executeManageClient(source, {
   return {
     document,
     serviceWorkerRegistrations,
+    objectUrls,
     async clickButton(label) {
       const button = document.buttons.find((item) => item.textContent === label);
       if (!button) throw new Error(`button_not_found:${label}`);
@@ -216,6 +240,20 @@ export async function executeManageClient(source, {
       for (const listener of listeners.get(value ? 'online' : 'offline') || []) {
         listener();
       }
+      await settle();
+    },
+    async input(id, value) {
+      const element = document.getElementById(id);
+      if (!element) throw new Error(`input_not_found:${id}`);
+      element.value = value;
+      if (typeof element.oninput === 'function') await element.oninput({ target: element });
+      await settle();
+    },
+    async changeFiles(id, files) {
+      const element = document.getElementById(id);
+      if (!element) throw new Error(`input_not_found:${id}`);
+      element.files = Array.from(files || []);
+      if (typeof element.onchange === 'function') await element.onchange({ target: element });
       await settle();
     },
     async advanceTimers(milliseconds) {

@@ -61,6 +61,27 @@ h1, h2, p { margin-top: 0; }
 .confirm-panel { display: grid; gap: 10px; margin-top: 16px; border-top: 1px solid #e5e7eb; padding-top: 16px; }
 .confirm-panel p { margin-bottom: 0; font-weight: 700; }
 .error { min-height: 18px; margin: 0; color: #b91c1c; font-size: 13px; }
+.payroll-filter { grid-template-columns: 1fr; }
+.payroll-dossier > button { width: 100%; margin-top: 16px; }
+.attempt-history { display: grid; gap: 12px; }
+.attempt-card { border: 1px solid #e5e7eb; border-radius: 12px; padding: 12px; background: #f9fafb; }
+.attempt-card p { margin: 10px 0 0; font-size: 13px; }
+.proof-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; margin-top: 12px; }
+.proof-card { margin: 0; overflow: hidden; border: 1px solid #e5e7eb; border-radius: 10px; background: #fff; }
+.proof-card img { display: block; width: 100%; aspect-ratio: 1; object-fit: cover; }
+.proof-card figcaption { padding: 8px; color: #4b5563; font-size: 12px; overflow-wrap: anywhere; }
+.proof-card button { width: calc(100% - 16px); margin: 0 8px 8px; }
+.payment-qr { width: min(220px, 100%); margin: 14px auto 0; }
+.payment-form { display: grid; gap: 16px; border-top: 2px solid #111827; padding-top: 20px; }
+.payment-form > h3, .payment-form > p { margin-bottom: 0; }
+.payment-method { display: grid; gap: 8px; border: 1px solid #d1d5db; border-radius: 12px; padding: 12px; }
+.upload-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+.file-action { display: flex; min-height: 44px; align-items: center; justify-content: center; border-radius: 10px; padding: 8px; background: #e5e7eb; color: #111827; text-align: center; cursor: pointer; }
+.file-input { position: absolute; width: 1px; height: 1px; min-height: 0; overflow: hidden; clip: rect(0 0 0 0); clip-path: inset(50%); white-space: nowrap; }
+.upload-list { display: grid; gap: 8px; }
+.upload-item { display: grid; gap: 6px; border-radius: 8px; padding: 8px; background: #f3f4f6; font-size: 12px; overflow-wrap: anywhere; }
+.payment-summary { margin-top: 0; }
+.payment-summary dd { font-variant-numeric: tabular-nums; }
 .empty-state { padding: 40px 20px; text-align: center; }
 .bottom-nav { position: fixed; right: 0; bottom: 0; left: 0; display: grid; grid-template-columns: repeat(4, 1fr); gap: 4px; width: min(100%, 560px); margin: 0 auto; padding: 8px 12px max(8px, env(safe-area-inset-bottom)); border-top: 1px solid #e5e7eb; background: #fff; }
 .bottom-nav button { padding: 0 6px; background: transparent; color: #6b7280; font-size: 13px; }
