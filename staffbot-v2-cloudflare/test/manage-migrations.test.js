@@ -104,6 +104,10 @@ test('canonical schema enforces payment attempt states and unique identities', (
     'ATTEMPT-5', 'PAYROLL-2', 1, 'draft', 0.5,
     null, timestamp, timestamp
   ), /CHECK constraint failed/);
+  assert.throws(() => insertAttempt.run(
+    'ATTEMPT-DRAFT-2', 'PAYROLL-1', 3, 'draft', 100,
+    null, timestamp, timestamp
+  ), /UNIQUE constraint failed/);
 });
 
 test('submitted payment evidence cannot be reopened or mutated', () => {
@@ -317,7 +321,16 @@ test('migration 024 backfills one immutable version and preserves proof metadata
   `);
 
   database.exec(migration024);
+  database.exec(`
+    DROP INDEX IF EXISTS idx_payroll_payment_attempts_one_draft;
+  `);
   database.exec(migration024);
+
+  assert.equal(database.prepare(`
+    SELECT COUNT(*) AS total FROM sqlite_master
+    WHERE type = 'index'
+      AND name = 'idx_payroll_payment_attempts_one_draft'
+  `).get().total, 1);
 
   assert.deepEqual(
     { ...database.prepare(`

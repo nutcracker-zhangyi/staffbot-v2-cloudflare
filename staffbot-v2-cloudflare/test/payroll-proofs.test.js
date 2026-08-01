@@ -71,7 +71,8 @@ function proofFixture() {
       '2026-07-16T03:00:00.000Z', '2026-07-16T03:00:00.000Z'
     );
     UPDATE payroll_disbursements
-    SET current_payment_attempt_id = 'ATTEMPT-CURRENT'
+    SET current_payment_attempt_id = 'ATTEMPT-CURRENT',
+        current_admin_id = 'ADMIN-1'
     WHERE payroll_id = 'PAYROLL-1';
   `);
   const objects = new Map();
@@ -417,6 +418,54 @@ test('reports missing active proofs for every non-zero split method', async () =
   }
 });
 
+test('Telegram completion final SQL rejects a proof race without partial state', async () => {
+  const fixture = proofFixture();
+  try {
+    fixture.database.exec(`
+      INSERT INTO payroll_payment_proofs (
+        proof_id, payroll_id, attempt_id, method, object_key,
+        telegram_file_id, mime_type, size_bytes, sort_order,
+        uploaded_by, uploaded_at
+      ) VALUES
+        ('FINAL-P1', 'PAYROLL-1', 'ATTEMPT-CURRENT', 'bank', 'final-p1', 'T1',
+         'image/jpeg', 1, 1, 'ADMIN-1', '2026-07-16T04:00:00.000Z'),
+        ('FINAL-P2', 'PAYROLL-1', 'ATTEMPT-CURRENT', 'usdt', 'final-p2', 'T2',
+         'image/jpeg', 1, 1, 'ADMIN-1', '2026-07-16T04:00:00.000Z');
+    `);
+    let removed = false;
+    fixture.env.DB = createD1(fixture.database, {
+      beforeBatchStatement(sql) {
+        if (removed || !sql.includes("SET status = 'submitted'")) return;
+        removed = true;
+        fixture.database.prepare(`
+          DELETE FROM payroll_payment_proofs WHERE proof_id = 'FINAL-P2'
+        `).run();
+      }
+    });
+
+    await assert.rejects(completePayrollProofs(
+      fixture.env,
+      'ADMIN-1',
+      'PAYROLL-1',
+      new Date('2026-07-16T05:00:00.000Z')
+    ), /payroll proof completion conflict/);
+    assert.equal(fixture.database.prepare(`
+      SELECT status FROM payroll_payment_attempts
+      WHERE attempt_id = 'ATTEMPT-CURRENT'
+    `).get().status, 'draft');
+    assert.equal(fixture.database.prepare(`
+      SELECT status FROM payroll_disbursements
+      WHERE payroll_id = 'PAYROLL-1'
+    `).get().status, 'awaiting_admin_payment');
+    assert.equal(fixture.database.prepare(`
+      SELECT COUNT(*) AS total FROM admin_audit_logs
+      WHERE action = 'complete_payroll_proofs'
+    `).get().total, 0);
+  } finally {
+    fixture.database.close();
+  }
+});
+
 test('supports attempt-scoped proof order and compatibility-null metadata', () => {
   const fixture = proofFixture();
   try {
@@ -520,6 +569,105 @@ test('deletes only the new R2 object when proof metadata insertion fails', async
     assert.equal(fixture.deleted.length, 1);
     assert.equal(fixture.objects.size, 0);
   } finally {
+    globalThis.fetch = originalFetch;
+    fixture.database.close();
+  }
+});
+
+test('Telegram upload cleans the new object when the current draft closes before metadata', async () => {
+  const fixture = proofFixture();
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (url) => {
+    if (String(url).includes('/getFile')) {
+      return {
+        async json() {
+          return { ok: true, result: { file_path: 'photos/race.jpg' } };
+        }
+      };
+    }
+    return new Response(new Uint8Array([1, 2, 3]), {
+      headers: { 'content-type': 'image/jpeg' }
+    });
+  };
+  let closed = false;
+  fixture.env.DB = createD1(fixture.database, {
+    beforeRun(sql) {
+      if (closed || !sql.includes('INSERT INTO payroll_payment_proofs')) return;
+      closed = true;
+      fixture.database.prepare(`
+        UPDATE payroll_payment_attempts SET status = 'abandoned'
+        WHERE attempt_id = 'ATTEMPT-CURRENT'
+      `).run();
+    }
+  });
+  try {
+    await assert.rejects(storeTelegramProof(
+      fixture.env,
+      'ADMIN-1',
+      'PAYROLL-1',
+      'bank',
+      [{ file_id: 'RACE-PHOTO', file_size: 3 }],
+      new Date('2026-07-16T04:00:00.000Z')
+    ), /payroll proof upload conflict/);
+    assert.equal(fixture.database.prepare(`
+      SELECT COUNT(*) AS total FROM payroll_payment_proofs
+    `).get().total, 0);
+    assert.equal(fixture.objects.size, 0);
+    assert.equal(fixture.deleted.length, 1);
+  } finally {
+    globalThis.fetch = originalFetch;
+    fixture.database.close();
+  }
+});
+
+test('Telegram upload preserves the database conflict when R2 cleanup also fails', async () => {
+  const fixture = proofFixture();
+  const originalFetch = globalThis.fetch;
+  const originalConsoleError = console.error;
+  const cleanupErrors = [];
+  globalThis.fetch = async (url) => {
+    if (String(url).includes('/getFile')) {
+      return {
+        async json() {
+          return { ok: true, result: { file_path: 'photos/race.jpg' } };
+        }
+      };
+    }
+    return new Response(new Uint8Array([1, 2, 3]), {
+      headers: { 'content-type': 'image/jpeg' }
+    });
+  };
+  fixture.env.PAYROLL_PROOFS.delete = async () => {
+    throw new Error('R2 cleanup failed');
+  };
+  console.error = (...args) => cleanupErrors.push(args);
+  let closed = false;
+  fixture.env.DB = createD1(fixture.database, {
+    beforeRun(sql) {
+      if (closed || !sql.includes('INSERT INTO payroll_payment_proofs')) return;
+      closed = true;
+      fixture.database.prepare(`
+        UPDATE payroll_payment_attempts SET status = 'abandoned'
+        WHERE attempt_id = 'ATTEMPT-CURRENT'
+      `).run();
+    }
+  });
+  try {
+    await assert.rejects(storeTelegramProof(
+      fixture.env,
+      'ADMIN-1',
+      'PAYROLL-1',
+      'bank',
+      [{ file_id: 'RACE-PHOTO', file_size: 3 }],
+      new Date('2026-07-16T04:00:00.000Z')
+    ), /payroll proof upload conflict/);
+    assert.equal(cleanupErrors.length, 1);
+    assert.equal(cleanupErrors[0][0], 'payroll proof R2 cleanup failed');
+    assert.equal(fixture.database.prepare(`
+      SELECT COUNT(*) AS total FROM payroll_payment_proofs
+    `).get().total, 0);
+  } finally {
+    console.error = originalConsoleError;
     globalThis.fetch = originalFetch;
     fixture.database.close();
   }

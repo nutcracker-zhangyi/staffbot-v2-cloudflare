@@ -511,7 +511,7 @@ test('validates exact safe-integer payment splits', () => {
   ), /not accepted/);
 });
 
-test('authorized admin saves a split and supersedes disputed proofs', async () => {
+test('authorized admin saves a new disputed split without mutating old proofs', async () => {
   const database = databaseFixture();
   try {
     database.exec(`
@@ -567,13 +567,30 @@ test('authorized admin saves a split and supersedes disputed proofs', async () =
     assert.equal(saved.bank_micros, 70_000_000);
     assert.equal(saved.cash_micros, 30_000_000);
     assert.equal(saved.payment_sent_at, null);
-    assert.equal(
-      database.prepare(`
-        SELECT superseded_at FROM payroll_payment_proofs
-        WHERE proof_id = 'OLD-PROOF'
-      `).get().superseded_at,
-      '2026-07-16T05:00:00.000Z'
-    );
+    const oldProof = database.prepare(`
+      SELECT
+        proof_id, payroll_id, method, object_key,
+        telegram_file_id, mime_type, size_bytes, sort_order,
+        uploaded_by, superseded_at, uploaded_at
+      FROM payroll_payment_proofs WHERE proof_id = 'OLD-PROOF'
+    `).get();
+    assert.deepEqual({ ...oldProof }, {
+      proof_id: 'OLD-PROOF',
+      payroll_id: 'PAYROLL-1',
+      method: 'bank',
+      object_key: 'payroll/old.jpg',
+      telegram_file_id: 'TG-OLD',
+      mime_type: 'image/jpeg',
+      size_bytes: 10,
+      sort_order: 1,
+      uploaded_by: 'ADMIN-1',
+      superseded_at: null,
+      uploaded_at: '2026-07-16T04:00:00.000Z'
+    });
+    assert.ok(database.prepare(`
+      SELECT attempt_id FROM payroll_payment_proofs
+      WHERE proof_id = 'OLD-PROOF'
+    `).get().attempt_id);
   } finally {
     database.close();
   }

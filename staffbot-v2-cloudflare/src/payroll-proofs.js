@@ -48,6 +48,9 @@ async function proofPayroll(env, adminId, payrollId, method) {
   if (payroll.status !== 'awaiting_admin_payment') {
     throw new Error('payroll is not accepting proofs');
   }
+  if (String(payroll.current_admin_id || '') !== String(adminId)) {
+    throw new Error('payroll payment attempt owner conflict');
+  }
   if (!['bank', 'usdt', 'cash'].includes(method)
     || Number(payroll[`${method}_micros`]) <= 0) {
     throw new Error('proof method has no payment');
@@ -117,36 +120,56 @@ export async function storeTelegramProof(
   });
   if (!stored) throw new Error('payroll proof object already exists');
 
-  const orderRow = await env.DB.prepare(`
-    SELECT COALESCE(MAX(sort_order), 0) + 1 AS next_order
-    FROM payroll_payment_proofs
-    WHERE attempt_id = ? AND method = ?
-  `).bind(payroll.current_payment_attempt_id, method).first();
-  const sortOrder = Number(orderRow && orderRow.next_order || 1);
   const uploadedAt = now.toISOString();
   try {
-    await env.DB.prepare(`
+    const inserted = await env.DB.prepare(`
       INSERT INTO payroll_payment_proofs (
         proof_id, payroll_id, attempt_id, method, object_key,
         telegram_file_id, file_name, mime_type,
         size_bytes, sort_order, uploaded_by, uploaded_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      )
+      SELECT
+        ?, d.payroll_id, a.attempt_id, ?, ?, ?, ?, ?, ?,
+        COALESCE((
+          SELECT MAX(sort_order) + 1
+          FROM payroll_payment_proofs
+          WHERE attempt_id = a.attempt_id AND method = ?
+        ), 1),
+        ?, ?
+      FROM payroll_disbursements d
+      JOIN payroll_payment_attempts a
+        ON a.attempt_id = d.current_payment_attempt_id
+       AND a.payroll_id = d.payroll_id
+      WHERE d.payroll_id = ?
+        AND d.store_id = ?
+        AND d.status = 'awaiting_admin_payment'
+        AND d.current_admin_id = ?
+        AND a.status = 'draft'
+        AND a.${method}_micros > 0
     `).bind(
       proofId,
-      payroll.payroll_id,
-      payroll.current_payment_attempt_id,
       method,
       key,
       image.telegram_file_id,
       image.file_name,
       image.mime_type,
       image.size_bytes,
-      sortOrder,
+      method,
       String(adminId),
-      uploadedAt
+      uploadedAt,
+      payroll.payroll_id,
+      payroll.store_id,
+      String(adminId)
     ).run();
+    if (Number(inserted && inserted.meta.changes) !== 1) {
+      throw new Error('payroll proof upload conflict');
+    }
   } catch (error) {
-    await env.PAYROLL_PROOFS.delete(key);
+    try {
+      await env.PAYROLL_PROOFS.delete(key);
+    } catch (cleanupError) {
+      console.error('payroll proof R2 cleanup failed', cleanupError);
+    }
     throw error;
   }
   return env.DB.prepare(`
@@ -219,31 +242,108 @@ export async function completePayrollProofs(
       SET status = 'submitted', submitted_by = ?, submitted_at = ?,
           updated_at = ?
       WHERE attempt_id = ? AND payroll_id = ? AND status = 'draft'
+        AND EXISTS (
+          SELECT 1 FROM payroll_disbursements d
+          WHERE d.payroll_id = payroll_payment_attempts.payroll_id
+            AND d.current_payment_attempt_id = payroll_payment_attempts.attempt_id
+            AND d.current_admin_id = ?
+            AND d.status = 'awaiting_admin_payment'
+            AND payroll_payment_attempts.bank_micros
+              + payroll_payment_attempts.usdt_micros
+              + payroll_payment_attempts.cash_micros
+              = d.amount_snapshot_micros
+            AND (
+              payroll_payment_attempts.bank_micros = 0
+              OR d.accepts_bank = 1
+            )
+            AND (
+              payroll_payment_attempts.usdt_micros = 0
+              OR d.accepts_usdt = 1
+            )
+            AND (
+              payroll_payment_attempts.cash_micros = 0
+              OR d.accepts_cash = 1
+            )
+            AND (
+              payroll_payment_attempts.bank_micros = 0
+              OR EXISTS (
+                SELECT 1 FROM payroll_payment_proofs p
+                WHERE p.attempt_id = payroll_payment_attempts.attempt_id
+                  AND p.method = 'bank' AND p.superseded_at IS NULL
+              )
+            )
+            AND (
+              payroll_payment_attempts.usdt_micros = 0
+              OR EXISTS (
+                SELECT 1 FROM payroll_payment_proofs p
+                WHERE p.attempt_id = payroll_payment_attempts.attempt_id
+                  AND p.method = 'usdt' AND p.superseded_at IS NULL
+              )
+            )
+            AND (
+              payroll_payment_attempts.cash_micros = 0
+              OR EXISTS (
+                SELECT 1 FROM payroll_payment_proofs p
+                WHERE p.attempt_id = payroll_payment_attempts.attempt_id
+                  AND p.method = 'cash' AND p.superseded_at IS NULL
+              )
+            )
+        )
     `).bind(
       String(adminId),
       nowIso,
       nowIso,
       payroll.current_payment_attempt_id,
-      payroll.payroll_id
+      payroll.payroll_id,
+      String(adminId)
     ),
     env.DB.prepare(`
       UPDATE payroll_disbursements
-      SET status = 'awaiting_employee_confirmation',
+      SET bank_micros = (
+            SELECT bank_micros FROM payroll_payment_attempts
+            WHERE attempt_id = ? AND status = 'submitted'
+              AND submitted_by = ? AND submitted_at = ?
+          ),
+          usdt_micros = (
+            SELECT usdt_micros FROM payroll_payment_attempts
+            WHERE attempt_id = ? AND status = 'submitted'
+              AND submitted_by = ? AND submitted_at = ?
+          ),
+          cash_micros = (
+            SELECT cash_micros FROM payroll_payment_attempts
+            WHERE attempt_id = ? AND status = 'submitted'
+              AND submitted_by = ? AND submitted_at = ?
+          ),
+          status = 'awaiting_employee_confirmation',
           current_admin_id = ?,
           updated_at = ?
       WHERE payroll_id = ?
         AND status = 'awaiting_admin_payment'
         AND current_payment_attempt_id = ?
+        AND current_admin_id = ?
         AND EXISTS (
           SELECT 1 FROM payroll_payment_attempts
           WHERE attempt_id = ? AND status = 'submitted'
+            AND submitted_by = ? AND submitted_at = ?
         )
     `).bind(
+      payroll.current_payment_attempt_id,
+      String(adminId),
+      nowIso,
+      payroll.current_payment_attempt_id,
+      String(adminId),
+      nowIso,
+      payroll.current_payment_attempt_id,
+      String(adminId),
+      nowIso,
       String(adminId),
       nowIso,
       payroll.payroll_id,
       payroll.current_payment_attempt_id,
-      payroll.current_payment_attempt_id
+      String(adminId),
+      payroll.current_payment_attempt_id,
+      String(adminId),
+      nowIso
     ),
     env.DB.prepare(`
       INSERT INTO admin_audit_logs (

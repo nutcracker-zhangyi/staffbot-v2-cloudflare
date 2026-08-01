@@ -346,6 +346,10 @@ CREATE INDEX IF NOT EXISTS idx_payroll_payment_attempts_payroll_version
 CREATE INDEX IF NOT EXISTS idx_payroll_payment_attempts_status_updated
   ON payroll_payment_attempts (status, updated_at);
 
+CREATE UNIQUE INDEX IF NOT EXISTS idx_payroll_payment_attempts_one_draft
+  ON payroll_payment_attempts (payroll_id)
+  WHERE status = 'draft';
+
 CREATE UNIQUE INDEX IF NOT EXISTS idx_payroll_payment_attempts_idempotency
   ON payroll_payment_attempts (payroll_id, idempotency_key_hash)
   WHERE idempotency_key_hash IS NOT NULL;
