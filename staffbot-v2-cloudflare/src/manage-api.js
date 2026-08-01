@@ -18,9 +18,16 @@ import { json, readJson } from './http.js';
 import {
   listManageStores,
   listManageTasks,
+  listManagePayroll,
+  loadPayrollDossier,
   manageApprovalDetail,
   manageTaskDetail
 } from './manage-read-model.js';
+import {
+  createOrResumeDraftAttempt,
+  saveAttemptSplit
+} from './payroll-payment-attempts.js';
+import { readPayrollPaymentQr } from './payroll-payment-qr.js';
 import { isGlobalAdmin } from './security.js';
 import { isStoreAdmin } from './stores.js';
 import {
@@ -72,6 +79,19 @@ export async function handleManageApi(request, env, url, ctx) {
     }
 
     const parts = url.pathname.split('/').filter(Boolean);
+    if (
+      parts[0] === 'api'
+      && parts[1] === 'manage'
+      && parts[2] === 'stores'
+      && parts[4] === 'payroll'
+    ) {
+      return await handleManagePayroll(
+        request,
+        env,
+        session,
+        parts.map((part) => decodeURIComponent(part))
+      );
+    }
     if (
       parts[0] === 'api'
       && parts[1] === 'manage'
@@ -137,6 +157,112 @@ export async function handleManageApi(request, env, url, ctx) {
     }
     throw error;
   }
+}
+
+async function handleManagePayroll(request, env, session, parts) {
+  const storeId = parts[3];
+  if (!await isStoreAdmin(env, session.telegram_id, storeId)) {
+    return json({ ok: false, error: 'forbidden' }, 403);
+  }
+  if (request.method === 'GET' && parts.length === 5) {
+    return json({
+      ok: true,
+      payroll: await listManagePayroll(env, session.telegram_id, storeId)
+    });
+  }
+
+  const payrollId = parts[5] || '';
+  if (!payrollId) return json({ ok: false, error: 'not_found' }, 404);
+  const dossier = await loadPayrollDossier(
+    env,
+    session.telegram_id,
+    storeId,
+    payrollId
+  );
+  if (!dossier) return json({ ok: false, error: 'not_found' }, 404);
+
+  if (request.method === 'GET' && parts.length === 6) {
+    return json(dossier);
+  }
+  if (
+    request.method === 'GET'
+    && parts.length === 7
+    && parts[6] === 'usdt-qr'
+  ) {
+    return readPayrollPaymentQr(
+      env,
+      { telegram_id: session.telegram_id, store_id: storeId },
+      payrollId
+    );
+  }
+  if (
+    request.method === 'POST'
+    && parts.length === 8
+    && parts[6] === 'attempts'
+    && parts[7] === 'draft'
+  ) {
+    try {
+      const attempt = await createOrResumeDraftAttempt(
+        env,
+        session.telegram_id,
+        payrollId,
+        new Date()
+      );
+      return json({ ok: true, attempt });
+    } catch (error) {
+      return managePayrollError(error);
+    }
+  }
+  if (
+    request.method === 'PUT'
+    && parts.length === 9
+    && parts[6] === 'attempts'
+    && parts[8] === 'split'
+  ) {
+    const attemptId = parts[7];
+    const belongs = dossier.attempts.some(
+      (attempt) => attempt.attempt_id === attemptId
+    );
+    if (!belongs) return json({ ok: false, error: 'not_found' }, 404);
+    const body = await readJson(request);
+    try {
+      const attempt = await saveAttemptSplit(
+        env,
+        session.telegram_id,
+        attemptId,
+        {
+          bank_micros: body.bank_micros,
+          usdt_micros: body.usdt_micros,
+          cash_micros: body.cash_micros
+        },
+        new Date()
+      );
+      return json({ ok: true, attempt });
+    } catch (error) {
+      return managePayrollError(error);
+    }
+  }
+  return json({ ok: false, error: 'not_found' }, 404);
+}
+
+function managePayrollError(error) {
+  const message = String(error && error.message || '');
+  if (error instanceof RangeError || error instanceof TypeError) {
+    return json({ ok: false, error: 'invalid_payroll_split' }, 400);
+  }
+  if (message.includes('not found')) {
+    return json({ ok: false, error: 'not_found' }, 404);
+  }
+  if (message.includes('permission') || message === 'forbidden') {
+    return json({ ok: false, error: 'forbidden' }, 403);
+  }
+  if (message === 'task_claim_required' || message.includes('conflict')) {
+    return json({ ok: false, error: message }, 409);
+  }
+  if (message.includes('not accepting')) {
+    return json({ ok: false, error: 'invalid_payroll_state' }, 409);
+  }
+  throw error;
 }
 
 async function handleManageApproval(request, env, session, parts) {

@@ -12,6 +12,7 @@ export * from './payroll-cycle.js';
 export * from './payroll-ledger.js';
 export * from './payroll-email.js';
 export * from './payroll-notifications.js';
+export * from './payroll-payment-attempts.js';
 export * from './payroll-payments.js';
 export * from './payroll-proofs.js';
 export * from './payroll-settlement.js';

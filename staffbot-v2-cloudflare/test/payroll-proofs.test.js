@@ -62,6 +62,17 @@ function proofFixture() {
       '2026-07-16T03:00:00.000Z',
       '2026-07-16T03:00:00.000Z'
     );
+    INSERT INTO payroll_payment_attempts (
+      attempt_id, payroll_id, version, status,
+      bank_micros, usdt_micros, cash_micros, created_at, updated_at
+    ) VALUES (
+      'ATTEMPT-CURRENT', 'PAYROLL-1', 1, 'draft',
+      70000000, 30000000, 0,
+      '2026-07-16T03:00:00.000Z', '2026-07-16T03:00:00.000Z'
+    );
+    UPDATE payroll_disbursements
+    SET current_payment_attempt_id = 'ATTEMPT-CURRENT'
+    WHERE payroll_id = 'PAYROLL-1';
   `);
   const objects = new Map();
   const deleted = [];
@@ -162,6 +173,7 @@ test('downloads the largest Telegram photo and stores object before metadata', a
     );
 
     assert.equal(proof.telegram_file_id, 'LARGE');
+    assert.equal(proof.attempt_id, 'ATTEMPT-CURRENT');
     assert.equal(proof.mime_type, 'image/jpeg');
     assert.equal(proof.size_bytes, 4);
     assert.equal(fixture.objects.size, 1);
@@ -368,12 +380,12 @@ test('reports missing active proofs for every non-zero split method', async () =
     );
     fixture.database.exec(`
       INSERT INTO payroll_payment_proofs (
-        proof_id, payroll_id, method, object_key, telegram_file_id,
+        proof_id, payroll_id, attempt_id, method, object_key, telegram_file_id,
         mime_type, size_bytes, sort_order, uploaded_by, uploaded_at
       ) VALUES
-        ('P1', 'PAYROLL-1', 'bank', 'p1', 'T1',
+        ('P1', 'PAYROLL-1', 'ATTEMPT-CURRENT', 'bank', 'p1', 'T1',
          'image/jpeg', 1, 1, 'ADMIN-1', '2026-07-16T04:00:00.000Z'),
-        ('P2', 'PAYROLL-1', 'usdt', 'p2', 'T2',
+        ('P2', 'PAYROLL-1', 'ATTEMPT-CURRENT', 'usdt', 'p2', 'T2',
          'image/jpeg', 1, 1, 'ADMIN-1', '2026-07-16T04:00:00.000Z');
     `);
     assert.deepEqual(
@@ -393,6 +405,13 @@ test('reports missing active proofs for every non-zero split method', async () =
       completed.status,
       'awaiting_employee_confirmation'
     );
+    assert.equal(
+      fixture.database.prepare(`
+        SELECT status FROM payroll_payment_attempts
+        WHERE attempt_id = 'ATTEMPT-CURRENT'
+      `).get().status,
+      'submitted'
+    );
   } finally {
     fixture.database.close();
   }
@@ -402,6 +421,8 @@ test('supports attempt-scoped proof order and compatibility-null metadata', () =
   const fixture = proofFixture();
   try {
     fixture.database.exec(`
+      UPDATE payroll_disbursements SET current_payment_attempt_id = NULL;
+      DELETE FROM payroll_payment_attempts;
       INSERT INTO payroll_payment_attempts (
         attempt_id, payroll_id, version, status,
         bank_micros, created_at, updated_at

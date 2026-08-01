@@ -52,6 +52,17 @@ async function proofPayroll(env, adminId, payrollId, method) {
     || Number(payroll[`${method}_micros`]) <= 0) {
     throw new Error('proof method has no payment');
   }
+  if (!payroll.current_payment_attempt_id) {
+    throw new Error('payroll payment attempt is required');
+  }
+  const attempt = await env.DB.prepare(`
+    SELECT attempt_id FROM payroll_payment_attempts
+    WHERE attempt_id = ? AND payroll_id = ? AND status = 'draft'
+  `).bind(
+    payroll.current_payment_attempt_id,
+    payroll.payroll_id
+  ).first();
+  if (!attempt) throw new Error('payroll payment attempt is required');
   return payroll;
 }
 
@@ -109,20 +120,21 @@ export async function storeTelegramProof(
   const orderRow = await env.DB.prepare(`
     SELECT COALESCE(MAX(sort_order), 0) + 1 AS next_order
     FROM payroll_payment_proofs
-    WHERE payroll_id = ? AND method = ?
-  `).bind(payroll.payroll_id, method).first();
+    WHERE attempt_id = ? AND method = ?
+  `).bind(payroll.current_payment_attempt_id, method).first();
   const sortOrder = Number(orderRow && orderRow.next_order || 1);
   const uploadedAt = now.toISOString();
   try {
     await env.DB.prepare(`
       INSERT INTO payroll_payment_proofs (
-        proof_id, payroll_id, method, object_key,
+        proof_id, payroll_id, attempt_id, method, object_key,
         telegram_file_id, file_name, mime_type,
         size_bytes, sort_order, uploaded_by, uploaded_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).bind(
       proofId,
       payroll.payroll_id,
+      payroll.current_payment_attempt_id,
       method,
       key,
       image.telegram_file_id,
@@ -145,18 +157,24 @@ export async function storeTelegramProof(
 
 export async function proofCompletion(env, payrollId) {
   const payroll = await env.DB.prepare(`
-    SELECT bank_micros, usdt_micros, cash_micros
-    FROM payroll_disbursements
-    WHERE payroll_id = ?
+    SELECT
+      d.current_payment_attempt_id,
+      a.bank_micros, a.usdt_micros, a.cash_micros
+    FROM payroll_disbursements d
+    JOIN payroll_payment_attempts a
+      ON a.attempt_id = d.current_payment_attempt_id
+     AND a.payroll_id = d.payroll_id
+     AND a.status = 'draft'
+    WHERE d.payroll_id = ?
   `).bind(payrollId).first();
   if (!payroll) throw new Error('payroll not found');
   const rows = await env.DB.prepare(`
     SELECT method, COUNT(*) AS proof_count
     FROM payroll_payment_proofs
-    WHERE payroll_id = ?
+    WHERE attempt_id = ?
       AND superseded_at IS NULL
     GROUP BY method
-  `).bind(payrollId).all();
+  `).bind(payroll.current_payment_attempt_id).all();
   const counts = new Map(
     (rows.results || []).map((row) => [
       row.method,
@@ -197,13 +215,36 @@ export async function completePayrollProofs(
   const nowIso = now.toISOString();
   const results = await env.DB.batch([
     env.DB.prepare(`
+      UPDATE payroll_payment_attempts
+      SET status = 'submitted', submitted_by = ?, submitted_at = ?,
+          updated_at = ?
+      WHERE attempt_id = ? AND payroll_id = ? AND status = 'draft'
+    `).bind(
+      String(adminId),
+      nowIso,
+      nowIso,
+      payroll.current_payment_attempt_id,
+      payroll.payroll_id
+    ),
+    env.DB.prepare(`
       UPDATE payroll_disbursements
       SET status = 'awaiting_employee_confirmation',
           current_admin_id = ?,
           updated_at = ?
       WHERE payroll_id = ?
         AND status = 'awaiting_admin_payment'
-    `).bind(String(adminId), nowIso, payroll.payroll_id),
+        AND current_payment_attempt_id = ?
+        AND EXISTS (
+          SELECT 1 FROM payroll_payment_attempts
+          WHERE attempt_id = ? AND status = 'submitted'
+        )
+    `).bind(
+      String(adminId),
+      nowIso,
+      payroll.payroll_id,
+      payroll.current_payment_attempt_id,
+      payroll.current_payment_attempt_id
+    ),
     env.DB.prepare(`
       INSERT INTO admin_audit_logs (
         store_id, admin_id, action, target_id,
@@ -230,7 +271,8 @@ export async function completePayrollProofs(
       nowIso
     )
   ]);
-  if (Number(results[0] && results[0].meta.changes) !== 1) {
+  if (Number(results[0] && results[0].meta.changes) !== 1
+    || Number(results[1] && results[1].meta.changes) !== 1) {
     throw new Error('payroll proof completion conflict');
   }
   return env.DB.prepare(`

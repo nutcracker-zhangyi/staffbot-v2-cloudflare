@@ -1,5 +1,6 @@
 import { isGlobalAdmin } from './security.js';
 import { isStoreAdmin } from './stores.js';
+import { maskPaymentValue } from './payroll-payments.js';
 
 const TASK_TYPES = ['payroll', 'absence', 'leave', 'advance', 'income'];
 
@@ -52,6 +53,194 @@ export async function listManageTasks(env, adminId, filters = {}, now = new Date
     if (left.task_id === right.task_id) return 0;
     return left.task_id < right.task_id ? -1 : 1;
   });
+}
+
+export async function listManagePayroll(env, adminId, storeId) {
+  const expectedStoreId = String(storeId || '');
+  if (!expectedStoreId || !await isStoreAdmin(env, adminId, expectedStoreId)) {
+    throw new Error('forbidden');
+  }
+  const rows = await env.DB.prepare(`
+    SELECT
+      d.payroll_id, d.store_id, d.telegram_id AS employee_id,
+      COALESCE(
+        NULLIF(m.display_name, ''),
+        NULLIF(u.name, ''),
+        NULLIF(u.username, ''),
+        d.telegram_id
+      ) AS employee_name,
+      d.period_start, d.cutoff_at, d.amount_snapshot_micros,
+      d.currency, d.status, d.current_payment_attempt_id,
+      a.version AS current_attempt_version,
+      a.status AS current_attempt_status,
+      c.claimed_by, c.claimed_at, c.lease_expires_at
+    FROM payroll_disbursements d
+    LEFT JOIN store_members m
+      ON m.store_id = d.store_id AND m.telegram_id = d.telegram_id
+    LEFT JOIN users u ON u.telegram_id = d.telegram_id
+    LEFT JOIN payroll_payment_attempts a
+      ON a.attempt_id = d.current_payment_attempt_id
+    LEFT JOIN admin_task_claims c
+      ON c.task_type = 'payroll'
+     AND c.task_id = d.payroll_id
+     AND c.store_id = d.store_id
+    WHERE d.store_id = ?
+    ORDER BY d.cutoff_at DESC, d.payroll_id DESC
+  `).bind(expectedStoreId).all();
+  return (rows.results || []).map((row) => ({
+    payroll_id: String(row.payroll_id),
+    store_id: String(row.store_id),
+    employee_id: String(row.employee_id),
+    employee_name: String(row.employee_name),
+    period_start: String(row.period_start),
+    cutoff_at: String(row.cutoff_at),
+    amount_snapshot_micros: Number(row.amount_snapshot_micros),
+    currency: String(row.currency),
+    status: String(row.status),
+    current_attempt: row.current_payment_attempt_id ? {
+      attempt_id: String(row.current_payment_attempt_id),
+      version: Number(row.current_attempt_version),
+      status: String(row.current_attempt_status)
+    } : null,
+    claim: claimFromRow(row)
+  }));
+}
+
+export async function loadPayrollDossier(env, adminId, storeId, payrollId) {
+  const expectedStoreId = String(storeId || '');
+  if (!expectedStoreId || !await isStoreAdmin(env, adminId, expectedStoreId)) {
+    throw new Error('forbidden');
+  }
+  const payroll = await env.DB.prepare(`
+    SELECT
+      d.*,
+      COALESCE(
+        NULLIF(m.display_name, ''),
+        NULLIF(u.name, ''),
+        NULLIF(u.username, ''),
+        d.telegram_id
+      ) AS employee_name,
+      CASE WHEN q.qr_id IS NULL THEN 0 ELSE 1 END AS has_usdt_qr,
+      c.claimed_by, c.claimed_at, c.lease_expires_at
+    FROM payroll_disbursements d
+    LEFT JOIN store_members m
+      ON m.store_id = d.store_id AND m.telegram_id = d.telegram_id
+    LEFT JOIN users u ON u.telegram_id = d.telegram_id
+    LEFT JOIN payroll_payment_qr_codes q
+      ON q.qr_id = d.usdt_qr_id_snapshot
+     AND q.store_id = d.store_id
+     AND q.telegram_id = d.telegram_id
+    LEFT JOIN admin_task_claims c
+      ON c.task_type = 'payroll'
+     AND c.task_id = d.payroll_id
+     AND c.store_id = d.store_id
+    WHERE d.store_id = ? AND d.payroll_id = ?
+  `).bind(expectedStoreId, String(payrollId || '')).first();
+  if (!payroll) return null;
+
+  const [attemptRows, proofRows, historyRows] = await Promise.all([
+    env.DB.prepare(`
+      SELECT * FROM payroll_payment_attempts
+      WHERE payroll_id = ? ORDER BY version DESC
+    `).bind(payroll.payroll_id).all(),
+    env.DB.prepare(`
+      SELECT
+        proof_id, attempt_id, method, mime_type, size_bytes,
+        uploaded_by, uploaded_at, superseded_at
+      FROM payroll_payment_proofs
+      WHERE payroll_id = ?
+      ORDER BY attempt_id, method, sort_order, proof_id
+    `).bind(payroll.payroll_id).all(),
+    env.DB.prepare(`
+      SELECT id, admin_id, action, details_json, created_at
+      FROM admin_audit_logs
+      WHERE store_id = ? AND target_id = ?
+      ORDER BY id
+    `).bind(expectedStoreId, payroll.payroll_id).all()
+  ]);
+  const proofsByAttempt = new Map();
+  for (const row of proofRows.results || []) {
+    const key = row.attempt_id ? String(row.attempt_id) : '';
+    if (!proofsByAttempt.has(key)) proofsByAttempt.set(key, []);
+    proofsByAttempt.get(key).push({
+      proof_id: String(row.proof_id),
+      method: String(row.method),
+      mime_type: String(row.mime_type),
+      size_bytes: Number(row.size_bytes),
+      uploaded_by: String(row.uploaded_by),
+      uploaded_at: String(row.uploaded_at),
+      superseded_at: row.superseded_at ? String(row.superseded_at) : null,
+      url: [
+        '/api/manage/stores',
+        encodeURIComponent(expectedStoreId),
+        'payroll',
+        'proofs',
+        encodeURIComponent(String(row.proof_id))
+      ].join('/')
+    });
+  }
+  const hasUsdtQr = Number(payroll.has_usdt_qr) === 1;
+  return {
+    payroll: {
+      payroll_id: String(payroll.payroll_id),
+      store_id: String(payroll.store_id),
+      employee_id: String(payroll.telegram_id),
+      employee_name: String(payroll.employee_name),
+      period_start: String(payroll.period_start),
+      cutoff_at: String(payroll.cutoff_at),
+      amount_snapshot_micros: Number(payroll.amount_snapshot_micros),
+      currency: String(payroll.currency),
+      status: String(payroll.status),
+      payment_profile: {
+        accepts_bank: Number(payroll.accepts_bank) === 1,
+        accepts_usdt: Number(payroll.accepts_usdt) === 1,
+        accepts_cash: Number(payroll.accepts_cash) === 1,
+        bank: maskPaymentValue(payroll.bank_details_snapshot),
+        usdt: maskPaymentValue(payroll.usdt_details_snapshot),
+        has_usdt_qr: hasUsdtQr,
+        usdt_qr_url: hasUsdtQr ? [
+          '/api/manage/stores',
+          encodeURIComponent(expectedStoreId),
+          'payroll',
+          encodeURIComponent(String(payroll.payroll_id)),
+          'usdt-qr'
+        ].join('/') : null
+      },
+      claim: claimFromRow(payroll)
+    },
+    attempts: (attemptRows.results || []).map((row) => ({
+      attempt_id: String(row.attempt_id),
+      version: Number(row.version),
+      status: String(row.status),
+      bank_micros: Number(row.bank_micros),
+      usdt_micros: Number(row.usdt_micros),
+      cash_micros: Number(row.cash_micros),
+      submitted_by: row.submitted_by ? String(row.submitted_by) : null,
+      submitted_at: row.submitted_at ? String(row.submitted_at) : null,
+      employee_response: row.employee_response
+        ? String(row.employee_response)
+        : null,
+      employee_responded_at: row.employee_responded_at
+        ? String(row.employee_responded_at)
+        : null,
+      proofs: proofsByAttempt.get(String(row.attempt_id)) || []
+    })),
+    history: (historyRows.results || []).map((row) => ({
+      id: Number(row.id),
+      admin_id: String(row.admin_id),
+      action: String(row.action),
+      details: parseDetails(row.details_json),
+      created_at: String(row.created_at)
+    }))
+  };
+}
+
+function claimFromRow(row) {
+  return row.claimed_by ? {
+    claimed_by: String(row.claimed_by),
+    claimed_at: String(row.claimed_at),
+    lease_expires_at: String(row.lease_expires_at)
+  } : null;
 }
 
 export async function manageTaskDetail(env, adminId, task) {
