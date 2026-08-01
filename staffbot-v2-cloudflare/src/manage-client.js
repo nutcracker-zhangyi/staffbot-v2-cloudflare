@@ -14,7 +14,10 @@ const state = {
   decisionMode: '',
   message: '',
   requestGeneration: 0,
-  mutationBusy: false
+  taskListGeneration: 0,
+  mutationBusy: false,
+  authorityStale: false,
+  renewRetry: null
 };
 
 const approvalTypes = new Set(['income', 'leave', 'absence', 'advance']);
@@ -119,7 +122,10 @@ function resetAuthenticatedState() {
   state.online = navigator.onLine;
   state.decisionMode = '';
   state.message = '';
+  state.taskListGeneration = 0;
   state.mutationBusy = false;
+  state.authorityStale = false;
+  state.renewRetry = null;
 }
 
 function shell(content) {
@@ -147,6 +153,8 @@ function shell(content) {
       state.currentTask = null;
       state.decisionMode = '';
       state.message = '';
+      state.authorityStale = false;
+      state.renewRetry = null;
       stopClaimTimer();
       renderCurrent();
     };
@@ -299,7 +307,7 @@ function renderTaskDetail() {
   const claim = task.claim;
   const owned = ownsActiveClaim(task);
   const pending = task.status === 'pending';
-  const canDecide = owned && pending && !state.mutationBusy;
+  const canDecide = owned && pending && !state.mutationBusy && !state.authorityStale;
   const handler = claimIsActive(claim)
     ? '当前处理人：' + escapeHtml(claim.claimed_by)
     : '当前未领取';
@@ -318,9 +326,11 @@ function renderTaskDetail() {
   }
   const claimAction = !pending ? '' : owned
     ? '<button id="release" class="secondary" type="button"'
-      + disabled(!state.online || state.mutationBusy) + '>释放</button>'
+      + disabled(!state.online || state.mutationBusy || state.authorityStale) + '>释放</button>'
     : '<button id="claim" type="button"'
-      + disabled(!state.online || state.mutationBusy || claimIsActive(claim)) + '>领取</button>';
+      + disabled(
+        !state.online || state.mutationBusy || state.authorityStale || claimIsActive(claim)
+      ) + '>领取</button>';
   const requestFacts = Object.entries(detail.request || {}).map(([key, value]) => (
     '<div><dt>' + escapeHtml(factLabel(key)) + '</dt><dd>' + escapeHtml(factValue(key, value)) + '</dd></div>'
   )).join('');
@@ -352,6 +362,8 @@ function renderTaskDetail() {
     state.currentTask = null;
     state.decisionMode = '';
     state.message = '';
+    state.authorityStale = false;
+    state.renewRetry = null;
     stopClaimTimer();
     renderCurrent();
   };
@@ -456,8 +468,15 @@ function taskQueryPath() {
 }
 
 async function loadTasks({ render = true, generation = state.requestGeneration } = {}) {
-  const result = await api(taskQueryPath());
-  if (!requestIsCurrent(generation)) return state.tasks;
+  const queryPath = taskQueryPath();
+  const listGeneration = state.taskListGeneration + 1;
+  state.taskListGeneration = listGeneration;
+  const result = await api(queryPath);
+  if (
+    !requestIsCurrent(generation)
+    || listGeneration !== state.taskListGeneration
+    || queryPath !== taskQueryPath()
+  ) return state.tasks;
   state.tasks = result.tasks || [];
   if (render) renderCurrent();
   return state.tasks;
@@ -474,6 +493,8 @@ async function openTask(type, id) {
   const generation = state.requestGeneration + 1;
   state.requestGeneration = generation;
   state.mutationBusy = false;
+  state.authorityStale = false;
+  state.renewRetry = null;
   const key = type + ':' + id;
   try {
     const detail = await api('/api/manage/stores/'
@@ -498,7 +519,12 @@ async function openTask(type, id) {
 }
 
 async function mutateClaim(action) {
-  if (!state.currentTask || !state.online || state.mutationBusy) return;
+  if (
+    !state.currentTask
+    || !state.online
+    || state.mutationBusy
+    || state.authorityStale
+  ) return;
   const task = state.currentTask.task;
   const generation = state.requestGeneration;
   const key = currentTaskKey();
@@ -510,6 +536,7 @@ async function mutateClaim(action) {
       + encodeURIComponent(task.task_id) + '/' + action, { method: 'POST' });
     if (!requestIsCurrent(generation, key)) return null;
     task.claim = result.claim;
+    state.renewRetry = null;
     state.message = action === 'release'
       ? '任务已释放'
       : action === 'renew' ? '领取状态已续期' : '任务已领取';
@@ -517,9 +544,14 @@ async function mutateClaim(action) {
   } catch (error) {
     if (!requestIsCurrent(generation, key)) return null;
     if (error.status === 409) {
-      await refreshCurrentTask('任务状态已更新', generation, key);
+      try {
+        await refreshCurrentTask('任务状态已更新', generation, key);
+      } catch {
+        if (requestIsCurrent(generation, key)) markAuthorityStale();
+      }
       return null;
     }
+    if (action === 'renew') recordRenewFailure(key, task.claim);
     state.message = '操作失败，请稍后重试';
     return null;
   } finally {
@@ -547,6 +579,7 @@ async function submitApproval(decision) {
     !state.currentTask
     || !ownsActiveClaim(state.currentTask.task)
     || state.mutationBusy
+    || state.authorityStale
   ) return;
   let reason = '';
   if (decision === 'reject') {
@@ -589,7 +622,11 @@ async function submitApproval(decision) {
   } catch (error) {
     if (!requestIsCurrent(generation, key)) return;
     if (error.status === 409) {
-      await refreshCurrentTask('任务已由其他管理员处理', generation, key);
+      try {
+        await refreshCurrentTask('任务已由其他管理员处理', generation, key);
+      } catch {
+        if (requestIsCurrent(generation, key)) markAuthorityStale();
+      }
       return;
     }
     state.message = error.message === 'rejection_reason_required'
@@ -609,13 +646,24 @@ async function refreshCurrentTask(
   key = currentTaskKey()
 ) {
   const task = state.currentTask.task;
+  const queryPath = taskQueryPath();
+  const listGeneration = state.taskListGeneration + 1;
+  state.taskListGeneration = listGeneration;
   const [detail, tasks] = await Promise.all([
     api('/api/manage/stores/'
       + encodeURIComponent(task.store_id) + '/approvals/'
       + encodeURIComponent(task.task_type) + '/' + encodeURIComponent(task.task_id)),
-    api(taskQueryPath())
+    api(queryPath)
   ]);
-  if (!requestIsCurrent(generation, key)) return;
+  if (
+    !requestIsCurrent(generation, key)
+    || listGeneration !== state.taskListGeneration
+    || queryPath !== taskQueryPath()
+  ) return;
+  if (
+    !detail.task
+    || detail.task.task_type + ':' + detail.task.task_id !== key
+  ) throw new Error('invalid_task_detail');
   state.currentTask = detail;
   state.tasks = tasks.tasks || [];
   state.decisionMode = '';
@@ -623,17 +671,54 @@ async function refreshCurrentTask(
   renderTaskDetail();
 }
 
+function markAuthorityStale() {
+  state.authorityStale = true;
+  state.mutationBusy = false;
+  state.decisionMode = '';
+  state.message = '最新状态加载失败，当前任务已锁定，请返回待办刷新';
+  stopClaimTimer();
+  renderTaskDetail();
+}
+
+function recordRenewFailure(key, claim) {
+  const prior = state.renewRetry && state.renewRetry.key === key
+    ? state.renewRetry.attempts : 0;
+  const attempts = prior + 1;
+  const delay = Math.min(30 * 1000 * (2 ** (attempts - 1)), 5 * 60 * 1000);
+  const expiry = new Date(claim.lease_expires_at).getTime();
+  state.renewRetry = {
+    key,
+    attempts,
+    nextAt: Math.min(Date.now() + delay, expiry)
+  };
+}
+
 function startClaimTimer() {
   stopClaimTimer();
   if (!state.currentTask) return;
   const task = state.currentTask.task;
   const claim = task.claim;
-  if (!claimIsActive(claim)) return;
+  if (!claimIsActive(claim) || state.authorityStale) return;
   const remaining = new Date(claim.lease_expires_at).getTime() - Date.now();
   const generation = state.requestGeneration;
   const key = currentTaskKey();
 
   if (ownsClaim(task) && state.online && !state.mutationBusy) {
+    const retry = state.renewRetry && state.renewRetry.key === key
+      ? state.renewRetry : null;
+    if (retry && retry.nextAt > Date.now()) {
+      const retryAtExpiry = retry.nextAt >= new Date(claim.lease_expires_at).getTime();
+      state.claimTimer = setTimeout(() => {
+        state.claimTimer = 0;
+        if (!requestIsCurrent(generation, key)) return;
+        if (retryAtExpiry || !claimIsActive(state.currentTask.task.claim)) {
+          renderTaskDetail();
+        } else {
+          renewCurrentClaim();
+        }
+      }, retry.nextAt - Date.now() + (retryAtExpiry ? 1 : 0));
+      return;
+    }
     if (remaining <= 5 * 60 * 1000) {
       renewCurrentClaim();
       return;

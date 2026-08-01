@@ -33,11 +33,16 @@ function fixture({
   decisionGate = null,
   claimGate = null,
   refreshFailsAfterDecision = false,
+  decisionConflictRefreshFails = false,
+  claimConflictRefreshFails = false,
+  deferRenew = false,
   detailOverrides = {}
 } = {}) {
   const requests = [];
   let currentTask = structuredClone(initialTask);
   let decisionMade = false;
+  let authorityRefreshFails = false;
+  const renewResolvers = [];
   const detail = () => ({
     task: structuredClone(currentTask),
     request: {
@@ -61,6 +66,7 @@ function fixture({
 
   return {
     requests,
+    renewResolvers,
     setTask(value) { currentTask = structuredClone(value); },
     async browser() {
       return executeManageClient(MANAGE_CLIENT, {
@@ -83,13 +89,17 @@ function fixture({
           }
           if (path.startsWith('/api/manage/tasks?')) return json({ tasks: [structuredClone(currentTask)] });
           if (path === '/api/manage/stores/STORE-1/approvals/income/INC-1') {
-            if (refreshFailsAfterDecision && decisionMade) {
+            if ((refreshFailsAfterDecision && decisionMade) || authorityRefreshFails) {
               return json({ ok: false, error: 'refresh_failed' }, 503);
             }
             return json(detail());
           }
           if (path === '/api/manage/tasks/income/INC-1/claim') {
             if (claimGate) await claimGate.promise;
+            if (claimConflictRefreshFails) {
+              authorityRefreshFails = true;
+              return json({ ok: false, error: 'task_claimed' }, 409);
+            }
             if (currentTask.claim && currentTask.claim.active && currentTask.claim.claimed_by !== 'ADMIN-1') {
               return json({ ok: false, error: 'task_claimed' }, 409);
             }
@@ -101,6 +111,9 @@ function fixture({
             return json({ ok: true, claim: structuredClone(currentTask.claim) });
           }
           if (path === '/api/manage/tasks/income/INC-1/renew') {
+            if (deferRenew) {
+              return new Promise((resolve) => renewResolvers.push(resolve));
+            }
             currentTask.claim = {
               ...currentTask.claim,
               lease_expires_at: '2099-07-29T02:15:00.000Z'
@@ -113,6 +126,10 @@ function fixture({
           }
           if (path.endsWith('/approve')) {
             if (decisionGate) await decisionGate.promise;
+            if (decisionConflictRefreshFails) {
+              authorityRefreshFails = true;
+              return json({ ok: false, error: 'already_decided' }, 409);
+            }
             currentTask.status = 'approved';
             currentTask.claim = null;
             decisionMade = true;
@@ -509,4 +526,109 @@ test('zero micros is rendered as a real amount', async () => {
   const app = fixture({ initialTask: { ...task, amount_micros: 0 } });
   const browser = await app.browser();
   assert.match(browser.document.app.textContent, /₫0/);
+});
+
+for (const conflict of ['decision', 'claim']) {
+  test(`${conflict} conflict with failed authority refresh stays locked`, async () => {
+    const app = fixture({
+      decisionConflictRefreshFails: conflict === 'decision',
+      claimConflictRefreshFails: conflict === 'claim',
+      initialTask: {
+        ...task,
+        claim: conflict === 'decision' ? {
+          claimed_by: 'ADMIN-1',
+          claimed_at: '2026-07-29T02:00:00.000Z',
+          lease_expires_at: '2099-07-29T02:15:00.000Z',
+          active: true
+        } : null
+      }
+    });
+    const browser = await app.browser();
+    await browser.clickButton('查看详情');
+    if (conflict === 'decision') {
+      await browser.clickButton('批准');
+      await browser.clickButton('确认批准');
+    } else {
+      await browser.clickButton('领取');
+    }
+
+    assert.match(browser.document.app.textContent, /最新状态加载失败/);
+    assert.equal(browser.document.getElementById('approve').disabled, true);
+    const claim = browser.document.getElementById('claim');
+    if (claim) assert.equal(claim.disabled, true);
+  });
+}
+
+test('failed short-lease renewal backs off and becomes read-only at expiry', async () => {
+  const now = '2026-07-29T02:00:00.000Z';
+  const app = fixture({
+    now,
+    deferRenew: true,
+    initialTask: {
+      ...task,
+      claim: {
+        claimed_by: 'ADMIN-1',
+        claimed_at: now,
+        lease_expires_at: '2026-07-29T02:02:00.000Z',
+        active: true
+      }
+    }
+  });
+  const browser = await app.browser();
+  await browser.clickButton('查看详情');
+  assert.equal(app.renewResolvers.length, 1);
+
+  app.renewResolvers[0](json({ ok: false, error: 'renew_failed' }, 503));
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(app.renewResolvers.length, 1);
+  await browser.advanceTimers(30 * 1000 - 1);
+  assert.equal(app.renewResolvers.length, 1);
+  await browser.advanceTimers(1);
+  assert.equal(app.renewResolvers.length, 2);
+
+  app.renewResolvers[1](json({ ok: false, error: 'renew_failed' }, 503));
+  await new Promise((resolve) => setImmediate(resolve));
+  await browser.advanceTimers(60 * 1000);
+  assert.equal(app.renewResolvers.length, 3);
+  app.renewResolvers[2](json({ ok: false, error: 'renew_failed' }, 503));
+  await new Promise((resolve) => setImmediate(resolve));
+  await browser.advanceTimers(30 * 1000 + 1);
+
+  assert.equal(app.renewResolvers.length, 3);
+  assert.equal(browser.document.getElementById('approve').disabled, true);
+});
+
+test('stale store filter results cannot replace the latest query', async () => {
+  const storeA = deferred();
+  const storeB = deferred();
+  const baseTask = { ...task, employee_name: 'Initial' };
+  const browser = await executeManageClient(MANAGE_CLIENT, {
+    async fetch(path) {
+      if (path === '/api/admin/me') return json({ ok: true });
+      if (path === '/api/manage/session') return json({ telegram_id: 'ADMIN-1', csrf_token: 'CSRF-1' });
+      if (path === '/api/manage/stores') {
+        return json({ stores: [
+          { store_id: 'STORE-A', name: 'A店' },
+          { store_id: 'STORE-B', name: 'B店' }
+        ] });
+      }
+      if (path === '/api/manage/tasks?') return json({ tasks: [baseTask] });
+      if (path === '/api/manage/tasks?store_id=STORE-A') return storeA.promise;
+      if (path === '/api/manage/tasks?store_id=STORE-B') return storeB.promise;
+      return json({ ok: false }, 404);
+    }
+  });
+
+  const filter = browser.document.getElementById('store-filter');
+  filter.value = 'STORE-A';
+  const first = filter.onchange();
+  filter.value = 'STORE-B';
+  const second = filter.onchange();
+  storeB.resolve(json({ tasks: [{ ...task, store_id: 'STORE-B', employee_name: 'Bob-B' }] }));
+  await second;
+  assert.match(browser.document.app.textContent, /Bob-B/);
+  storeA.resolve(json({ tasks: [{ ...task, store_id: 'STORE-A', employee_name: 'Alice-A' }] }));
+  await first;
+  assert.match(browser.document.app.textContent, /Bob-B/);
+  assert.doesNotMatch(browser.document.app.textContent, /Alice-A/);
 });
