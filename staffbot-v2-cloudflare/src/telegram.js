@@ -16,6 +16,10 @@ import {
   rejectSalaryRequest
 } from './approvals.js';
 import { audit, logError, logEvent, makeId, nowIso, safeJson } from './audit.js';
+import {
+  manageTaskKeyboard,
+  notifyStoreAdminsOfTask
+} from './admin-notifications.js';
 import { DEFAULT_STORE_ID } from './constants.js';
 import {
   getBusinessDate,
@@ -377,6 +381,35 @@ async function handleCallback(callback, env) {
     );
   }
 
+  const retiredAdminTask = await retiredAdminCallbackTask(
+    env,
+    userId,
+    parts
+  );
+  if (retiredAdminTask.matched) {
+    await answerCallback(
+      env,
+      callback.id,
+      '请在管理程序中处理',
+      true
+    );
+    if (!retiredAdminTask.task) return;
+    let keyboard;
+    try {
+      keyboard = manageTaskKeyboard(env, retiredAdminTask.task);
+    } catch {
+      return;
+    }
+    return sendMessage(
+      env,
+      callback.message && callback.message.chat
+        ? callback.message.chat.id
+        : userId,
+      '请在管理程序中处理',
+      keyboard
+    );
+  }
+
   if (parts[0] === 'pay') {
     if (parts[1] === 'd') {
       return startPayrollPaymentDetails(
@@ -608,6 +641,61 @@ async function handleCallback(callback, env) {
   return answerCallback(env, callback.id);
 }
 
+async function retiredAdminCallbackTask(env, adminId, parts) {
+  let taskType = '';
+  let taskId = '';
+  let table = '';
+  let idColumn = 'request_id';
+  if (parts[0] === 'income'
+    && ['approve', 'reject'].includes(parts[1])) {
+    taskType = 'income';
+    taskId = parts.length >= 4 ? parts[3] : parts[2];
+    table = 'pending_income';
+  } else if (parts[0] === 'leave'
+    && ['approve', 'reject'].includes(parts[1])) {
+    taskType = 'leave';
+    taskId = parts.length >= 4 ? parts[3] : parts[2];
+    table = 'leave_requests';
+  } else if (parts[0] === 'abs'
+    && ['a', 'r'].includes(parts[1])) {
+    taskType = 'absence';
+    taskId = parts[2];
+    table = 'absence_fine_requests';
+  } else if (['adv', 'advance'].includes(parts[0])
+    && ['a', 'r', 'approve', 'reject'].includes(parts[1])) {
+    taskType = 'advance';
+    taskId = parts[3];
+    table = 'salary_advance_requests';
+  } else if (parts[0] === 'pay'
+    && ['a', 'ps', 'pc'].includes(parts[1])) {
+    taskType = 'payroll';
+    taskId = parts[1] === 'ps'
+      ? parts.slice(3).join(':')
+      : parts.slice(2).join(':');
+    table = 'payroll_disbursements';
+    idColumn = 'payroll_id';
+  } else {
+    return { matched: false, task: null };
+  }
+  if (!taskId) return { matched: true, task: null };
+  const row = await env.DB.prepare(`
+    SELECT store_id, ${idColumn} AS task_id
+    FROM ${table}
+    WHERE ${idColumn} = ?
+  `).bind(taskId).first();
+  if (!row || !(await isStoreAdmin(env, adminId, row.store_id))) {
+    return { matched: true, task: null };
+  }
+  return {
+    matched: true,
+    task: {
+      task_type: taskType,
+      task_id: String(row.task_id),
+      store_id: String(row.store_id)
+    }
+  };
+}
+
 async function handleIncomeAmount(text, userId, chatId, env, lang, store) {
   const income = parseStoreAmount(store, text, false);
   if (income === null) return sendMessage(env, chatId, t(lang, 'invalid_income'));
@@ -646,7 +734,11 @@ async function submitIncome(data, userId, chatId, env, lang, store) {
   }), mainMenu(lang));
 
   const employeeName = await getMemberDisplayName(env, store.store_id, userId);
-  await notifyStoreAdmins(env, store.store_id, incomeAdminNotificationText({
+  await notifyStoreAdminsOfTask(env, store.store_id, {
+    task_type: 'income',
+    task_id: requestId,
+    store_id: store.store_id
+  }, incomeAdminNotificationText({
     storeName: store.name,
     employeeName,
     userId,
@@ -654,12 +746,7 @@ async function submitIncome(data, userId, chatId, env, lang, store) {
     commission: formatPercent(commissionRate),
     commissionIncome: formatMoney(store, commissionIncome),
     requestId
-  }), {
-    inline_keyboard: [[
-      { text: t('zh', 'btn_approve'), callback_data: `income:approve:${store.store_id}:${requestId}` },
-      { text: t('zh', 'btn_reject'), callback_data: `income:reject:${store.store_id}:${requestId}` }
-    ]]
-  });
+  }));
 }
 
 async function approveIncome(env, callback, adminId, storeId, requestId, lang) {
@@ -798,7 +885,11 @@ async function handleSalaryAdvanceAmount(env, store, userId, chatId, text, lang)
   await sendMessage(env, chatId, render(lang, 'advance_submitted', { amount: formatMoney(store, amount) }), mainMenu(lang));
 
   const employeeName = await getMemberDisplayName(env, store.store_id, userId);
-  await notifyStoreAdmins(env, store.store_id, [
+  await notifyStoreAdminsOfTask(env, store.store_id, {
+    task_type: 'advance',
+    task_id: requestId,
+    store_id: store.store_id
+  }, [
     '新的预支薪资申请',
     `店铺：${store.name}`,
     `员工：${employeeName}`,
@@ -806,12 +897,7 @@ async function handleSalaryAdvanceAmount(env, store, userId, chatId, text, lang)
     `当前可申请工资：${formatMoney(store, total)}`,
     `预支金额：${formatMoney(store, amount)}`,
     `请求 ID：${requestId}`
-  ].join('\n'), {
-    inline_keyboard: [[
-      { text: t('zh', 'btn_approve'), callback_data: compactCallbackData('adv', 'a', store.store_id, requestId) },
-      { text: t('zh', 'btn_reject'), callback_data: compactCallbackData('adv', 'r', store.store_id, requestId) }
-    ]]
-  });
+  ].join('\n'));
 }
 
 async function approveSalaryAdvance(env, callback, adminId, storeId, requestId, lang) {
@@ -884,19 +970,18 @@ async function submitLeaveRequest(env, store, userId, value, lang) {
   await logEvent(env, 'info', 'leave_submitted', { store_id: store.store_id, request_id: requestId, telegram_id: userId, leave_date: validation.date });
 
   const employeeName = await getMemberDisplayName(env, store.store_id, userId);
-  await notifyStoreAdmins(env, store.store_id, [
+  await notifyStoreAdminsOfTask(env, store.store_id, {
+    task_type: 'leave',
+    task_id: requestId,
+    store_id: store.store_id
+  }, [
     '新的请假申请',
     `店铺：${store.name}`,
     `员工：${employeeName}`,
     `员工 ID：${userId}`,
     `请假日期：${validation.date}`,
     `请求 ID：${requestId}`
-  ].join('\n'), {
-    inline_keyboard: [[
-      { text: t('zh', 'btn_approve'), callback_data: `leave:approve:${store.store_id}:${requestId}` },
-      { text: t('zh', 'btn_reject'), callback_data: `leave:reject:${store.store_id}:${requestId}` }
-    ]]
-  });
+  ].join('\n'));
 
   return { ok: true, requestId, date: validation.date };
 }
@@ -1690,7 +1775,11 @@ async function notifyPayrollPaymentProfile(env, payroll, lang) {
         payroll.usdt_qr_id_snapshot ? '二维码已提供' : ''
       ].filter(Boolean).join('；')
     : '不使用';
-  await notifyStoreAdmins(env, payroll.store_id, [
+  await notifyStoreAdminsOfTask(env, payroll.store_id, {
+    task_type: 'payroll',
+    task_id: payroll.payroll_id,
+    store_id: payroll.store_id
+  }, [
     '员工已提交工资收款信息',
     `工资 ID：${payroll.payroll_id}`,
     `员工 ID：${payroll.telegram_id}`,
@@ -1701,12 +1790,7 @@ async function notifyPayrollPaymentProfile(env, payroll, lang) {
     `银行卡：${payroll.accepts_bank ? payroll.bank_details_snapshot : '不使用'}`,
     `USDT：${usdtSummary}`,
     `现金：${payroll.accepts_cash ? '使用' : '不使用'}`
-  ].join('\n'), {
-    inline_keyboard: [[{
-      text: t(lang, 'btn_admin_process_payroll'),
-      callback_data: `pay:a:${payroll.payroll_id}`
-    }]]
-  });
+  ].join('\n'));
   if (!payroll.usdt_qr_id_snapshot) return;
 
   const qr = await env.DB.prepare(`
@@ -2233,7 +2317,11 @@ async function disputeEmployeePayrollPayment(
     );
   }
   if (!payroll.employee_response_replay) {
-    await notifyStoreAdmins(env, payroll.store_id, [
+    await notifyStoreAdminsOfTask(env, payroll.store_id, {
+      task_type: 'payroll',
+      task_id: payroll.payroll_id,
+      store_id: payroll.store_id
+    }, [
       '员工对工资付款提出争议',
       `工资 ID：${payroll.payroll_id}`,
       `员工 ID：${payroll.telegram_id}`,
@@ -2248,12 +2336,7 @@ async function disputeEmployeePayrollPayment(
         ? maskPaymentValue(payroll.usdt_details_snapshot)
         : '不使用'}`,
       `现金：${payroll.accepts_cash ? '使用' : '不使用'}`
-    ].join('\n'), {
-      inline_keyboard: [[{
-        text: t(lang, 'btn_admin_correct_payroll'),
-        callback_data: `pay:a:${payroll.payroll_id}`
-      }]]
-    });
+    ].join('\n'));
   }
   await editCallbackMessage(
     env,

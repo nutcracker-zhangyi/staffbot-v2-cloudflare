@@ -667,21 +667,10 @@ export async function cleanupAbandonedDraftProofs(env, now = new Date()) {
     JOIN payroll_payment_attempts a ON a.attempt_id = p.attempt_id
     JOIN payroll_disbursements d ON d.payroll_id = a.payroll_id
     WHERE p.uploaded_at <= ?
-      AND (
-        (a.status = 'abandoned' AND a.updated_at <= ?)
-        OR (
-          a.status = 'draft' AND a.updated_at <= ?
-          AND NOT EXISTS (
-            SELECT 1 FROM admin_task_claims c
-            WHERE c.task_type = 'payroll'
-              AND c.task_id = d.payroll_id
-              AND c.store_id = d.store_id
-              AND c.lease_expires_at > ?
-          )
-        )
-      )
+      AND a.status = 'abandoned'
+      AND a.updated_at <= ?
     ORDER BY p.uploaded_at, p.proof_id
-  `).bind(cutoff, cutoff, cutoff, checkedAtIso).all();
+  `).bind(cutoff, cutoff).all();
   let deleted = 0;
   let failed = 0;
   for (const proof of rows.results || []) {
@@ -705,29 +694,15 @@ export async function cleanupAbandonedDraftProofs(env, now = new Date()) {
             AND EXISTS (
               SELECT 1
               FROM payroll_payment_attempts a
-              JOIN payroll_disbursements d ON d.payroll_id = a.payroll_id
               WHERE a.attempt_id = payroll_payment_proofs.attempt_id
-                AND (
-                  (a.status = 'abandoned' AND a.updated_at <= ?)
-                  OR (
-                    a.status = 'draft' AND a.updated_at <= ?
-                    AND NOT EXISTS (
-                      SELECT 1 FROM admin_task_claims c
-                      WHERE c.task_type = 'payroll'
-                        AND c.task_id = d.payroll_id
-                        AND c.store_id = d.store_id
-                        AND c.lease_expires_at > ?
-                    )
-                  )
-                )
+                AND a.status = 'abandoned'
+                AND a.updated_at <= ?
             )
         `).bind(
           proof.proof_id,
           proof.attempt_id,
           cutoff,
-          cutoff,
-          cutoff,
-          checkedAtIso
+          cutoff
         ),
         env.DB.prepare(`
           INSERT INTO admin_audit_logs (
@@ -736,7 +711,7 @@ export async function cleanupAbandonedDraftProofs(env, now = new Date()) {
           SELECT ?, 'system', 'cleanup_payroll_draft_proof', ?,
             json_object(
               'attempt_id', ?, 'proof_id', ?, 'method', ?,
-              'object_key', ?, 'reason', 'draft_older_than_7_days'
+              'object_key', ?, 'reason', 'abandoned_older_than_7_days'
             ), ?
           WHERE changes() = 1
         `).bind(

@@ -8,6 +8,7 @@ import { handleManageApi } from './manage-api.js';
 import { manageHtml } from './manage-page.js';
 import { deliverPayrollEmailOutbox } from './payroll-email.js';
 import { deliverPayrollNotifications } from './payroll-notifications.js';
+import { cleanupAbandonedDraftProofs } from './payroll-proofs.js';
 import { processPayrollSettlements } from './payroll-settlement.js';
 import {
   isWebhookConfigReady,
@@ -21,9 +22,10 @@ export async function processScheduledWork(env, now = new Date()) {
   const absenceResult = await processAbsenceFines(env, now);
   const absence = absenceResult || { ok: true };
   const payroll = await processPayrollSettlements(env, now);
+  const cleanup = await cleanupAbandonedDraftProofs(env, now);
   const notifications = await deliverPayrollNotifications(env, now);
   const email = await deliverPayrollEmailOutbox(env, now);
-  return { absence, payroll, notifications, email };
+  return { absence, payroll, cleanup, notifications, email };
 }
 
 export default {
@@ -50,6 +52,11 @@ export default {
     if (request.method === 'GET' && url.pathname.startsWith('/manage/')) {
       const asset = handleManageAsset(request, env, url);
       if (asset) return asset;
+      if (/^\/manage\/(?:tasks|approvals)\/[^/]+\/[^/]+$/.test(
+        url.pathname
+      )) {
+        return manageDocument(manageHtml(env));
+      }
     }
 
     if (url.pathname.startsWith('/api/manage/')) {

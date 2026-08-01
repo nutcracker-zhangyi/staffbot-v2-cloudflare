@@ -1583,7 +1583,7 @@ test('reconciles an already-approved leave with its uncancelled absence', async 
 test('keeps failed Telegram absence notifications pending and retries them', async () => {
   const database = notificationTestDatabase();
   database.prepare(`INSERT INTO absence_fine_notifications (request_id, admin_id) VALUES ('ABS-1', 'A1')`).run();
-  const env = { ENVIRONMENT: 'production', BOT_TOKEN: 'test', DB: d1TestDatabase(database) };
+  const env = { ENVIRONMENT: 'production', BOT_TOKEN: 'test', MANAGE_BASE_URL: 'https://manage.example.test', DB: d1TestDatabase(database) };
   const originalFetch = globalThis.fetch;
   const results = [{ ok: false, description: 'blocked' }, { ok: true, result: { message_id: 1 } }];
   globalThis.fetch = async () => new Response(JSON.stringify(results.shift()), {
@@ -1607,7 +1607,7 @@ test('tracks partial multi-admin notification success independently', async () =
     INSERT INTO absence_fine_notifications (request_id, admin_id) VALUES ('ABS-1', 'A1');
     INSERT INTO absence_fine_notifications (request_id, admin_id) VALUES ('ABS-1', 'A2');
   `);
-  const env = { ENVIRONMENT: 'production', BOT_TOKEN: 'test', DB: d1TestDatabase(database) };
+  const env = { ENVIRONMENT: 'production', BOT_TOKEN: 'test', MANAGE_BASE_URL: 'https://manage.example.test', DB: d1TestDatabase(database) };
   const originalFetch = globalThis.fetch;
   globalThis.fetch = async (_url, options) => {
     const adminId = JSON.parse(options.body).chat_id;
@@ -1632,7 +1632,7 @@ test('tracks partial multi-admin notification success independently', async () =
 test('atomically claims an absence notification across overlapping Cron runs', async () => {
   const database = notificationTestDatabase();
   database.prepare(`INSERT INTO absence_fine_notifications (request_id, admin_id) VALUES ('ABS-1', 'A1')`).run();
-  const env = { ENVIRONMENT: 'production', BOT_TOKEN: 'test', DB: d1TestDatabase(database) };
+  const env = { ENVIRONMENT: 'production', BOT_TOKEN: 'test', MANAGE_BASE_URL: 'https://manage.example.test', DB: d1TestDatabase(database) };
   const originalFetch = globalThis.fetch;
   let sends = 0;
   globalThis.fetch = async () => {
@@ -1694,7 +1694,7 @@ test('cancels a queued absence notification when admin access was revoked', asyn
   const database = notificationTestDatabase();
   database.prepare(`INSERT INTO absence_fine_notifications (request_id, admin_id) VALUES ('ABS-1', 'A1')`).run();
   database.prepare(`UPDATE store_members SET status = 'disabled' WHERE telegram_id = 'A1'`).run();
-  const env = { ENVIRONMENT: 'production', BOT_TOKEN: 'test', ADMIN_IDS: '', DB: d1TestDatabase(database) };
+  const env = { ENVIRONMENT: 'production', BOT_TOKEN: 'test', MANAGE_BASE_URL: 'https://manage.example.test', ADMIN_IDS: '', DB: d1TestDatabase(database) };
   const originalFetch = globalThis.fetch;
   let sends = 0;
   globalThis.fetch = async () => { sends += 1; return new Response(JSON.stringify({ ok: true })); };
@@ -1713,7 +1713,7 @@ test('cancels a queued notification when its absence request was already decided
   const database = notificationTestDatabase();
   database.prepare(`INSERT INTO absence_fine_notifications (request_id, admin_id) VALUES ('ABS-1', 'A1')`).run();
   database.prepare(`UPDATE absence_fine_requests SET status = 'approved' WHERE request_id = 'ABS-1'`).run();
-  const env = { ENVIRONMENT: 'production', BOT_TOKEN: 'test', ADMIN_IDS: '', DB: d1TestDatabase(database) };
+  const env = { ENVIRONMENT: 'production', BOT_TOKEN: 'test', MANAGE_BASE_URL: 'https://manage.example.test', ADMIN_IDS: '', DB: d1TestDatabase(database) };
   const originalFetch = globalThis.fetch;
   let sends = 0;
   globalThis.fetch = async () => { sends += 1; return new Response(JSON.stringify({ ok: true })); };
@@ -1734,7 +1734,7 @@ test('does not steal a fresh sending notification lease', async () => {
     INSERT INTO absence_fine_notifications (request_id, admin_id, status, claimed_at)
     VALUES ('ABS-1', 'A1', 'sending', '2026-07-15T03:05:00.000Z')
   `).run();
-  const env = { ENVIRONMENT: 'production', BOT_TOKEN: 'test', ADMIN_IDS: '', DB: d1TestDatabase(database) };
+  const env = { ENVIRONMENT: 'production', BOT_TOKEN: 'test', MANAGE_BASE_URL: 'https://manage.example.test', ADMIN_IDS: '', DB: d1TestDatabase(database) };
   const originalFetch = globalThis.fetch;
   let sends = 0;
   globalThis.fetch = async () => { sends += 1; return new Response(JSON.stringify({ ok: true })); };
@@ -1757,7 +1757,7 @@ test('recovers a sending notification lease older than fifteen minutes', async (
     INSERT INTO absence_fine_notifications (request_id, admin_id, status, claimed_at)
     VALUES ('ABS-1', 'A1', 'sending', '2026-07-15T02:54:59.000Z')
   `).run();
-  const env = { ENVIRONMENT: 'production', BOT_TOKEN: 'test', ADMIN_IDS: '', DB: d1TestDatabase(database) };
+  const env = { ENVIRONMENT: 'production', BOT_TOKEN: 'test', MANAGE_BASE_URL: 'https://manage.example.test', ADMIN_IDS: '', DB: d1TestDatabase(database) };
   const originalFetch = globalThis.fetch;
   let sends = 0;
   globalThis.fetch = async () => { sends += 1; return new Response(JSON.stringify({ ok: true }), { headers: { 'content-type': 'application/json' } }); };
@@ -1871,6 +1871,7 @@ test('discovers each absence once while excluding an exempt employee and a not-y
   const env = {
     ENVIRONMENT: 'production',
     BOT_TOKEN: 'test-token',
+    MANAGE_BASE_URL: 'https://manage.example.test',
     ADMIN_IDS: '',
     DB: {
       prepare(sql) {
@@ -1976,7 +1977,10 @@ test('discovers each absence once while excluding an exempt employee and a not-y
   assert.match(notifications[0].text, /Alice/);
   assert.match(notifications[0].text, /2026-07-14/);
   assert.match(notifications[0].text, /₫1,500,000/);
-  assert.deepEqual(notifications[0].reply_markup.inline_keyboard, absenceApprovalKeyboard(requests[0].request_id));
+  assert.deepEqual(notifications[0].reply_markup.inline_keyboard, [[{
+    text: '去处理',
+    url: `https://manage.example.test/manage/tasks/absence/${requests[0].request_id}?store=TOKYO`
+  }]]);
   assert.deepEqual(outbox.map((row) => row.status), ['sent']);
   assert.match(absenceSource, /m\.role = 'employee'/);
 });

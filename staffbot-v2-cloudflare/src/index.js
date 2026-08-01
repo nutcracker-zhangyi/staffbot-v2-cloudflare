@@ -1,5 +1,6 @@
 export { default } from './router.js';
 export * from './admin-auth.js';
+export * from './admin-notifications.js';
 export * from './admin-query.js';
 export * from './dates.js';
 export * from './ids.js';

@@ -21,6 +21,23 @@ test('declares staging safety variables explicitly', () => {
   assert.match(config, /\[env\.staging\.vars\][\s\S]*PAYROLL_LEDGER_WRITE_MODE\s*=\s*"dual"/);
   assert.match(config, /SCHEDULED_TASKS_ENABLED\s*=\s*"false"/);
   assert.match(config, /TELEGRAM_RECIPIENT_MODE\s*=\s*"allowlist"/);
+  assert.match(
+    config,
+    /\[env\.staging\.vars\][\s\S]*MANAGE_BASE_URL\s*=\s*"https:\/\/staffbot-v2-staging\.staffbot-v2\.workers\.dev"/
+  );
+});
+
+test('declares exact stable production and staging manage origins', () => {
+  const productionVars = config.match(/\[vars\]([\s\S]*?)\n\[/)?.[1] || '';
+  const stagingVars = config.match(/\[env\.staging\.vars\]([\s\S]*?)\n\[/)?.[1] || '';
+  assert.match(
+    productionVars,
+    /MANAGE_BASE_URL\s*=\s*"https:\/\/staffbot-v2\.staffbot-v2\.workers\.dev"/
+  );
+  assert.match(
+    stagingVars,
+    /MANAGE_BASE_URL\s*=\s*"https:\/\/staffbot-v2-staging\.staffbot-v2\.workers\.dev"/
+  );
 });
 
 test('removes all staging Cron triggers explicitly', () => {

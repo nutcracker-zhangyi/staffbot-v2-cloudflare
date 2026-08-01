@@ -285,6 +285,15 @@ test('only a manage return path opens an approval detail after login', async () 
   await safe.browser();
   assert.equal(safe.requests.at(-1).path, '/api/manage/stores/STORE-1/approvals/income/INC-1');
 
+  const taskDeepLink = fixture({
+    pathname: '/manage/tasks/income/INC-1'
+  });
+  await taskDeepLink.browser();
+  assert.equal(
+    taskDeepLink.requests.at(-1).path,
+    '/api/manage/stores/STORE-1/approvals/income/INC-1'
+  );
+
   const unsafe = fixture({ pathname: '/admin/approvals/income/INC-1' });
   await unsafe.browser();
   assert.equal(
@@ -701,6 +710,7 @@ function payrollFixture({
   splitConflict = false,
   storeName = 'Tokyo Club',
   initialTasks = [],
+  pathname = '/manage',
   draftFallbackAttempt = null,
   confirm = () => true
 } = {}) {
@@ -724,6 +734,7 @@ function payrollFixture({
     async browser() {
       return executeManageClient(MANAGE_CLIENT, {
         confirm,
+        pathname,
         async fetch(path, options = {}) {
           const method = options.method || 'GET';
           requests.push({ path, method, headers: options.headers, body: options.body });
@@ -844,6 +855,29 @@ test('payroll opens a dossier with facts and immutable attempt history before ed
   assert.match(browser.document.app.textContent, /submit_payroll_payment/);
   assert.equal(browser.document.getElementById('bank-amount'), null);
   assert.equal(browser.document.getElementById('delete-proof-PROOF-OLD'), null);
+});
+
+test('a payroll task deep link opens its dossier after login', async () => {
+  const app = payrollFixture({
+    pathname: '/manage/tasks/payroll/PAYROLL-1',
+    initialTasks: [{
+      task_type: 'payroll',
+      task_id: 'PAYROLL-1',
+      store_id: 'STORE-1',
+      store_name: 'Tokyo Club',
+      employee_name: 'Alice',
+      status: 'awaiting_admin_payment',
+      submitted_at: '2026-07-29T01:00:00.000Z',
+      urgency: 300,
+      claim: null
+    }]
+  });
+  const browser = await app.browser();
+
+  assert.ok(app.requests.some((request) =>
+    request.path === '/api/manage/stores/STORE-1/payroll/PAYROLL-1'
+  ));
+  assert.match(browser.document.app.textContent, /工资档案/);
 });
 
 test('payroll payment enables submit only for an exact evidenced integer-micros split', async () => {

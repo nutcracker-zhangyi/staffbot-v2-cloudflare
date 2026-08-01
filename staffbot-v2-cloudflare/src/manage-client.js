@@ -406,6 +406,10 @@ async function openPayroll(payrollId) {
     renderCurrent();
     return;
   }
+  return openPayrollItem(item);
+}
+
+async function openPayrollItem(item) {
   const generation = state.requestGeneration + 1;
   state.requestGeneration = generation;
   clearPayrollState();
@@ -1253,12 +1257,19 @@ async function loadTasks({ render = true, generation = state.requestGeneration }
 }
 
 async function openTask(type, id) {
-  if (!approvalTypes.has(type)) return;
+  if (!approvalTypes.has(type) && type !== 'payroll') return;
   const task = state.tasks.find((item) => item.task_type === type && item.task_id === id);
   if (!task) {
     state.message = '任务不存在或无权查看';
     renderCurrent();
     return;
+  }
+  if (type === 'payroll') {
+    state.activeNav = 'payroll';
+    return openPayrollItem({
+      store_id: task.store_id,
+      payroll_id: task.task_id
+    });
   }
   const generation = state.requestGeneration + 1;
   state.requestGeneration = generation;
@@ -1515,7 +1526,9 @@ function stopClaimTimer() {
 async function openReturnPath() {
   const path = String(location.pathname || '');
   if (!path.startsWith('/manage/')) return;
-  const match = path.match(/^\/manage\/approvals\/([^/]+)\/([^/]+)$/);
+  const match = path.match(
+    /^\/manage\/(?:tasks|approvals)\/([^/]+)\/([^/]+)$/
+  );
   if (!match) return;
   let type;
   let id;

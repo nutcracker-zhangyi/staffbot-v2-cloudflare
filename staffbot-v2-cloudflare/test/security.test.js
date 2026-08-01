@@ -5,6 +5,7 @@ import worker, {
   csvCell,
   isTelegramRecipientAllowed,
   isWebhookConfigReady,
+  manageBaseUrl,
   nextLoginFailureState,
   parseTelegramAllowlist,
   sanitizeLogPayload,
@@ -132,6 +133,22 @@ test('only runs scheduled tasks when explicitly enabled', () => {
   assert.equal(scheduledTasksEnabled({ SCHEDULED_TASKS_ENABLED: 'false' }), false);
   assert.equal(scheduledTasksEnabled({ SCHEDULED_TASKS_ENABLED: 'true' }), true);
   assert.equal(scheduledTasksEnabled({ SCHEDULED_TASKS_ENABLED: true }), true);
+});
+
+test('keeps the manage origin separate from secrets and rejects URL authority tricks', () => {
+  assert.equal(
+    manageBaseUrl({
+      MANAGE_BASE_URL: 'https://staffbot-v2.staffbot-v2.workers.dev',
+      BOT_TOKEN: 'PRIVATE-BOT-TOKEN'
+    }),
+    'https://staffbot-v2.staffbot-v2.workers.dev'
+  );
+  assert.throws(
+    () => manageBaseUrl({
+      MANAGE_BASE_URL: 'https://PRIVATE-BOT-TOKEN@staffbot.example'
+    }),
+    /valid HTTPS origin/
+  );
 });
 
 test('does not queue scheduled work when automation is disabled', async () => {

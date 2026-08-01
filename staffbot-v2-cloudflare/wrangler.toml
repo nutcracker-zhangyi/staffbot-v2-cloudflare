@@ -18,6 +18,7 @@ PAYROLL_LEDGER_READ_MODE = "legacy"
 PAYROLL_LEDGER_WRITE_MODE = "off"
 SCHEDULED_TASKS_ENABLED = "true"
 TELEGRAM_RECIPIENT_MODE = "all"
+MANAGE_BASE_URL = "https://staffbot-v2.staffbot-v2.workers.dev"
 # Put non-secret local defaults here only.
 # Use `wrangler secret put BOT_TOKEN`, `WEBHOOK_SECRET`, and `ADMIN_IDS`.
 
@@ -41,6 +42,7 @@ PAYROLL_LEDGER_READ_MODE = "ledger"
 PAYROLL_LEDGER_WRITE_MODE = "dual"
 SCHEDULED_TASKS_ENABLED = "false"
 TELEGRAM_RECIPIENT_MODE = "allowlist"
+MANAGE_BASE_URL = "https://staffbot-v2-staging.staffbot-v2.workers.dev"
 
 [env.staging.triggers]
 crons = []

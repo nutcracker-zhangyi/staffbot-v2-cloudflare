@@ -104,6 +104,7 @@ function flowFixture(fixtureOptions = {}) {
       DB: createD1(database),
       BOT_TOKEN: 'test-token',
       ENVIRONMENT: 'production',
+      MANAGE_BASE_URL: 'https://manage.example.test',
       ADMIN_IDS: '9001',
       PAYROLL_FINANCE_EMAIL: 'finance@example.test',
       PAYROLL_PROOFS: {
@@ -959,7 +960,61 @@ test('logs a safe failure stage when employee QR upload fails', async () => {
   }
 });
 
-test('admin splits payroll and uploads proof images by payment method', async () => {
+test('income, leave, and advance submissions notify admins with one mobile task link', async (context) => {
+  await context.test('income', async () => {
+    const fixture = flowFixture();
+    try {
+      await sendText(fixture.env, '/income');
+      await sendText(fixture.env, '100');
+      const notice = fixture.payloads.find((payload) =>
+        String(payload.chat_id) === '9001' && /\u65b0\u7684\u6536\u5165/.test(payload.text || '')
+      );
+      assert.deepEqual(notice.reply_markup.inline_keyboard.flat().map((button) => button.text), ['去处理']);
+      assert.match(notice.reply_markup.inline_keyboard[0][0].url, /\/manage\/tasks\/income\/INC-[^?]+\?store=STORE1$/);
+    } finally {
+      fixture.restore();
+    }
+  });
+
+  await context.test('leave', async () => {
+    const fixture = flowFixture();
+    try {
+      await sendText(fixture.env, '/leave');
+      const prompt = fixture.payloads.find((payload) =>
+        payload.reply_markup && payload.reply_markup.inline_keyboard
+      );
+      await sendCallback(
+        fixture.env,
+        prompt.reply_markup.inline_keyboard[0][0].callback_data,
+        1001
+      );
+      const notice = fixture.payloads.find((payload) =>
+        String(payload.chat_id) === '9001' && /\u65b0\u7684\u8bf7\u5047/.test(payload.text || '')
+      );
+      assert.deepEqual(notice.reply_markup.inline_keyboard.flat().map((button) => button.text), ['去处理']);
+      assert.match(notice.reply_markup.inline_keyboard[0][0].url, /\/manage\/tasks\/leave\/LEAVE-[^?]+\?store=STORE1$/);
+    } finally {
+      fixture.restore();
+    }
+  });
+
+  await context.test('advance', async () => {
+    const fixture = flowFixture();
+    try {
+      await sendText(fixture.env, '/advance');
+      await sendText(fixture.env, '10');
+      const notice = fixture.payloads.find((payload) =>
+        String(payload.chat_id) === '9001' && /\u65b0\u7684\u9884\u652f/.test(payload.text || '')
+      );
+      assert.deepEqual(notice.reply_markup.inline_keyboard.flat().map((button) => button.text), ['去处理']);
+      assert.match(notice.reply_markup.inline_keyboard[0][0].url, /\/manage\/tasks\/advance\/ADV-[^?]+\?store=STORE1$/);
+    } finally {
+      fixture.restore();
+    }
+  });
+});
+
+test('legacy admin payroll callback opens the mobile task without mutating payroll', async () => {
   const fixture = flowFixture();
   try {
     fixture.database.prepare(`
@@ -990,195 +1045,157 @@ test('admin splits payroll and uploads proof images by payment method', async ()
     assert.equal(
       fixture.database.prepare(`
         SELECT state FROM user_states WHERE telegram_id = '9001'
-      `).get().state,
-      'WAIT_PAYROLL_SPLIT'
-    );
-    assert.match(fixture.payloads.at(-1).text, /银行卡.*付款金额/);
-
-    await sendText(fixture.env, '40', {
-      id: 9001,
-      first_name: 'Admin',
-      username: 'admin'
-    });
-
-    assert.deepEqual(
-      {
-        ...fixture.database.prepare(`
-          SELECT bank_micros, usdt_micros, cash_micros, current_admin_id
-          FROM payroll_disbursements
-          WHERE payroll_id = 'PAYROLL-ADMIN'
-        `).get()
-      },
-      {
-        bank_micros: 40000000,
-        usdt_micros: 0,
-        cash_micros: 20000000,
-        current_admin_id: '9001'
-      }
-    );
-    assert.equal(
-      fixture.database.prepare(`
-        SELECT state FROM user_states WHERE telegram_id = '9001'
-      `).get().state,
-      'WAIT_PAYROLL_PROOF'
-    );
-
-    await sendPhoto(fixture.env, 'BANK-PHOTO');
-    await sendCallback(
-      fixture.env,
-      'pay:a:PAYROLL-ADMIN',
-      9001
-    );
-    assert.equal(
-      fixture.database.prepare(`
-        SELECT state FROM user_states WHERE telegram_id = '9001'
-      `).get().state,
-      'WAIT_PAYROLL_PROOF'
-    );
-    assert.equal(
-      fixture.database.prepare(`
-        SELECT COUNT(*) AS count
-        FROM payroll_payment_proofs
-        WHERE payroll_id = 'PAYROLL-ADMIN'
-          AND superseded_at IS NULL
-      `).get().count,
-      1
-    );
-    await sendCallback(
-      fixture.env,
-      'pay:ps:c:PAYROLL-ADMIN',
-      9001
-    );
-    await sendPhoto(fixture.env, 'CASH-PHOTO');
-    await sendCallback(
-      fixture.env,
-      'pay:pc:PAYROLL-ADMIN',
-      9001
-    );
-
-    assert.deepEqual(
-      fixture.database.prepare(`
-        SELECT method, COUNT(*) AS count
-        FROM payroll_payment_proofs
-        WHERE payroll_id = 'PAYROLL-ADMIN'
-        GROUP BY method
-        ORDER BY method
-      `).all().map((row) => ({ ...row })),
-      [
-        { method: 'bank', count: 1 },
-        { method: 'cash', count: 1 }
-      ]
-    );
-    assert.equal(fixture.proofObjects.size, 2);
-    assert.equal(
-      fixture.database.prepare(`
-        SELECT status FROM payroll_disbursements
-        WHERE payroll_id = 'PAYROLL-ADMIN'
-      `).get().status,
-      'awaiting_employee_confirmation'
-    );
-    const confirmation = fixture.payloads.find((payload) =>
-      payload.chat_id === '1001'
-      && payload.reply_markup
-      && payload.reply_markup.inline_keyboard.flat().some(
-        (button) => button.callback_data.startsWith('pok:')
-      )
-    );
-    assert.ok(confirmation);
-    const confirmationCallbacks = confirmation.reply_markup.inline_keyboard
-      .flat().map((button) => button.callback_data);
-    assert.ok(confirmationCallbacks.every((data) => data.length <= 64));
-    assert.match(confirmationCallbacks[0], /^pok:PAYATT-/);
-    assert.match(confirmationCallbacks[1], /^px:PAYATT-/);
-    assert.match(confirmation.text, /工资总额：\$60\.00/);
-    assert.equal(
-      fixture.payloads.filter((payload) =>
-        payload.chat_id === '1001' && payload.photo
-      ).length,
-      2
-    );
-    assert.equal(
-      fixture.database.prepare(`
-        SELECT 1 FROM user_states WHERE telegram_id = '9001'
       `).get(),
       undefined
     );
+    assert.deepEqual({ ...fixture.database.prepare(`
+      SELECT status, current_admin_id, bank_micros, cash_micros
+      FROM payroll_disbursements WHERE payroll_id = 'PAYROLL-ADMIN'
+    `).get() }, {
+      status: 'awaiting_admin_payment',
+      current_admin_id: null,
+      bank_micros: 0,
+      cash_micros: 0
+    });
+    assert.ok(fixture.payloads.some((payload) =>
+      payload.callback_query_id === 'callback-9001'
+      && payload.text === '请在管理程序中处理'
+      && payload.show_alert === true
+    ));
+    assert.ok(fixture.payloads.some((payload) =>
+      String(payload.chat_id) === '9001'
+      && payload.reply_markup.inline_keyboard[0][0].url
+        === 'https://manage.example.test/manage/tasks/payroll/PAYROLL-ADMIN?store=STORE1'
+    ));
+  } finally {
+    fixture.restore();
+  }
+});
 
+test('all retired admin task callbacks are read-only deep-link shims', async () => {
+  const fixture = flowFixture();
+  try {
+    fixture.database.exec(`
+      INSERT INTO pending_income (
+        request_id, store_id, telegram_id, income, commission_rate,
+        commission_income, fine, status, submitted_at
+      ) VALUES
+        ('INC-A', 'STORE1', '1001', 100, 0.6, 60, 0, 'pending', '2026-07-16T03:00:00.000Z'),
+        ('INC-R', 'STORE1', '1001', 100, 0.6, 60, 0, 'pending', '2026-07-16T03:00:00.000Z');
+      INSERT INTO leave_requests (
+        request_id, store_id, telegram_id, leave_date, status, requested_at
+      ) VALUES
+        ('LEAVE-A', 'STORE1', '1001', '2026-07-20', 'pending', '2026-07-16T03:00:00.000Z'),
+        ('LEAVE-R', 'STORE1', '1001', '2026-07-21', 'pending', '2026-07-16T03:00:00.000Z');
+      INSERT INTO salary_advance_requests (
+        request_id, store_id, telegram_id, amount, status, requested_at
+      ) VALUES
+        ('ADV-A', 'STORE1', '1001', 10, 'pending', '2026-07-16T03:00:00.000Z'),
+        ('ADV-R', 'STORE1', '1001', 10, 'pending', '2026-07-16T03:00:00.000Z');
+      INSERT INTO absence_fine_requests (
+        request_id, store_id, telegram_id, business_date,
+        original_fine, fine, status, created_at
+      ) VALUES
+        ('ABS-A', 'STORE1', '1001', '2026-07-14', 5, 5, 'pending', '2026-07-16T03:00:00.000Z'),
+        ('ABS-R', 'STORE1', '1001', '2026-07-15', 5, 5, 'pending', '2026-07-16T03:00:00.000Z');
+      INSERT INTO payroll_disbursements (
+        payroll_id, store_id, telegram_id, payroll_start_date,
+        scheduled_date, cycle_day, period_start, cutoff_at,
+        amount_snapshot_micros, currency, status,
+        accepts_bank, bank_details_snapshot, created_at, updated_at
+      ) VALUES (
+        'PAYROLL-SHIM', 'STORE1', '1001', '2026-07-01',
+        '2026-07-16', 16, '2026-07-01T00:00:00.000Z',
+        '2026-07-16T03:00:00.000Z', 60000000, '$',
+        'awaiting_admin_payment', 1, 'Bank 1234',
+        '2026-07-16T03:00:00.000Z', '2026-07-16T03:00:00.000Z'
+      );
+    `);
+    const callbacks = [
+      'income:approve:STORE1:INC-A',
+      'income:reject:STORE1:INC-R',
+      'leave:approve:STORE1:LEAVE-A',
+      'leave:reject:STORE1:LEAVE-R',
+      'abs:a:ABS-A',
+      'abs:r:ABS-R',
+      'adv:a:STORE1:ADV-A',
+      'advance:reject:STORE1:ADV-R',
+      'pay:a:PAYROLL-SHIM',
+      'pay:ps:b:PAYROLL-SHIM',
+      'pay:pc:PAYROLL-SHIM'
+    ];
+    for (const callback of callbacks) {
+      await sendCallback(fixture.env, callback, 9001);
+    }
+
+    assert.deepEqual(fixture.database.prepare(`
+      SELECT status FROM pending_income ORDER BY request_id
+    `).all().map((row) => row.status), ['pending', 'pending']);
+    assert.deepEqual(fixture.database.prepare(`
+      SELECT status FROM leave_requests ORDER BY request_id
+    `).all().map((row) => row.status), ['pending', 'pending']);
+    assert.deepEqual(fixture.database.prepare(`
+      SELECT status FROM salary_advance_requests ORDER BY request_id
+    `).all().map((row) => row.status), ['pending', 'pending']);
+    assert.deepEqual(fixture.database.prepare(`
+      SELECT status FROM absence_fine_requests ORDER BY request_id
+    `).all().map((row) => row.status), ['pending', 'pending']);
+    assert.deepEqual({ ...fixture.database.prepare(`
+      SELECT status, current_admin_id, bank_micros, usdt_micros, cash_micros
+      FROM payroll_disbursements WHERE payroll_id = 'PAYROLL-SHIM'
+    `).get() }, {
+      status: 'awaiting_admin_payment',
+      current_admin_id: null,
+      bank_micros: 0,
+      usdt_micros: 0,
+      cash_micros: 0
+    });
+    assert.equal(fixture.database.prepare(`
+      SELECT COUNT(*) AS count FROM user_states WHERE telegram_id = '9001'
+    `).get().count, 0);
+    assert.equal(fixture.database.prepare(`
+      SELECT COUNT(*) AS count FROM payroll_payment_proofs
+      WHERE payroll_id = 'PAYROLL-SHIM'
+    `).get().count, 0);
+
+    const alerts = fixture.payloads.filter((payload) =>
+      payload.callback_query_id === 'callback-9001'
+      && payload.text === '请在管理程序中处理'
+      && payload.show_alert === true
+    );
+    const deepLinks = fixture.payloads.filter((payload) =>
+      String(payload.chat_id) === '9001'
+      && payload.reply_markup
+      && payload.reply_markup.inline_keyboard[0][0].text === '去处理'
+    );
+    assert.equal(alerts.length, callbacks.length);
+    assert.equal(deepLinks.length, callbacks.length);
+    assert.ok(deepLinks.every((payload) =>
+      payload.reply_markup.inline_keyboard[0][0].url.startsWith(
+        'https://manage.example.test/manage/tasks/'
+      )
+    ));
+  } finally {
+    fixture.restore();
+  }
+});
+
+test('an unresolvable retired admin callback only alerts and never sends a guessed link', async () => {
+  const fixture = flowFixture();
+  try {
     await sendCallback(
       fixture.env,
-      confirmationCallbacks[0],
-      1001,
-      confirmation.text
+      'income:approve:FORGED-STORE:MISSING',
+      9001
     );
-    const receipt = fixture.payloads.find((payload) =>
-      payload.message_id === 2
-      && payload.text
-      && payload.text.includes('工资收款已确认')
-    );
-    assert.ok(receipt);
-    assert.match(receipt.text, /员工：Alice/);
-    assert.match(receipt.text, /Telegram ID：1001/);
-    assert.match(receipt.text, /店铺：Tokyo Club/);
-    assert.match(
-      receipt.text,
-      /2026\/07\/01 09:00 至 2026\/07\/16 12:00/
-    );
-    assert.match(receipt.text, /工资总额：\$60\.00/);
-    assert.match(receipt.text, /银行卡：\$40\.00/);
-    assert.match(receipt.text, /现金：\$20\.00/);
-    assert.doesNotMatch(receipt.text, /USDT：/);
-    assert.match(
-      receipt.text,
-      /确认时间：\d{4}\/\d{2}\/\d{2} \d{2}:\d{2}/
-    );
-    assert.match(
-      receipt.text,
-      /工资 ID：PAYROLL-ADMIN/
-    );
-    assert.match(receipt.text, /付款版本：1/);
-    assert.equal(receipt.reply_markup, undefined);
-
-    const receiptAck = fixture.payloads.find((payload) =>
-      payload.callback_query_id === 'callback-1001'
-      && payload.text === '确认成功。'
-    );
-    assert.ok(receiptAck);
-    assert.deepEqual(
-      {
-        ...fixture.database.prepare(`
-          SELECT status, salary_record_id
-          FROM payroll_disbursements
-          WHERE payroll_id = 'PAYROLL-ADMIN'
-        `).get()
-      },
-      {
-        status: 'confirmed',
-        salary_record_id: 'SAL-AUTO-PAYROLL-ADMIN'
-      }
-    );
-    assert.deepEqual({ ...fixture.database.prepare(`
-      SELECT version, status, employee_response
-      FROM payroll_payment_attempts
-      WHERE payroll_id = 'PAYROLL-ADMIN'
-    `).get() }, {
-      version: 1,
-      status: 'employee_confirmed',
-      employee_response: 'confirmed'
-    });
-    assert.equal(
-      fixture.database.prepare(`
-        SELECT COUNT(*) AS count FROM salary_records
-        WHERE request_id = 'PAYROLL-ADMIN'
-      `).get().count,
-      1
-    );
-    assert.equal(
-      fixture.database.prepare(`
-        SELECT recipient FROM payroll_email_outbox
-        WHERE payroll_id = 'PAYROLL-ADMIN'
-      `).get().recipient,
-      'finance@example.test'
-    );
+    assert.ok(fixture.payloads.some((payload) =>
+      payload.callback_query_id === 'callback-9001'
+      && payload.text === '请在管理程序中处理'
+      && payload.show_alert === true
+    ));
+    assert.equal(fixture.payloads.some((payload) =>
+      payload.chat_id === '9001' && payload.reply_markup
+    ), false);
   } finally {
     fixture.restore();
   }
@@ -1251,10 +1268,10 @@ test('employee dispute notifies admins with a correction button', async () => {
     assert.ok(adminNotice);
     assert.doesNotMatch(adminNotice.text, /12345678/);
     assert.match(adminNotice.text, /••••5678/);
-    assert.equal(
-      adminNotice.reply_markup.inline_keyboard[0][0].callback_data,
-      'pay:a:PAYROLL-DISPUTE'
-    );
+    assert.deepEqual(adminNotice.reply_markup.inline_keyboard[0][0], {
+      text: '去处理',
+      url: 'https://manage.example.test/manage/tasks/payroll/PAYROLL-DISPUTE?store=STORE1'
+    });
     const noticesBeforeReplay = fixture.payloads.filter((payload) =>
       payload.chat_id === '9001'
       && payload.text

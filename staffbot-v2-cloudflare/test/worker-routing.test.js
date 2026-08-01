@@ -109,6 +109,20 @@ test('preserves the complete admin document contract', async () => {
   assert.match(document, /target="_blank" rel="noopener"/);
 });
 
+test('serves the manage shell for encoded task deep links', async () => {
+  const response = await worker.fetch(
+    new Request(
+      'https://staffbot.test/manage/tasks/payroll/PAYROLL-%2F1?store=STORE-1'
+    ),
+    { ENVIRONMENT: 'staging' },
+    context()
+  );
+
+  assert.equal(response.status, 200);
+  assert.match(response.headers.get('content-type'), /text\/html/);
+  assert.match(await response.text(), /StaffBot 管理端/);
+});
+
 test('shows Dashboard only in staging and keeps production admin unchanged', async () => {
   const staging = await worker.fetch(
     new Request('https://staffbot.test/admin'),
@@ -902,6 +916,9 @@ test('runs scheduled work in accounting and delivery order when enabled', async 
     const notificationRead = reads.findIndex((sql) =>
       /FROM payroll_disbursements d/.test(sql)
     );
+    const cleanupRead = reads.findIndex((sql) =>
+      /FROM payroll_payment_proofs p/.test(sql)
+    );
     const emailRead = reads.findIndex((sql) =>
       /FROM payroll_email_outbox/.test(sql)
     );
@@ -909,14 +926,18 @@ test('runs scheduled work in accounting and delivery order when enabled', async 
     assert.deepEqual(Object.keys(result), [
       'absence',
       'payroll',
+      'cleanup',
       'notifications',
       'email'
     ]);
     assert.ok(absenceRead >= 0);
     assert.ok(settlementRead > absenceRead);
+    assert.ok(cleanupRead > settlementRead);
+    assert.ok(notificationRead > cleanupRead);
     assert.ok(notificationRead > settlementRead);
     assert.ok(emailRead > notificationRead);
     assert.equal(result.payroll.created, 1);
+    assert.deepEqual(result.cleanup, { deleted: 0, failed: 0 });
     assert.equal(result.notifications.sent, 1);
     assert.deepEqual(result.email, {
       scanned: 0,

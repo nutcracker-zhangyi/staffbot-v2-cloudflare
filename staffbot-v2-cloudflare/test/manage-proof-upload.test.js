@@ -801,7 +801,7 @@ test('manage upload ignores a forged small Content-Length and bounds the actual 
   }
 });
 
-test('cleanup keeps an old draft with an active claim and a newly uploaded abandoned proof', async () => {
+test('cleanup keeps every draft and a newly uploaded abandoned proof', async () => {
   const fixture = setup();
   try {
     fixture.database.exec(`
@@ -820,6 +820,16 @@ test('cleanup keeps an old draft with an active claim and a newly uploaded aband
       body: new Uint8Array([1]),
       options: { httpMetadata: { contentType: 'image/jpeg' } }
     });
+    assert.deepEqual(
+      await cleanupAbandonedDraftProofs(fixture.env, NOW),
+      { deleted: 0, failed: 0 }
+    );
+    assert.equal(fixture.objects.has('proof-active'), true);
+
+    fixture.database.exec(`
+      DELETE FROM admin_task_claims
+      WHERE task_type = 'payroll' AND task_id = 'PAYROLL-1';
+    `);
     assert.deepEqual(
       await cleanupAbandonedDraftProofs(fixture.env, NOW),
       { deleted: 0, failed: 0 }

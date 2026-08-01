@@ -46,6 +46,25 @@ export function scheduledTasksEnabled(env) {
     || String(env.SCHEDULED_TASKS_ENABLED || '').toLowerCase() === 'true'));
 }
 
+export function manageBaseUrl(env) {
+  const configured = String(env && env.MANAGE_BASE_URL || '').trim();
+  let url;
+  try {
+    url = new URL(configured);
+  } catch {
+    throw new Error('MANAGE_BASE_URL must be a valid HTTPS origin');
+  }
+  if (url.protocol !== 'https:'
+    || url.username
+    || url.password
+    || url.search
+    || url.hash
+    || url.pathname !== '/') {
+    throw new Error('MANAGE_BASE_URL must be a valid HTTPS origin');
+  }
+  return url.origin;
+}
+
 export function payrollEmailConfig(env) {
   const recipient = String(
     env && env.PAYROLL_FINANCE_EMAIL || ''

@@ -1,4 +1,5 @@
 import { makeId } from './audit.js';
+import { manageTaskKeyboard } from './admin-notifications.js';
 import { mutationCount } from './approvals.js';
 import { addIsoDays, absenceScanDates, localDate, zonedMidnightIso } from './dates.js';
 import { attendanceFineAmount, formatMoney } from './money.js';
@@ -238,7 +239,11 @@ export async function deliverAbsenceNotification(env, store, notification, now =
       `员工：${notification.display_name} (${notification.telegram_id})`,
       `日期：${notification.business_date}`,
       `建议罚款：${formatMoney(store, notification.fine)}`
-    ].join('\n'), { inline_keyboard: absenceApprovalKeyboard(notification.request_id) });
+    ].join('\n'), manageTaskKeyboard(env, {
+      task_type: 'absence',
+      task_id: notification.request_id,
+      store_id: notification.store_id
+    }));
   } catch (error) {
     result = { ok: false, description: String(error && error.message ? error.message : error) };
   }
