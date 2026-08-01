@@ -1683,28 +1683,34 @@ async function takeoverCurrentTask() {
   state.mutationBusy = true;
   renderTaskDetail();
   try {
-    await api('/api/manage/tasks/'
-      + encodeURIComponent(task.task_type) + '/'
-      + encodeURIComponent(task.task_id) + '/takeover', {
-      method: 'POST', body: JSON.stringify({ reason })
-    });
-    if (!requestIsCurrent(generation, key)) return;
-    state.takeoverMode = '';
-    await refreshCurrentTask('任务已接管', generation, key);
-  } catch (error) {
-    if (!requestIsCurrent(generation, key)) return;
-    if (error.status === 403 || error.status === 409) {
-      const message = error.status === 403
-        ? '当前账号无权接管，已刷新最新任务状态'
-        : '接管冲突，已刷新最新任务状态';
-      try {
-        await refreshCurrentTask(message, generation, key);
-      } catch {
-        if (requestIsCurrent(generation, key)) markAuthorityStale();
+    let committed = false;
+    try {
+      await api('/api/manage/tasks/'
+        + encodeURIComponent(task.task_type) + '/'
+        + encodeURIComponent(task.task_id) + '/takeover', {
+        method: 'POST', body: JSON.stringify({ reason })
+      });
+      committed = true;
+    } catch (error) {
+      if (requestIsCurrent(generation, key)) {
+        if (error.status === 403 || error.status === 409) {
+          const message = error.status === 403
+            ? '当前账号无权接管，已刷新最新任务状态'
+            : '接管冲突，已刷新最新任务状态';
+          await refreshTaskAuthority(message, generation, key);
+        } else {
+          state.message = '接管失败，请稍后重试';
+        }
       }
-      return;
     }
-    state.message = '接管失败，请稍后重试';
+    if (!committed || !requestIsCurrent(generation, key)) return;
+    state.takeoverMode = '';
+    await refreshTaskAuthority(
+      '任务已接管',
+      generation,
+      key,
+      '任务已接管，但最新状态加载失败，当前任务已锁定，请返回待办刷新'
+    );
   } finally {
     if (requestIsCurrent(generation, key)) {
       state.mutationBusy = false;
@@ -1727,27 +1733,32 @@ async function retryApprovalNotification() {
   state.mutationBusy = true;
   renderTaskDetail();
   try {
-    const result = await api('/api/manage/stores/'
-      + encodeURIComponent(task.store_id) + '/approvals/'
-      + encodeURIComponent(task.task_type) + '/'
-      + encodeURIComponent(task.task_id) + '/notify/retry', { method: 'POST' });
-    if (!requestIsCurrent(generation, key)) return;
+    let result = null;
+    try {
+      result = await api('/api/manage/stores/'
+        + encodeURIComponent(task.store_id) + '/approvals/'
+        + encodeURIComponent(task.task_type) + '/'
+        + encodeURIComponent(task.task_id) + '/notify/retry', { method: 'POST' });
+    } catch (error) {
+      if (requestIsCurrent(generation, key)) {
+        const message = error.status === 403
+          ? '当前账号无权重试通知，已刷新最新状态'
+          : error.status === 409
+            ? 'Telegram 通知重试冲突，已刷新最新状态'
+            : 'Telegram 通知发送失败，已刷新最新状态';
+        await refreshTaskAuthority(message, generation, key);
+      }
+    }
+    if (!result || !requestIsCurrent(generation, key)) return;
     const message = result.notification && result.notification.status === 'retrying'
       ? 'Telegram 通知正在由其他管理员重试'
       : 'Telegram 通知已发送';
-    await refreshCurrentTask(message, generation, key);
-  } catch (error) {
-    if (!requestIsCurrent(generation, key)) return;
-    const message = error.status === 403
-      ? '当前账号无权重试通知，已刷新最新状态'
-      : error.status === 409
-        ? 'Telegram 通知重试冲突，已刷新最新状态'
-        : 'Telegram 通知发送失败，已刷新最新状态';
-    try {
-      await refreshCurrentTask(message, generation, key);
-    } catch {
-      if (requestIsCurrent(generation, key)) markAuthorityStale();
-    }
+    await refreshTaskAuthority(
+      message,
+      generation,
+      key,
+      message + '，但最新状态加载失败，当前任务已锁定，请返回待办刷新'
+    );
   } finally {
     if (requestIsCurrent(generation, key)) {
       state.mutationBusy = false;
@@ -1854,11 +1865,24 @@ async function refreshCurrentTask(
   renderTaskDetail();
 }
 
-function markAuthorityStale() {
+async function refreshTaskAuthority(message, generation, key, staleMessage = '') {
+  try {
+    await refreshCurrentTask(message, generation, key);
+    return true;
+  } catch {
+    if (requestIsCurrent(generation, key)) {
+      if (staleMessage) markAuthorityStale(staleMessage);
+      else markAuthorityStale();
+    }
+    return false;
+  }
+}
+
+function markAuthorityStale(message = '最新状态加载失败，当前任务已锁定，请返回待办刷新') {
   state.authorityStale = true;
   state.mutationBusy = false;
   state.decisionMode = '';
-  state.message = '最新状态加载失败，当前任务已锁定，请返回待办刷新';
+  state.message = message;
   stopClaimTimer();
   renderTaskDetail();
 }

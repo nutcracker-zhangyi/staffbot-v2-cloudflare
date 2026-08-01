@@ -41,8 +41,10 @@ function fixture({
   failReconnectSession = false,
   takeoverGate = null,
   takeoverConflict = false,
+  takeoverRefreshFails = false,
   notificationRetryGate = null,
   notificationRetryFails = false,
+  notificationRetryRefreshFails = false,
   detailOverrides = {}
 } = {}) {
   const requests = [];
@@ -159,6 +161,7 @@ function fixture({
               lease_expires_at: '2099-07-29T02:20:00.000Z',
               active: true
             };
+            if (takeoverRefreshFails) authorityRefreshFails = true;
             return json({ ok: true, claim: structuredClone(currentTask.claim) });
           }
           if (path === '/api/manage/stores/STORE-1/approvals/income/INC-1/notify/retry') {
@@ -167,6 +170,7 @@ function fixture({
               return json({ ok: false, error: 'notification_retry_not_available' }, 409);
             }
             notificationRetried = true;
+            if (notificationRetryRefreshFails) authorityRefreshFails = true;
             return json({ ok: true, notification: { status: 'sent', retryable: false } });
           }
           if (path.endsWith('/approve')) {
@@ -424,6 +428,36 @@ test('an occupied approval can be taken over with a reason and authoritative ref
   assert.equal(browser.document.getElementById('approve').disabled, false);
 });
 
+test('a committed approval takeover stays locked when its authoritative refresh fails', async () => {
+  const app = fixture({
+    takeoverRefreshFails: true,
+    initialTask: {
+      ...task,
+      claim: {
+        claimed_by: 'ADMIN-2',
+        claimed_at: '2026-07-29T02:00:00.000Z',
+        lease_expires_at: '2099-07-29T02:15:00.000Z',
+        active: true
+      }
+    }
+  });
+  const browser = await app.browser();
+  await browser.clickButton('查看详情');
+  await browser.clickButton('负责人接管');
+  await browser.input('takeover-reason', '接管后刷新失败');
+  await browser.clickButton('确认接管');
+
+  const detailReads = app.requests.filter((request) => (
+    request.path === '/api/manage/stores/STORE-1/approvals/income/INC-1'
+  ));
+  assert.equal(detailReads.length, 2);
+  assert.match(browser.document.getElementById('app-message').textContent, /任务已接管.*最新状态加载失败.*锁定/);
+  assert.doesNotMatch(browser.document.getElementById('app-message').textContent, /接管失败/);
+  assert.equal(browser.document.getElementById('takeover').disabled, true);
+  await browser.clickButton('负责人接管');
+  assert.equal(app.requests.filter((request) => request.path.endsWith('/takeover')).length, 1);
+});
+
 test('approval takeover is offline-disabled and a conflict refreshes current authority', async () => {
   const occupied = {
     ...task,
@@ -508,6 +542,33 @@ test('failed approval Telegram notification can retry once and refresh authorita
   )).length >= 2);
   assert.equal(browser.document.getElementById('retry-approval-notification'), null);
   assert.match(browser.document.app.textContent, /Telegram 通知已发送/);
+});
+
+test('a committed approval Telegram retry stays locked when its authoritative refresh fails', async () => {
+  const app = fixture({
+    notificationRetryRefreshFails: true,
+    initialTask: { ...task, status: 'approved', claim: null },
+    detailOverrides: { history: [{
+      id: 2,
+      admin_id: 'ADMIN-1',
+      action: 'approval_notification_failed',
+      details: { task_type: 'income' },
+      created_at: '2026-07-29T02:15:00.000Z'
+    }] }
+  });
+  const browser = await app.browser();
+  await browser.clickButton('查看详情');
+  await browser.clickButton('重试 Telegram 通知');
+
+  const detailReads = app.requests.filter((request) => (
+    request.path === '/api/manage/stores/STORE-1/approvals/income/INC-1'
+  ));
+  assert.equal(detailReads.length, 2);
+  assert.match(browser.document.getElementById('app-message').textContent, /Telegram 通知已发送.*最新状态加载失败.*锁定/);
+  assert.doesNotMatch(browser.document.getElementById('app-message').textContent, /通知发送失败/);
+  assert.equal(browser.document.getElementById('retry-approval-notification').disabled, true);
+  await browser.clickButton('重试 Telegram 通知');
+  assert.equal(app.requests.filter((request) => request.path.endsWith('/notify/retry')).length, 1);
 });
 
 test('approval Telegram retry is offline-disabled and a conflict refreshes history', async () => {
@@ -1291,8 +1352,10 @@ function payrollFixture({
   draftFallbackAttempt = null,
   takeoverGate = null,
   takeoverErrorStatus = 0,
+  takeoverRefreshFails = false,
   notificationRetryGate = null,
   notificationRetryFails = false,
+  notificationRetryRefreshFails = false,
   confirm = () => true
 } = {}) {
   const requests = [];
@@ -1306,6 +1369,7 @@ function payrollFixture({
   let nextDossierGate = null;
   let manageTasks = null;
   let currentDraftFallback = draftFallbackAttempt;
+  let authorityRefreshFails = false;
   return {
     requests,
     setDossier(value) { dossier = structuredClone(value); },
@@ -1360,6 +1424,9 @@ function payrollFixture({
             return json({ payroll: [] });
           }
           if (path === '/api/manage/stores/STORE-1/payroll/PAYROLL-1' && method === 'GET') {
+            if (authorityRefreshFails) {
+              return json({ ok: false, error: 'refresh_failed' }, 503);
+            }
             if (nextDossierGate) {
               const gate = nextDossierGate;
               nextDossierGate = null;
@@ -1384,6 +1451,7 @@ function payrollFixture({
               }, takeoverErrorStatus);
             }
             dossier.payroll.claim = structuredClone(activeClaim);
+            if (takeoverRefreshFails) authorityRefreshFails = true;
             return json({ ok: true, claim: activeClaim });
           }
           if (path.endsWith('/attempts/draft')) {
@@ -1451,6 +1519,7 @@ function payrollFixture({
               details: { attempt_id: retryMatch[1], version: 1 },
               created_at: '2026-07-29T02:20:00.000Z'
             });
+            if (notificationRetryRefreshFails) authorityRefreshFails = true;
             return json({ ok: true, notification: { status: 'sent', retryable: false } });
           }
           return json({ ok: false, error: 'not_found' }, 404);
@@ -1502,6 +1571,30 @@ test('an occupied payroll can be taken over with a reason and authoritative refr
   )));
   assert.match(browser.document.getElementById('claim-status').textContent, /ADMIN-1/);
   assert.equal(browser.document.getElementById('start-payroll-payment').disabled, false);
+});
+
+test('a committed payroll takeover stays locked when its authoritative refresh fails', async () => {
+  const occupied = payrollDossier({
+    claim: {
+      claimed_by: 'ADMIN-2',
+      claimed_at: '2026-07-29T02:00:00.000Z',
+      lease_expires_at: '2099-07-29T02:15:00.000Z',
+      active: true
+    }
+  });
+  const app = payrollFixture({ initialDossier: occupied, takeoverRefreshFails: true });
+  const browser = await app.browser();
+  await browser.clickButton('工资');
+  await browser.clickButton('查看工资档案');
+  await browser.clickButton('负责人接管');
+  await browser.input('takeover-reason', '工资接管后刷新失败');
+  await browser.clickButton('确认接管');
+
+  assert.match(browser.document.getElementById('app-message').textContent, /工资状态刷新失败.*只读/);
+  assert.doesNotMatch(browser.document.getElementById('app-message').textContent, /接管失败/);
+  assert.equal(browser.document.getElementById('takeover').disabled, true);
+  await browser.clickButton('负责人接管');
+  assert.equal(app.requests.filter((request) => request.path.endsWith('/takeover')).length, 1);
 });
 
 test('payroll takeover is offline-disabled and a 403 refreshes without claiming success', async () => {
@@ -1565,6 +1658,32 @@ test('failed payroll Telegram notification can retry and refresh exact attempt h
   )).length >= 2);
   assert.equal(browser.document.getElementById('retry-payroll-notification-ATTEMPT-OLD'), null);
   assert.match(browser.document.getElementById('app-message').textContent, /Telegram 通知已发送/);
+});
+
+test('a committed payroll Telegram retry stays locked when its authoritative refresh fails', async () => {
+  const failed = payrollDossier();
+  failed.payroll.status = 'awaiting_employee_confirmation';
+  failed.history.push({
+    id: 2,
+    admin_id: 'ADMIN-1',
+    action: 'payroll_notification_failed',
+    details: { attempt_id: 'ATTEMPT-OLD', version: 1 },
+    created_at: '2026-07-29T02:15:00.000Z'
+  });
+  const app = payrollFixture({
+    initialDossier: failed,
+    notificationRetryRefreshFails: true
+  });
+  const browser = await app.browser();
+  await browser.clickButton('工资');
+  await browser.clickButton('查看工资档案');
+  await browser.clickButton('重试 Telegram 通知');
+
+  assert.match(browser.document.getElementById('app-message').textContent, /工资状态刷新失败.*只读/);
+  assert.doesNotMatch(browser.document.getElementById('app-message').textContent, /通知发送失败/);
+  assert.equal(browser.document.getElementById('retry-payroll-notification-ATTEMPT-OLD').disabled, true);
+  await browser.clickButton('重试 Telegram 通知');
+  assert.equal(app.requests.filter((request) => request.path.endsWith('/notify/retry')).length, 1);
 });
 
 test('payroll Telegram retry is offline-disabled and a conflict refreshes without success', async () => {

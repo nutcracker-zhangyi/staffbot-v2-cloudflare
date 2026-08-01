@@ -15,8 +15,8 @@ or real-device operation was performed during the local implementation stage.
 | Check | Result | Evidence |
 | --- | --- | --- |
 | Syntax | PASS | `npm run check` |
-| Focused PWA behavior | PASS | 98/98 in the manage page, security, and routing test files |
-| Full regression | PASS | 567/567 via `npm test` |
+| Focused PWA behavior | PASS | 102/102 in the manage page, security, and routing test files |
+| Full regression | PASS | 571/571 via `npm test` |
 | Whitespace | PASS | `git diff --check` |
 | Manifest | PASS | Response fetched and parsed as JSON; install metadata and security/cache headers asserted |
 | Service worker | PASS | Real `/manage/sw.js` response executed in a fake Worker global |
