@@ -512,11 +512,33 @@ CREATE TABLE IF NOT EXISTS admin_sessions (
   token TEXT PRIMARY KEY,
   telegram_id TEXT NOT NULL,
   expires_at TEXT NOT NULL,
-  created_at TEXT NOT NULL
+  created_at TEXT NOT NULL,
+  csrf_token TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_admin_sessions_expires_at
   ON admin_sessions (expires_at);
+
+CREATE TABLE IF NOT EXISTS admin_task_claims (
+  task_type TEXT NOT NULL
+    CHECK (task_type IN (
+      'income',
+      'leave',
+      'absence',
+      'advance',
+      'payroll'
+    )),
+  task_id TEXT NOT NULL,
+  store_id TEXT NOT NULL,
+  claimed_by TEXT NOT NULL,
+  claimed_at TEXT NOT NULL,
+  lease_expires_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  PRIMARY KEY (task_type, task_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_admin_task_claims_store_expiry
+  ON admin_task_claims (store_id, lease_expires_at);
 
 CREATE TABLE IF NOT EXISTS admin_login_codes (
   telegram_id TEXT PRIMARY KEY,
