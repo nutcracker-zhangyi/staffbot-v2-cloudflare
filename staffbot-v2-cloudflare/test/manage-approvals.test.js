@@ -518,6 +518,72 @@ test('income decision cannot commit after its validated claim expires', async ()
   }
 });
 
+test('dual-write absence approval cannot commit when its claim expires during store lookup', async () => {
+  const fixture = setup();
+  const originalFetch = globalThis.fetch;
+  let sends = 0;
+  fixture.env.PAYROLL_LEDGER_WRITE_MODE = 'dual';
+  globalThis.fetch = async (...args) => {
+    sends += 1;
+    return telegramFetch()(...args);
+  };
+  try {
+    await claim(fixture.env, 'absence');
+    let expired = false;
+    fixture.env.DB = createD1(fixture.database, {
+      async afterFirst(sql) {
+        if (expired || !sql.includes('SELECT * FROM stores WHERE store_id = ?')) {
+          return;
+        }
+        expired = true;
+        fixture.database.prepare(`
+          UPDATE admin_task_claims
+          SET lease_expires_at = ?
+          WHERE task_type = 'absence' AND task_id = 'ABS-1'
+        `).run(new Date(Date.now() + 5).toISOString());
+        await new Promise((resolve) => setTimeout(resolve, 15));
+      }
+    });
+
+    const response = await managePost(
+      fixture.env,
+      '/api/manage/stores/STORE-1/approvals/absence/ABS-1/approve'
+    );
+
+    assert.equal(response.status, 409);
+    assert.equal((await response.json()).error, 'task_claim_required');
+    assert.equal(
+      fixture.database.prepare(`
+        SELECT status FROM absence_fine_requests WHERE request_id = 'ABS-1'
+      `).get().status,
+      'pending'
+    );
+    assert.equal(
+      fixture.database.prepare(`
+        SELECT COUNT(*) AS total FROM income_records WHERE request_id = 'ABS-1'
+      `).get().total,
+      0
+    );
+    assert.equal(
+      fixture.database.prepare(`
+        SELECT COUNT(*) AS total FROM payroll_entries WHERE source_id = 'ABS-1'
+      `).get().total,
+      0
+    );
+    assert.equal(
+      fixture.database.prepare(`
+        SELECT COUNT(*) AS total FROM admin_task_claims
+        WHERE task_type = 'absence' AND task_id = 'ABS-1'
+      `).get().total,
+      1
+    );
+    assert.equal(sends, 0);
+  } finally {
+    globalThis.fetch = originalFetch;
+    fixture.database.close();
+  }
+});
+
 test('notification retry is unavailable after an already successful delivery', async () => {
   const fixture = setup();
   const originalFetch = globalThis.fetch;

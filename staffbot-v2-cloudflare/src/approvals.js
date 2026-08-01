@@ -417,6 +417,10 @@ export async function approveAbsenceFineRequest(env, requestId, adminId, expecte
       : { ok: false };
   }
 
+  const ledgerWritesEnabled = payrollLedgerWritesEnabled(env);
+  const store = ledgerWritesEnabled
+    ? await getStore(env, found.store_id)
+    : null;
   const decidedAt = nowIso();
   claim = claimAt(claim, decidedAt);
   const recordId = makeId('REC');
@@ -435,8 +439,7 @@ export async function approveAbsenceFineRequest(env, requestId, adminId, expecte
       draft.approved_at, draft.admin_id, ...requestParams, ...guard.params
     )
   ];
-  if (payrollLedgerWritesEnabled(env)) {
-    const store = await getStore(env, found.store_id);
+  if (ledgerWritesEnabled) {
     const entry = payrollEntryFromIncomeRecordDraft(
       draft,
       store.currency,
