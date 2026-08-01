@@ -74,6 +74,16 @@ function claim(database, adminId = 'ADMIN-1') {
   );
 }
 
+async function testIdempotencyHash(value) {
+  const digest = await crypto.subtle.digest(
+    'SHA-256',
+    new TextEncoder().encode(value)
+  );
+  return Array.from(new Uint8Array(digest))
+    .map((byte) => byte.toString(16).padStart(2, '0'))
+    .join('');
+}
+
 test('a payroll claim creates one draft and only its claimant can resume it', async () => {
   const { database, env } = fixture();
   try {
@@ -423,6 +433,98 @@ test('submission is idempotent and abandonment closes only a claimed draft', asy
     assert.equal(database.prepare(`
       SELECT status FROM payroll_payment_attempts WHERE attempt_id = ?
     `).get(next.attempt_id).status, 'abandoned');
+  } finally {
+    database.close();
+  }
+});
+
+test('a same-key submit loser returns the concurrent winner without duplicating its attempt audit', async () => {
+  const { database, env } = fixture();
+  try {
+    claim(database);
+    const draft = await createOrResumeDraftAttempt(
+      env, 'ADMIN-1', 'PAYROLL-1', new Date('2026-07-29T04:00:00Z')
+    );
+    await saveAttemptSplit(env, 'ADMIN-1', draft.attempt_id, {
+      bank_micros: 100_000_000,
+      usdt_micros: 0,
+      cash_micros: 0
+    }, new Date('2026-07-29T04:01:00Z'));
+    database.prepare(`
+      INSERT INTO payroll_payment_proofs (
+        proof_id, payroll_id, attempt_id, method, object_key,
+        mime_type, size_bytes, sort_order, uploaded_by, uploaded_at
+      ) VALUES (
+        'CONCURRENT-PROOF', 'PAYROLL-1', ?, 'bank', 'concurrent-proof',
+        'image/jpeg', 1, 1, 'ADMIN-1', '2026-07-29T04:02:00.000Z'
+      )
+    `).run(draft.attempt_id);
+    database.prepare(`
+      INSERT INTO admin_audit_logs (
+        store_id, admin_id, action, target_id, details_json, created_at
+      ) VALUES ('STORE-1', 'ADMIN-0', 'submit_payroll_payment_attempt',
+        'PAYROLL-1', ?, '2026-07-01T00:00:00.000Z')
+    `).run(JSON.stringify({ attempt_id: 'OLDER-ATTEMPT', version: 1 }));
+
+    const nowIso = '2026-07-29T04:03:00.000Z';
+    const key = 'same-concurrent-key';
+    const hash = await testIdempotencyHash(key);
+    let winnerCommitted = false;
+    env.DB = createD1(database, {
+      beforeBatchStatement(sql) {
+        if (winnerCommitted || !sql.includes("SET status = 'submitted'")) return;
+        winnerCommitted = true;
+        database.prepare(`
+          UPDATE payroll_payment_attempts
+          SET status = 'submitted', submitted_by = 'ADMIN-1',
+              submitted_at = ?, idempotency_key_hash = ?, updated_at = ?
+          WHERE attempt_id = ?
+        `).run(nowIso, hash, nowIso, draft.attempt_id);
+        database.prepare(`
+          UPDATE payroll_disbursements
+          SET status = 'awaiting_employee_confirmation', updated_at = ?
+          WHERE payroll_id = 'PAYROLL-1'
+        `).run(nowIso);
+        database.prepare(`
+          INSERT INTO admin_audit_logs (
+            store_id, admin_id, action, target_id, details_json, created_at
+          ) VALUES (
+            'STORE-1', 'ADMIN-1', 'submit_payroll_payment_attempt',
+            'PAYROLL-1', ?, ?
+          )
+        `).run(JSON.stringify({
+          attempt_id: draft.attempt_id,
+          version: draft.version,
+          proof_ids: ['CONCURRENT-PROOF'],
+          idempotency_key_hash: hash
+        }), nowIso);
+        database.prepare(`
+          DELETE FROM admin_task_claims
+          WHERE task_type = 'payroll' AND task_id = 'PAYROLL-1'
+        `).run();
+      }
+    });
+
+    const replay = await submitPaymentAttempt(
+      env,
+      'ADMIN-1',
+      draft.attempt_id,
+      key,
+      new Date(nowIso)
+    );
+    assert.equal(replay.status, 'submitted');
+    assert.equal(replay.idempotency_key_hash, hash);
+    assert.equal(database.prepare(`
+      SELECT COUNT(*) AS total FROM admin_audit_logs
+      WHERE action = 'submit_payroll_payment_attempt'
+        AND target_id = 'PAYROLL-1'
+        AND json_extract(details_json, '$.attempt_id') = ?
+    `).get(draft.attempt_id).total, 1);
+    assert.equal(database.prepare(`
+      SELECT COUNT(*) AS total FROM admin_audit_logs
+      WHERE action = 'submit_payroll_payment_attempt'
+        AND target_id = 'PAYROLL-1'
+    `).get().total, 2);
   } finally {
     database.close();
   }

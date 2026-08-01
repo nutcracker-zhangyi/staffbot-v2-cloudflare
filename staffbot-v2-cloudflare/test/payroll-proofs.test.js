@@ -516,8 +516,79 @@ test('Telegram completion audit uses the final submitted split after a split rac
       WHERE action = 'complete_payroll_proofs'
     `).get();
     assert.deepEqual(JSON.parse(audit.details_json), {
+      attempt_id: 'ATTEMPT-CURRENT',
       required_methods: ['cash']
     });
+  } finally {
+    fixture.database.close();
+  }
+});
+
+test('concurrent Telegram completion does not duplicate the current attempt audit', async () => {
+  const fixture = proofFixture();
+  try {
+    fixture.database.exec(`
+      INSERT INTO payroll_payment_proofs (
+        proof_id, payroll_id, attempt_id, method, object_key,
+        telegram_file_id, mime_type, size_bytes, sort_order,
+        uploaded_by, uploaded_at
+      ) VALUES
+        ('CONCURRENT-P1', 'PAYROLL-1', 'ATTEMPT-CURRENT', 'bank',
+         'concurrent-p1', 'T1', 'image/jpeg', 1, 1,
+         'ADMIN-1', '2026-07-16T04:00:00.000Z'),
+        ('CONCURRENT-P2', 'PAYROLL-1', 'ATTEMPT-CURRENT', 'usdt',
+         'concurrent-p2', 'T2', 'image/jpeg', 1, 1,
+         'ADMIN-1', '2026-07-16T04:00:00.000Z');
+    `);
+    const nowIso = '2026-07-16T05:00:00.000Z';
+    let winnerCommitted = false;
+    fixture.env.DB = createD1(fixture.database, {
+      beforeBatchStatement(sql) {
+        if (winnerCommitted || !sql.includes("SET status = 'submitted'")) return;
+        winnerCommitted = true;
+        fixture.database.prepare(`
+          UPDATE payroll_payment_attempts
+          SET status = 'submitted', submitted_by = 'ADMIN-1',
+              submitted_at = ?, updated_at = ?
+          WHERE attempt_id = 'ATTEMPT-CURRENT'
+        `).run(nowIso, nowIso);
+        fixture.database.prepare(`
+          UPDATE payroll_disbursements
+          SET status = 'awaiting_employee_confirmation', updated_at = ?
+          WHERE payroll_id = 'PAYROLL-1'
+        `).run(nowIso);
+        fixture.database.prepare(`
+          INSERT INTO admin_audit_logs (
+            store_id, admin_id, action, target_id,
+            details_json, created_at
+          ) VALUES (
+            'STORE-1', 'ADMIN-1', 'complete_payroll_proofs',
+            'PAYROLL-1', ?, ?
+          )
+        `).run(JSON.stringify({
+          attempt_id: 'ATTEMPT-CURRENT',
+          required_methods: ['bank', 'usdt']
+        }), nowIso);
+      }
+    });
+
+    await assert.rejects(completePayrollProofs(
+      fixture.env,
+      'ADMIN-1',
+      'PAYROLL-1',
+      new Date(nowIso)
+    ), /payroll proof completion conflict/);
+    assert.equal(fixture.database.prepare(`
+      SELECT COUNT(*) AS total FROM admin_audit_logs
+      WHERE action = 'complete_payroll_proofs'
+        AND target_id = 'PAYROLL-1'
+        AND json_extract(details_json, '$.attempt_id') = 'ATTEMPT-CURRENT'
+    `).get().total, 1);
+    assert.equal(fixture.database.prepare(`
+      SELECT COUNT(*) AS total FROM admin_audit_logs
+      WHERE action = 'complete_payroll_proofs'
+        AND target_id = 'PAYROLL-1'
+    `).get().total, 1);
   } finally {
     fixture.database.close();
   }

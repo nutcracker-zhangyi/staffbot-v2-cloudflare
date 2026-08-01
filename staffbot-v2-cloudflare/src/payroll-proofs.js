@@ -386,6 +386,7 @@ export async function completePayrollProofs(
       )
       SELECT d.store_id, ?, 'complete_payroll_proofs', d.payroll_id,
         json_object(
+          'attempt_id', a.attempt_id,
           'required_methods', json(COALESCE((
             SELECT json_group_array(method)
             FROM (
@@ -409,6 +410,14 @@ export async function completePayrollProofs(
         AND a.status = 'submitted'
         AND a.submitted_by = ?
         AND a.submitted_at = ?
+        AND NOT EXISTS (
+          SELECT 1 FROM admin_audit_logs existing
+          WHERE existing.store_id = d.store_id
+            AND existing.action = 'complete_payroll_proofs'
+            AND existing.target_id = d.payroll_id
+            AND json_extract(existing.details_json, '$.attempt_id')
+              = a.attempt_id
+        )
     `).bind(
       String(adminId),
       nowIso,

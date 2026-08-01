@@ -918,6 +918,14 @@ export async function submitPaymentAttempt(
         AND a.idempotency_key_hash = ?
         AND d.current_payment_attempt_id = a.attempt_id
         AND d.status = 'awaiting_employee_confirmation'
+        AND NOT EXISTS (
+          SELECT 1 FROM admin_audit_logs existing
+          WHERE existing.store_id = d.store_id
+            AND existing.action = 'submit_payroll_payment_attempt'
+            AND existing.target_id = d.payroll_id
+            AND json_extract(existing.details_json, '$.attempt_id')
+              = a.attempt_id
+        )
     `).bind(
       String(adminId),
       nowIso,
@@ -946,6 +954,16 @@ export async function submitPaymentAttempt(
   ]);
   if (Number(results[0] && results[0].meta.changes) !== 1
     || Number(results[1] && results[1].meta.changes) !== 1) {
+    const replay = await env.DB.prepare(`
+      SELECT * FROM payroll_payment_attempts WHERE attempt_id = ?
+    `).bind(context.attempt_id).first();
+    if (replay
+      && ['submitted', 'employee_confirmed', 'employee_disputed'].includes(
+        replay.status
+      )
+      && replay.idempotency_key_hash === hash) {
+      return replay;
+    }
     throw new Error('payment attempt conflict');
   }
   return env.DB.prepare(`
