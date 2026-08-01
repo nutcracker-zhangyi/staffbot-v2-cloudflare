@@ -179,6 +179,52 @@ test('payroll list and dossier are store-scoped, masked, and include complete hi
   }
 });
 
+test('payroll dossier keeps every version and marks only the latest confirmed attempt', async () => {
+  const fixture = setup();
+  try {
+    fixture.database.exec(`
+      UPDATE payroll_payment_attempts
+      SET status = 'employee_confirmed', employee_response = 'confirmed',
+          employee_responded_at = '2026-07-16T04:30:00.000Z',
+          updated_at = '2026-07-16T04:30:00.000Z'
+      WHERE attempt_id = 'ATTEMPT-HISTORY';
+      INSERT INTO payroll_payment_attempts (
+        attempt_id, payroll_id, version, status,
+        bank_micros, usdt_micros, cash_micros,
+        submitted_by, submitted_at, employee_response,
+        employee_responded_at, created_at, updated_at
+      ) VALUES (
+        'ATTEMPT-LATEST', 'PAYROLL-1', 2, 'employee_confirmed',
+        60000000, 0, 40000000, 'ADMIN-1',
+        '2026-07-16T05:00:00.000Z', 'confirmed',
+        '2026-07-16T05:30:00.000Z',
+        '2026-07-16T04:45:00.000Z', '2026-07-16T05:30:00.000Z'
+      );
+      UPDATE payroll_disbursements
+      SET current_payment_attempt_id = 'ATTEMPT-LATEST', status = 'confirmed'
+      WHERE payroll_id = 'PAYROLL-1';
+    `);
+
+    const response = await request(
+      fixture.env,
+      '/api/manage/stores/STORE-1/payroll/PAYROLL-1'
+    );
+    const dossier = await response.json();
+
+    assert.equal(response.status, 200);
+    assert.deepEqual(dossier.attempts.map((attempt) => ({
+      version: attempt.version,
+      status: attempt.status,
+      latest_confirmed: attempt.latest_confirmed
+    })), [
+      { version: 2, status: 'employee_confirmed', latest_confirmed: true },
+      { version: 1, status: 'employee_confirmed', latest_confirmed: false }
+    ]);
+  } finally {
+    fixture.database.close();
+  }
+});
+
 test('authorized USDT QR read stays private and does not expose its object key', async () => {
   const fixture = setup();
   try {

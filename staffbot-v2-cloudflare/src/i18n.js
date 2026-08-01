@@ -55,9 +55,9 @@ const TEXT = {
   payroll_confirmation_delivery_failed: { zh: '发送员工确认消息失败，请点击“完成上传”重试。', en: 'Failed to send the employee confirmation. Tap Finish upload to retry.', vi: 'Gửi xác nhận cho nhân viên thất bại. Bấm Hoàn tất tải lên để thử lại.' },
   payroll_confirmation_failed: { zh: '暂时无法确认收款，请联系管理员。', en: 'Unable to confirm receipt right now. Contact an admin.', vi: 'Hiện chưa thể xác nhận đã nhận. Hãy liên hệ quản trị viên.' },
   payroll_receipt_confirmed: {
-    zh: '✅ 工资收款已确认\n\n员工：{employee}\nTelegram ID：{telegram_id}\n店铺：{store}\n\n工资周期：\n{period_start} 至 {period_end}\n\n工资总额：{amount}\n{payment_methods}\n\n确认时间：{confirmed_at}\n工资 ID：{payroll_id}',
-    en: '✅ Payroll receipt confirmed\n\nEmployee: {employee}\nTelegram ID: {telegram_id}\nStore: {store}\n\nPayroll period:\n{period_start} to {period_end}\n\nTotal payroll: {amount}\n{payment_methods}\n\nConfirmed at: {confirmed_at}\nPayroll ID: {payroll_id}',
-    vi: '✅ Đã xác nhận nhận lương\n\nNhân viên: {employee}\nTelegram ID: {telegram_id}\nCửa hàng: {store}\n\nKỳ lương:\n{period_start} đến {period_end}\n\nTổng lương: {amount}\n{payment_methods}\n\nThời gian xác nhận: {confirmed_at}\nMã lương: {payroll_id}'
+    zh: '✅ 工资收款已确认\n\n员工：{employee}\nTelegram ID：{telegram_id}\n店铺：{store}\n\n工资周期：\n{period_start} 至 {period_end}\n\n工资总额：{amount}\n{payment_methods}\n\n确认时间：{confirmed_at}\n付款版本：{version}\n工资 ID：{payroll_id}',
+    en: '✅ Payroll receipt confirmed\n\nEmployee: {employee}\nTelegram ID: {telegram_id}\nStore: {store}\n\nPayroll period:\n{period_start} to {period_end}\n\nTotal payroll: {amount}\n{payment_methods}\n\nConfirmed at: {confirmed_at}\nPayment version: {version}\nPayroll ID: {payroll_id}',
+    vi: '✅ Đã xác nhận nhận lương\n\nNhân viên: {employee}\nTelegram ID: {telegram_id}\nCửa hàng: {store}\n\nKỳ lương:\n{period_start} đến {period_end}\n\nTổng lương: {amount}\n{payment_methods}\n\nThời gian xác nhận: {confirmed_at}\nPhiên bản thanh toán: {version}\nMã lương: {payroll_id}'
   },
   payroll_receipt_confirmed_ack: { zh: '确认成功。', en: 'Confirmed.', vi: 'Đã xác nhận.' },
   payroll_payment_method_amount: { zh: '{method}：{amount}', en: '{method}: {amount}', vi: '{method}: {amount}' },
@@ -71,6 +71,7 @@ const TEXT = {
   current_store: { zh: '当前店铺：{store}', en: 'Current store: {store}', vi: 'Cửa hàng hiện tại: {store}' },
   need_store_choice: { zh: '你属于多个店铺，请先选择当前店铺。', en: 'You belong to multiple stores. Choose the current store first.', vi: 'Bạn thuộc nhiều cửa hàng. Vui lòng chọn cửa hàng hiện tại trước.' },
   already_processed: { zh: '该请求已处理。', en: 'This request was already processed.', vi: 'Yêu cầu này đã được xử lý.' },
+  payroll_payment_version_stale: { zh: '这条付款消息已过期，请使用最新消息。', en: 'This payment message is outdated. Use the latest message.', vi: 'Tin nhắn thanh toán này đã cũ. Hãy dùng tin nhắn mới nhất.' },
   btn_store: { zh: '切换店铺', en: 'Switch Store', vi: 'Đổi cửa hàng' },
   btn_income: { zh: '提交收入', en: 'Submit Income', vi: 'Nộp thu nhập' },
   btn_total: { zh: '总收入', en: 'Total Income', vi: 'Tổng thu nhập' },
@@ -203,7 +204,7 @@ const RU_TEXT = {
   btn_dispute_payment: 'Сообщить о проблеме',
   payroll_confirmation_delivery_failed: 'Не удалось отправить подтверждение сотруднику. Нажмите «Завершить загрузку», чтобы повторить.',
   payroll_confirmation_failed: 'Сейчас невозможно подтвердить получение. Свяжитесь с администратором.',
-  payroll_receipt_confirmed: '✅ Получение зарплаты подтверждено\n\nСотрудник: {employee}\nTelegram ID: {telegram_id}\nМагазин: {store}\n\nРасчетный период:\n{period_start} — {period_end}\n\nОбщая сумма: {amount}\n{payment_methods}\n\nВремя подтверждения: {confirmed_at}\nID зарплаты: {payroll_id}',
+  payroll_receipt_confirmed: '✅ Получение зарплаты подтверждено\n\nСотрудник: {employee}\nTelegram ID: {telegram_id}\nМагазин: {store}\n\nРасчетный период:\n{period_start} — {period_end}\n\nОбщая сумма: {amount}\n{payment_methods}\n\nВремя подтверждения: {confirmed_at}\nВерсия платежа: {version}\nID зарплаты: {payroll_id}',
   payroll_receipt_confirmed_ack: 'Подтверждено.',
   payroll_payment_method_amount: '{method}: {amount}',
   payroll_dispute_submitted: 'Проблема с выплатой отправлена. Администратор исправит ее и повторно отправит подтверждение.',
@@ -216,6 +217,7 @@ const RU_TEXT = {
   current_store: 'Текущий магазин: {store}',
   need_store_choice: 'Вы привязаны к нескольким магазинам. Сначала выберите текущий магазин.',
   already_processed: 'Этот запрос уже обработан.',
+  payroll_payment_version_stale: 'Это сообщение об оплате устарело. Используйте последнее сообщение.',
   btn_store: 'Сменить магазин',
   btn_income: 'Отправить доход',
   btn_total: 'Общий доход',

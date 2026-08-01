@@ -1,5 +1,7 @@
 import { t } from './i18n.js';
 import {
+  attemptEmployeeResponseStatement,
+  resolveAttemptEmployeeResponse,
   saveCompatibilityPaymentSplit,
   validatePaymentSplit
 } from './payroll-payment-attempts.js';
@@ -332,6 +334,7 @@ async function employeePayroll(env, employeeId, payrollId) {
   const payroll = await env.DB.prepare(`
     SELECT
       d.*,
+      a.version AS payment_version,
       s.name AS store_name,
       s.timezone,
       COALESCE(
@@ -348,6 +351,9 @@ async function employeePayroll(env, employeeId, payrollId) {
      AND m.telegram_id = d.telegram_id
     LEFT JOIN users u
       ON u.telegram_id = d.telegram_id
+    LEFT JOIN payroll_payment_attempts a
+      ON a.attempt_id = d.current_payment_attempt_id
+     AND a.payroll_id = d.payroll_id
     WHERE d.payroll_id = ?
       AND d.telegram_id = ?
   `).bind(payrollId, String(employeeId)).first();
@@ -360,20 +366,62 @@ export async function confirmPayrollReceipt(
   employeeId,
   payrollId,
   financeEmail,
-  now = new Date()
+  now = new Date(),
+  expectedAttemptId = null
 ) {
   const payroll = await employeePayroll(
     env,
     employeeId,
     payrollId
   );
-  if (payroll.status !== 'awaiting_employee_confirmation') {
+  let attemptContext = null;
+  if (payroll.current_payment_attempt_id || expectedAttemptId !== null) {
+    attemptContext = await resolveAttemptEmployeeResponse(
+      env,
+      employeeId,
+      payrollId,
+      'confirmed',
+      expectedAttemptId
+    );
+    if (attemptContext.replay) {
+      return {
+        ...await employeePayroll(env, employeeId, payroll.payroll_id),
+        employee_response_replay: true
+      };
+    }
+  } else if (payroll.status !== 'awaiting_employee_confirmation') {
     throw new Error('already_processed');
   }
   const recipient = String(financeEmail || '').trim();
   const confirmedAt = now.toISOString();
   const salaryRecordId = `SAL-AUTO-${payroll.payroll_id}`;
-  const results = await env.DB.batch([
+  const attempt = attemptContext && attemptContext.attempt;
+  const attemptGuard = attempt ? `
+    AND current_payment_attempt_id = ?
+    AND EXISTS (
+      SELECT 1 FROM payroll_payment_attempts a
+      WHERE a.attempt_id = ?
+        AND a.payroll_id = payroll_disbursements.payroll_id
+        AND a.status = 'employee_confirmed'
+        AND a.employee_response = 'confirmed'
+        AND a.employee_responded_at = ?
+    )
+  ` : '';
+  const attemptGuardBinds = attempt
+    ? [attempt.attempt_id, attempt.attempt_id, confirmedAt]
+    : [];
+  const statements = [];
+  if (attempt) {
+    statements.push(attemptEmployeeResponseStatement(
+      env,
+      employeeId,
+      payroll.payroll_id,
+      attempt.attempt_id,
+      'confirmed',
+      confirmedAt
+    ));
+  }
+  statements.push(
     env.DB.prepare(`
       INSERT INTO salary_records (
         record_id, store_id, telegram_id, amount,
@@ -388,11 +436,17 @@ export async function confirmPayrollReceipt(
       WHERE payroll_id = ?
         AND telegram_id = ?
         AND status = 'awaiting_employee_confirmation'
+        ${attemptGuard}
+        AND NOT EXISTS (
+          SELECT 1 FROM salary_records WHERE request_id = ?
+        )
     `).bind(
       salaryRecordId,
       confirmedAt,
       payroll.payroll_id,
-      String(employeeId)
+      String(employeeId),
+      ...attemptGuardBinds,
+      payroll.payroll_id
     ),
     env.DB.prepare(`
       INSERT INTO payroll_email_outbox (
@@ -404,12 +458,18 @@ export async function confirmPayrollReceipt(
       WHERE payroll_id = ?
         AND telegram_id = ?
         AND status = 'awaiting_employee_confirmation'
+        ${attemptGuard}
+        AND NOT EXISTS (
+          SELECT 1 FROM payroll_email_outbox
+          WHERE payroll_id = payroll_disbursements.payroll_id
+        )
     `).bind(
       recipient,
       confirmedAt,
       confirmedAt,
       payroll.payroll_id,
-      String(employeeId)
+      String(employeeId),
+      ...attemptGuardBinds
     ),
     env.DB.prepare(`
       INSERT INTO admin_audit_logs (
@@ -422,11 +482,28 @@ export async function confirmPayrollReceipt(
       WHERE payroll_id = ?
         AND telegram_id = ?
         AND status = 'awaiting_employee_confirmation'
+        ${attemptGuard}
+        AND NOT EXISTS (
+          SELECT 1 FROM admin_audit_logs existing
+          WHERE existing.action = 'confirm_payroll_receipt'
+            AND existing.target_id = payroll_disbursements.payroll_id
+            ${attempt ? `AND json_extract(
+              existing.details_json, '$.attempt_id'
+            ) = ?` : ''}
+        )
     `).bind(
-      JSON.stringify({ payroll_id: payroll.payroll_id }),
+      JSON.stringify({
+        payroll_id: payroll.payroll_id,
+        ...(attempt ? {
+          attempt_id: attempt.attempt_id,
+          version: Number(attempt.version)
+        } : {})
+      }),
       confirmedAt,
       payroll.payroll_id,
-      String(employeeId)
+      String(employeeId),
+      ...attemptGuardBinds,
+      ...(attempt ? [attempt.attempt_id] : [])
     ),
     env.DB.prepare(`
       UPDATE payroll_disbursements
@@ -437,15 +514,36 @@ export async function confirmPayrollReceipt(
       WHERE payroll_id = ?
         AND telegram_id = ?
         AND status = 'awaiting_employee_confirmation'
+        ${attemptGuard}
     `).bind(
       salaryRecordId,
       confirmedAt,
       confirmedAt,
       payroll.payroll_id,
-      String(employeeId)
+      String(employeeId),
+      ...attemptGuardBinds
     )
-  ]);
-  if (Number(results[3] && results[3].meta.changes) !== 1) {
+  );
+  const results = await env.DB.batch(statements);
+  const attemptOffset = attempt ? 1 : 0;
+  if (attempt
+    && Number(results[0] && results[0].meta.changes) !== 1) {
+    const latest = await resolveAttemptEmployeeResponse(
+      env,
+      employeeId,
+      payrollId,
+      'confirmed',
+      attempt.attempt_id
+    );
+    if (latest.replay) {
+      return {
+        ...await employeePayroll(env, employeeId, payroll.payroll_id),
+        employee_response_replay: true
+      };
+    }
+  }
+  if (Number(results[attemptOffset + 3]
+    && results[attemptOffset + 3].meta.changes) !== 1) {
     throw new Error('already_processed');
   }
   return employeePayroll(env, employeeId, payroll.payroll_id);
@@ -455,18 +553,60 @@ export async function disputePayrollPayment(
   env,
   employeeId,
   payrollId,
-  now = new Date()
+  now = new Date(),
+  expectedAttemptId = null
 ) {
   const payroll = await employeePayroll(
     env,
     employeeId,
     payrollId
   );
-  if (payroll.status !== 'awaiting_employee_confirmation') {
+  let attemptContext = null;
+  if (payroll.current_payment_attempt_id || expectedAttemptId !== null) {
+    attemptContext = await resolveAttemptEmployeeResponse(
+      env,
+      employeeId,
+      payrollId,
+      'disputed',
+      expectedAttemptId
+    );
+    if (attemptContext.replay) {
+      return {
+        ...await employeePayroll(env, employeeId, payroll.payroll_id),
+        employee_response_replay: true
+      };
+    }
+  } else if (payroll.status !== 'awaiting_employee_confirmation') {
     throw new Error('already_processed');
   }
   const disputedAt = now.toISOString();
-  const results = await env.DB.batch([
+  const attempt = attemptContext && attemptContext.attempt;
+  const attemptGuard = attempt ? `
+    AND current_payment_attempt_id = ?
+    AND EXISTS (
+      SELECT 1 FROM payroll_payment_attempts a
+      WHERE a.attempt_id = ?
+        AND a.payroll_id = payroll_disbursements.payroll_id
+        AND a.status = 'employee_disputed'
+        AND a.employee_response = 'disputed'
+        AND a.employee_responded_at = ?
+    )
+  ` : '';
+  const attemptGuardBinds = attempt
+    ? [attempt.attempt_id, attempt.attempt_id, disputedAt]
+    : [];
+  const statements = [];
+  if (attempt) {
+    statements.push(attemptEmployeeResponseStatement(
+      env,
+      employeeId,
+      payroll.payroll_id,
+      attempt.attempt_id,
+      'disputed',
+      disputedAt
+    ));
+  }
+  statements.push(
     env.DB.prepare(`
       INSERT INTO admin_audit_logs (
         store_id, admin_id, action, target_id,
@@ -478,11 +618,28 @@ export async function disputePayrollPayment(
       WHERE payroll_id = ?
         AND telegram_id = ?
         AND status = 'awaiting_employee_confirmation'
+        ${attemptGuard}
+        AND NOT EXISTS (
+          SELECT 1 FROM admin_audit_logs existing
+          WHERE existing.action = 'dispute_payroll_payment'
+            AND existing.target_id = payroll_disbursements.payroll_id
+            ${attempt ? `AND json_extract(
+              existing.details_json, '$.attempt_id'
+            ) = ?` : ''}
+        )
     `).bind(
-      JSON.stringify({ payroll_id: payroll.payroll_id }),
+      JSON.stringify({
+        payroll_id: payroll.payroll_id,
+        ...(attempt ? {
+          attempt_id: attempt.attempt_id,
+          version: Number(attempt.version)
+        } : {})
+      }),
       disputedAt,
       payroll.payroll_id,
-      String(employeeId)
+      String(employeeId),
+      ...attemptGuardBinds,
+      ...(attempt ? [attempt.attempt_id] : [])
     ),
     env.DB.prepare(`
       UPDATE payroll_disbursements
@@ -492,14 +649,35 @@ export async function disputePayrollPayment(
       WHERE payroll_id = ?
         AND telegram_id = ?
         AND status = 'awaiting_employee_confirmation'
+        ${attemptGuard}
     `).bind(
       disputedAt,
       disputedAt,
       payroll.payroll_id,
-      String(employeeId)
+      String(employeeId),
+      ...attemptGuardBinds
     )
-  ]);
-  if (Number(results[1] && results[1].meta.changes) !== 1) {
+  );
+  const results = await env.DB.batch(statements);
+  const attemptOffset = attempt ? 1 : 0;
+  if (attempt
+    && Number(results[0] && results[0].meta.changes) !== 1) {
+    const latest = await resolveAttemptEmployeeResponse(
+      env,
+      employeeId,
+      payrollId,
+      'disputed',
+      attempt.attempt_id
+    );
+    if (latest.replay) {
+      return {
+        ...await employeePayroll(env, employeeId, payroll.payroll_id),
+        employee_response_replay: true
+      };
+    }
+  }
+  if (Number(results[attemptOffset + 1]
+    && results[attemptOffset + 1].meta.changes) !== 1) {
     throw new Error('already_processed');
   }
   return employeePayroll(env, employeeId, payroll.payroll_id);

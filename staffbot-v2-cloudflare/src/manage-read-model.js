@@ -184,6 +184,13 @@ export async function loadPayrollDossier(env, adminId, storeId, payrollId) {
     });
   }
   const hasUsdtQr = Number(payroll.has_usdt_qr) === 1;
+  const attemptHistory = attemptRows.results || [];
+  const latestConfirmedAttempt = attemptHistory.find(
+    (row) => row.status === 'employee_confirmed'
+  );
+  const latestConfirmedAttemptId = latestConfirmedAttempt
+    ? String(latestConfirmedAttempt.attempt_id)
+    : null;
   return {
     payroll: {
       payroll_id: String(payroll.payroll_id),
@@ -212,10 +219,11 @@ export async function loadPayrollDossier(env, adminId, storeId, payrollId) {
       },
       claim: claimFromRow(payroll)
     },
-    attempts: (attemptRows.results || []).map((row) => ({
+    attempts: attemptHistory.map((row) => ({
       attempt_id: String(row.attempt_id),
       version: Number(row.version),
       status: String(row.status),
+      latest_confirmed: latestConfirmedAttemptId === String(row.attempt_id),
       bank_micros: Number(row.bank_micros),
       usdt_micros: Number(row.usdt_micros),
       cash_micros: Number(row.cash_micros),

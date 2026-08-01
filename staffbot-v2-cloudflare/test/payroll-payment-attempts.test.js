@@ -6,6 +6,7 @@ import { DatabaseSync } from 'node:sqlite';
 import {
   abandonDraftAttempt,
   createOrResumeDraftAttempt,
+  recordAttemptEmployeeResponse,
   saveAttemptSplit,
   submitPaymentAttempt
 } from '../src/payroll-payment-attempts.js';
@@ -278,6 +279,63 @@ test('a disputed payroll creates version two without changing version one', asyn
       SELECT status FROM payroll_payment_attempts
       WHERE payroll_id = 'PAYROLL-1' AND version = 1
     `).get().status, 'employee_disputed');
+  } finally {
+    database.close();
+  }
+});
+
+test('records an employee response only on the owned current submitted attempt', async () => {
+  const { database, env } = fixture({
+    status: 'awaiting_employee_confirmation'
+  });
+  try {
+    database.exec(`
+      INSERT INTO payroll_payment_attempts (
+        attempt_id, payroll_id, version, status,
+        bank_micros, usdt_micros, cash_micros,
+        submitted_by, submitted_at, created_at, updated_at
+      ) VALUES (
+        'ATTEMPT-1', 'PAYROLL-1', 1, 'submitted',
+        100000000, 0, 0, 'ADMIN-1',
+        '2026-07-29T04:00:00.000Z',
+        '2026-07-29T03:55:00.000Z', '2026-07-29T04:00:00.000Z'
+      );
+      UPDATE payroll_disbursements
+      SET current_payment_attempt_id = 'ATTEMPT-1'
+      WHERE payroll_id = 'PAYROLL-1';
+    `);
+
+    await assert.rejects(recordAttemptEmployeeResponse(
+      env,
+      'OTHER-EMP',
+      'PAYROLL-1',
+      'confirmed',
+      new Date('2026-07-29T04:05:00.000Z'),
+      'ATTEMPT-1'
+    ), /payroll not found/);
+    const first = await recordAttemptEmployeeResponse(
+      env,
+      'EMP-1',
+      'PAYROLL-1',
+      'confirmed',
+      new Date('2026-07-29T04:05:00.000Z'),
+      'ATTEMPT-1'
+    );
+    const replay = await recordAttemptEmployeeResponse(
+      env,
+      'EMP-1',
+      'PAYROLL-1',
+      'confirmed',
+      new Date('2026-07-29T05:00:00.000Z'),
+      'ATTEMPT-1'
+    );
+
+    assert.equal(first.status, 'employee_confirmed');
+    assert.equal(replay.employee_responded_at, first.employee_responded_at);
+    assert.equal(database.prepare(`
+      SELECT employee_responded_at FROM payroll_payment_attempts
+      WHERE attempt_id = 'ATTEMPT-1'
+    `).get().employee_responded_at, '2026-07-29T04:05:00.000Z');
   } finally {
     database.close();
   }

@@ -342,6 +342,41 @@ async function handleCallback(callback, env) {
     if (parts[1] === 'reject') return rejectRegistration(env, callback, userId, storeId, employeeId, lang);
   }
 
+  if (parts[0] === 'pok' || parts[0] === 'px') {
+    const attemptId = parts.slice(1).join(':');
+    const target = await employeePaymentAttemptTarget(
+      env,
+      userId,
+      attemptId
+    );
+    if (!target) {
+      return answerCallback(
+        env,
+        callback.id,
+        t(lang, 'payroll_payment_version_stale'),
+        true
+      );
+    }
+    if (parts[0] === 'pok') {
+      return confirmEmployeePayrollReceipt(
+        env,
+        callback,
+        userId,
+        target.payroll_id,
+        lang,
+        target.attempt_id
+      );
+    }
+    return disputeEmployeePayrollPayment(
+      env,
+      callback,
+      userId,
+      target.payroll_id,
+      lang,
+      target.attempt_id
+    );
+  }
+
   if (parts[0] === 'pay') {
     if (parts[1] === 'd') {
       return startPayrollPaymentDetails(
@@ -410,21 +445,49 @@ async function handleCallback(callback, env) {
       );
     }
     if (parts[1] === 'ok') {
+      const target = await legacyEmployeePaymentTarget(
+        env,
+        userId,
+        parts.slice(2).join(':')
+      );
+      if (!target) {
+        return answerCallback(
+          env,
+          callback.id,
+          t(lang, 'payroll_payment_version_stale'),
+          true
+        );
+      }
       return confirmEmployeePayrollReceipt(
         env,
         callback,
         userId,
-        parts.slice(2).join(':'),
-        lang
+        target.payroll_id,
+        lang,
+        target.attempt_id
       );
     }
     if (parts[1] === 'x') {
+      const target = await legacyEmployeePaymentTarget(
+        env,
+        userId,
+        parts.slice(2).join(':')
+      );
+      if (!target) {
+        return answerCallback(
+          env,
+          callback.id,
+          t(lang, 'payroll_payment_version_stale'),
+          true
+        );
+      }
       return disputeEmployeePayrollPayment(
         env,
         callback,
         userId,
-        parts.slice(2).join(':'),
-        lang
+        target.payroll_id,
+        lang,
+        target.attempt_id
       );
     }
   }
@@ -2055,12 +2118,48 @@ async function finishPayrollProofUpload(
   );
 }
 
+async function employeePaymentAttemptTarget(env, employeeId, attemptId) {
+  if (!attemptId) return null;
+  return env.DB.prepare(`
+    SELECT a.attempt_id, a.payroll_id
+    FROM payroll_payment_attempts a
+    JOIN payroll_disbursements d ON d.payroll_id = a.payroll_id
+    WHERE a.attempt_id = ? AND d.telegram_id = ?
+  `).bind(attemptId, String(employeeId)).first();
+}
+
+async function legacyEmployeePaymentTarget(env, employeeId, payrollId) {
+  const target = await env.DB.prepare(`
+    SELECT
+      d.payroll_id,
+      d.current_payment_attempt_id AS attempt_id,
+      COUNT(a.attempt_id) AS attempt_count,
+      current.status AS current_attempt_status
+    FROM payroll_disbursements d
+    LEFT JOIN payroll_payment_attempts a
+      ON a.payroll_id = d.payroll_id
+    LEFT JOIN payroll_payment_attempts current
+      ON current.attempt_id = d.current_payment_attempt_id
+     AND current.payroll_id = d.payroll_id
+    WHERE d.payroll_id = ? AND d.telegram_id = ?
+    GROUP BY d.payroll_id
+  `).bind(payrollId, String(employeeId)).first();
+  if (!target
+    || Number(target.attempt_count) !== 1
+    || !target.attempt_id
+    || target.current_attempt_status !== 'submitted') {
+    return null;
+  }
+  return target;
+}
+
 async function confirmEmployeePayrollReceipt(
   env,
   callback,
   employeeId,
   payrollId,
-  lang
+  lang,
+  expectedAttemptId
 ) {
   let payroll;
   try {
@@ -2068,14 +2167,18 @@ async function confirmEmployeePayrollReceipt(
       env,
       employeeId,
       payrollId,
-      env.PAYROLL_FINANCE_EMAIL
+      env.PAYROLL_FINANCE_EMAIL,
+      new Date(),
+      expectedAttemptId
     );
   } catch (error) {
     return answerCallback(
       env,
       callback.id,
-      error.message === 'already_processed'
-        ? t(lang, 'already_processed')
+      error.message === 'stale_payment_attempt'
+        ? t(lang, 'payroll_payment_version_stale')
+        : error.message === 'already_processed'
+          ? t(lang, 'already_processed')
         : t(lang, 'payroll_confirmation_failed'),
       true
     );
@@ -2101,46 +2204,53 @@ async function disputeEmployeePayrollPayment(
   callback,
   employeeId,
   payrollId,
-  lang
+  lang,
+  expectedAttemptId
 ) {
   let payroll;
   try {
     payroll = await disputePayrollPayment(
       env,
       employeeId,
-      payrollId
+      payrollId,
+      new Date(),
+      expectedAttemptId
     );
   } catch (error) {
     return answerCallback(
       env,
       callback.id,
-      error.message === 'already_processed'
-        ? t(lang, 'already_processed')
+      error.message === 'stale_payment_attempt'
+        ? t(lang, 'payroll_payment_version_stale')
+        : error.message === 'already_processed'
+          ? t(lang, 'already_processed')
         : t(lang, 'no_permission'),
       true
     );
   }
-  await notifyStoreAdmins(env, payroll.store_id, [
-    '员工对工资付款提出争议',
-    `工资 ID：${payroll.payroll_id}`,
-    `员工 ID：${payroll.telegram_id}`,
-    `固定工资：${formatMoney(
-      { currency: payroll.currency },
-      Number(payroll.amount_snapshot_micros) / 1_000_000
-    )}`,
-    `银行卡：${payroll.accepts_bank
-      ? maskPaymentValue(payroll.bank_details_snapshot)
-      : '不使用'}`,
-    `USDT：${payroll.accepts_usdt
-      ? maskPaymentValue(payroll.usdt_details_snapshot)
-      : '不使用'}`,
-    `现金：${payroll.accepts_cash ? '使用' : '不使用'}`
-  ].join('\n'), {
-    inline_keyboard: [[{
-      text: t(lang, 'btn_admin_correct_payroll'),
-      callback_data: `pay:a:${payroll.payroll_id}`
-    }]]
-  });
+  if (!payroll.employee_response_replay) {
+    await notifyStoreAdmins(env, payroll.store_id, [
+      '员工对工资付款提出争议',
+      `工资 ID：${payroll.payroll_id}`,
+      `员工 ID：${payroll.telegram_id}`,
+      `固定工资：${formatMoney(
+        { currency: payroll.currency },
+        Number(payroll.amount_snapshot_micros) / 1_000_000
+      )}`,
+      `银行卡：${payroll.accepts_bank
+        ? maskPaymentValue(payroll.bank_details_snapshot)
+        : '不使用'}`,
+      `USDT：${payroll.accepts_usdt
+        ? maskPaymentValue(payroll.usdt_details_snapshot)
+        : '不使用'}`,
+      `现金：${payroll.accepts_cash ? '使用' : '不使用'}`
+    ].join('\n'), {
+      inline_keyboard: [[{
+        text: t(lang, 'btn_admin_correct_payroll'),
+        callback_data: `pay:a:${payroll.payroll_id}`
+      }]]
+    });
+  }
   await editCallbackMessage(
     env,
     callback,

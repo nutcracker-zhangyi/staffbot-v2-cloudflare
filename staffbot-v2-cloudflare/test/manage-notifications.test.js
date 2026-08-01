@@ -233,10 +233,13 @@ test('delivery uses stored Telegram file IDs, uploads private R2 bytes, and chec
     assert.match(summary.text, /工资周期：2026\/07\/01 12:00 - 2026\/07\/16 12:00/);
     assert.match(summary.text, /付款版本：2/);
     assert.match(summary.text, /工资 ID：PAYROLL-1/);
-    assert.deepEqual(
-      summary.reply_markup.inline_keyboard[0].map((button) => button.callback_data),
-      ['pay:ok:PAYROLL-1', 'pay:x:PAYROLL-1']
-    );
+    const responseCallbacks = summary.reply_markup.inline_keyboard[0]
+      .map((button) => button.callback_data);
+    assert.deepEqual(responseCallbacks, [
+      'pok:ATTEMPT-1',
+      'px:ATTEMPT-1'
+    ]);
+    assert.ok(responseCallbacks.every((data) => data.length <= 64));
     const existingPayload = JSON.parse(
       telegram.calls.find((call) => call.method === 'sendPhoto' && typeof call.body === 'string').body
     );

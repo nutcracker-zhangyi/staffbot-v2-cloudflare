@@ -236,6 +236,26 @@ function receiptPaymentMethodLines(language, payroll) {
     ));
 }
 
+export function employeePaymentResponseKeyboard(attemptId, language) {
+  const confirm = `pok:${attemptId}`;
+  const dispute = `px:${attemptId}`;
+  if (confirm.length > 64 || dispute.length > 64) {
+    throw new Error('payment attempt callback data is too long');
+  }
+  return {
+    inline_keyboard: [[
+      {
+        text: t(language, 'btn_confirm_receipt'),
+        callback_data: confirm
+      },
+      {
+        text: t(language, 'btn_dispute_payment'),
+        callback_data: dispute
+      }
+    ]]
+  };
+}
+
 export function payrollReceiptMessage(payroll) {
   const language = payroll.language || 'zh';
   const timezone = payroll.timezone || 'Asia/Tokyo';
@@ -266,6 +286,7 @@ export function payrollReceiptMessage(payroll) {
       payroll.confirmed_at,
       timezone
     ),
+    version: Number(payroll.payment_version || payroll.version || 1),
     payroll_id: payroll.payroll_id
   });
 }
@@ -293,6 +314,9 @@ export async function sendPayrollForEmployeeConfirmation(
   }
   if (payroll.status !== 'awaiting_employee_confirmation') {
     throw new Error('payroll is not awaiting employee confirmation');
+  }
+  if (!payroll.current_payment_attempt_id) {
+    throw new Error('payment attempt not found');
   }
   if (payroll.payment_sent_at) return payroll;
 
@@ -332,18 +356,10 @@ export async function sendPayrollForEmployeeConfirmation(
       }),
       ...paymentMethodLines(language, payroll)
     ].join('\n'),
-    {
-      inline_keyboard: [[
-        {
-          text: t(language, 'btn_confirm_receipt'),
-          callback_data: `pay:ok:${payroll.payroll_id}`
-        },
-        {
-          text: t(language, 'btn_dispute_payment'),
-          callback_data: `pay:x:${payroll.payroll_id}`
-        }
-      ]]
-    }
+    employeePaymentResponseKeyboard(
+      payroll.current_payment_attempt_id,
+      language
+    )
   );
   if (!result || !result.ok) {
     throw new Error('payroll confirmation delivery failed');
@@ -1039,18 +1055,7 @@ export async function deliverPaymentAttempt(
       env,
       payroll.telegram_id,
       traceablePaymentMessage(payroll),
-      {
-        inline_keyboard: [[
-          {
-            text: t(language, 'btn_confirm_receipt'),
-            callback_data: `pay:ok:${payroll.payroll_id}`
-          },
-          {
-            text: t(language, 'btn_dispute_payment'),
-            callback_data: `pay:x:${payroll.payroll_id}`
-          }
-        ]]
-      }
+      employeePaymentResponseKeyboard(payroll.attempt_id, language)
     );
     await requirePaymentDeliveryLease(
       env,

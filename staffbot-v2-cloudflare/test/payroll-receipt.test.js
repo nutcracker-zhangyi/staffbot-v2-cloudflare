@@ -17,6 +17,7 @@ const confirmedPayroll = {
   cash_micros: 0,
   currency: '₫',
   confirmed_at: '2026-08-13T11:15:00.000Z',
+  payment_version: 2,
   payroll_id: 'PAYROLL:DEFAULT:1001:2026-08-13'
 };
 
@@ -41,6 +42,7 @@ test('renders a traceable Chinese payroll receipt in store time', () => {
       'USDT：₫3,000,000',
       '',
       '确认时间：2026/08/13 20:15',
+      '付款版本：2',
       '工资 ID：PAYROLL:DEFAULT:1001:2026-08-13'
     ].join('\n')
   );
@@ -60,6 +62,7 @@ test('renders every supported language without unresolved fields', () => {
     assert.match(message, /₫8,000,000/);
     assert.match(message, /₫5,000,000/);
     assert.match(message, /₫3,000,000/);
+    assert.match(message, /2/);
     assert.doesNotMatch(
       message,
       /Cash|现金|Tiền mặt|Наличные/

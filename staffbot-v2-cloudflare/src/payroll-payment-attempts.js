@@ -1180,3 +1180,121 @@ export async function saveCompatibilityPaymentSplit(
     SELECT * FROM payroll_disbursements WHERE payroll_id = ?
   `).bind(payroll.payroll_id).first();
 }
+
+function employeeResponseStatus(response) {
+  if (response === 'confirmed') return 'employee_confirmed';
+  if (response === 'disputed') return 'employee_disputed';
+  throw new TypeError('invalid employee payment response');
+}
+
+export async function resolveAttemptEmployeeResponse(
+  env,
+  employeeId,
+  payrollId,
+  response,
+  expectedAttemptId = null
+) {
+  const payroll = await env.DB.prepare(`
+    SELECT payroll_id, telegram_id, status, current_payment_attempt_id
+    FROM payroll_disbursements
+    WHERE payroll_id = ? AND telegram_id = ?
+  `).bind(payrollId, String(employeeId)).first();
+  if (!payroll) throw new Error('payroll not found');
+
+  const attemptId = expectedAttemptId === null
+    ? payroll.current_payment_attempt_id
+    : String(expectedAttemptId);
+  if (!attemptId
+    || String(payroll.current_payment_attempt_id || '') !== String(attemptId)) {
+    throw new Error('stale_payment_attempt');
+  }
+  const attempt = await env.DB.prepare(`
+    SELECT * FROM payroll_payment_attempts
+    WHERE attempt_id = ? AND payroll_id = ?
+  `).bind(attemptId, payroll.payroll_id).first();
+  if (!attempt) throw new Error('stale_payment_attempt');
+
+  const terminalStatus = employeeResponseStatus(response);
+  if (attempt.status === terminalStatus
+    && attempt.employee_response === response) {
+    return { attempt, payroll, replay: true };
+  }
+  if (attempt.status !== 'submitted'
+    || payroll.status !== 'awaiting_employee_confirmation') {
+    throw new Error('already_processed');
+  }
+  return { attempt, payroll, replay: false };
+}
+
+export function attemptEmployeeResponseStatement(
+  env,
+  employeeId,
+  payrollId,
+  attemptId,
+  response,
+  respondedAt
+) {
+  const terminalStatus = employeeResponseStatus(response);
+  return env.DB.prepare(`
+    UPDATE payroll_payment_attempts
+    SET status = ?, employee_response = ?,
+        employee_responded_at = ?, updated_at = ?
+    WHERE attempt_id = ? AND payroll_id = ? AND status = 'submitted'
+      AND EXISTS (
+        SELECT 1 FROM payroll_disbursements d
+        WHERE d.payroll_id = payroll_payment_attempts.payroll_id
+          AND d.telegram_id = ?
+          AND d.current_payment_attempt_id = payroll_payment_attempts.attempt_id
+          AND d.status = 'awaiting_employee_confirmation'
+      )
+  `).bind(
+    terminalStatus,
+    response,
+    respondedAt,
+    respondedAt,
+    attemptId,
+    payrollId,
+    String(employeeId)
+  );
+}
+
+export async function recordAttemptEmployeeResponse(
+  env,
+  employeeId,
+  payrollId,
+  response,
+  now = new Date(),
+  expectedAttemptId = null
+) {
+  const context = await resolveAttemptEmployeeResponse(
+    env,
+    employeeId,
+    payrollId,
+    response,
+    expectedAttemptId
+  );
+  if (context.replay) return context.attempt;
+  const respondedAt = new Date(now).toISOString();
+  const result = await attemptEmployeeResponseStatement(
+    env,
+    employeeId,
+    payrollId,
+    context.attempt.attempt_id,
+    response,
+    respondedAt
+  ).run();
+  if (Number(result && result.meta && result.meta.changes) !== 1) {
+    const latest = await resolveAttemptEmployeeResponse(
+      env,
+      employeeId,
+      payrollId,
+      response,
+      context.attempt.attempt_id
+    );
+    if (!latest.replay) throw new Error('already_processed');
+    return latest.attempt;
+  }
+  return env.DB.prepare(`
+    SELECT * FROM payroll_payment_attempts WHERE attempt_id = ?
+  `).bind(context.attempt.attempt_id).first();
+}

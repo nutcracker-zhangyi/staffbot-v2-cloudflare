@@ -1047,10 +1047,15 @@ test('admin splits payroll and uploads proof images by payment method', async ()
       payload.chat_id === '1001'
       && payload.reply_markup
       && payload.reply_markup.inline_keyboard.flat().some(
-        (button) => button.callback_data === 'pay:ok:PAYROLL-ADMIN'
+        (button) => button.callback_data.startsWith('pok:')
       )
     );
     assert.ok(confirmation);
+    const confirmationCallbacks = confirmation.reply_markup.inline_keyboard
+      .flat().map((button) => button.callback_data);
+    assert.ok(confirmationCallbacks.every((data) => data.length <= 64));
+    assert.match(confirmationCallbacks[0], /^pok:PAYATT-/);
+    assert.match(confirmationCallbacks[1], /^px:PAYATT-/);
     assert.match(confirmation.text, /工资总额：\$60\.00/);
     assert.equal(
       fixture.payloads.filter((payload) =>
@@ -1067,7 +1072,7 @@ test('admin splits payroll and uploads proof images by payment method', async ()
 
     await sendCallback(
       fixture.env,
-      'pay:ok:PAYROLL-ADMIN',
+      confirmationCallbacks[0],
       1001,
       confirmation.text
     );
@@ -1096,6 +1101,7 @@ test('admin splits payroll and uploads proof images by payment method', async ()
       receipt.text,
       /工资 ID：PAYROLL-ADMIN/
     );
+    assert.match(receipt.text, /付款版本：1/);
     assert.equal(receipt.reply_markup, undefined);
 
     const receiptAck = fixture.payloads.find((payload) =>
@@ -1116,6 +1122,15 @@ test('admin splits payroll and uploads proof images by payment method', async ()
         salary_record_id: 'SAL-AUTO-PAYROLL-ADMIN'
       }
     );
+    assert.deepEqual({ ...fixture.database.prepare(`
+      SELECT version, status, employee_response
+      FROM payroll_payment_attempts
+      WHERE payroll_id = 'PAYROLL-ADMIN'
+    `).get() }, {
+      version: 1,
+      status: 'employee_confirmed',
+      employee_response: 'confirmed'
+    });
     assert.equal(
       fixture.database.prepare(`
         SELECT COUNT(*) AS count FROM salary_records
@@ -1158,10 +1173,24 @@ test('employee dispute notifies admins with a correction button', async () => {
         '2026-07-16T04:00:00.000Z'
       )
     `).run();
+    fixture.database.exec(`
+      INSERT INTO payroll_payment_attempts (
+        attempt_id, payroll_id, version, status,
+        bank_micros, usdt_micros, cash_micros,
+        submitted_by, submitted_at, created_at, updated_at
+      ) VALUES (
+        'ATT-DISPUTE-1', 'PAYROLL-DISPUTE', 1, 'submitted',
+        60000000, 0, 0, '9001', '2026-07-16T04:00:00.000Z',
+        '2026-07-16T03:30:00.000Z', '2026-07-16T04:00:00.000Z'
+      );
+      UPDATE payroll_disbursements
+      SET current_payment_attempt_id = 'ATT-DISPUTE-1'
+      WHERE payroll_id = 'PAYROLL-DISPUTE';
+    `);
 
     await sendCallback(
       fixture.env,
-      'pay:x:PAYROLL-DISPUTE',
+      'px:ATT-DISPUTE-1',
       1001
     );
 
@@ -1172,6 +1201,14 @@ test('employee dispute notifies admins with a correction button', async () => {
       `).get().status,
       'disputed'
     );
+    assert.deepEqual({ ...fixture.database.prepare(`
+      SELECT status, employee_response
+      FROM payroll_payment_attempts
+      WHERE attempt_id = 'ATT-DISPUTE-1'
+    `).get() }, {
+      status: 'employee_disputed',
+      employee_response: 'disputed'
+    });
     const adminNotice = fixture.payloads.find((payload) =>
       payload.chat_id === '9001'
       && payload.text
@@ -1184,6 +1221,101 @@ test('employee dispute notifies admins with a correction button', async () => {
       adminNotice.reply_markup.inline_keyboard[0][0].callback_data,
       'pay:a:PAYROLL-DISPUTE'
     );
+    const noticesBeforeReplay = fixture.payloads.filter((payload) =>
+      payload.chat_id === '9001'
+      && payload.text
+      && payload.text.includes('PAYROLL-DISPUTE')
+    ).length;
+
+    await sendCallback(
+      fixture.env,
+      'px:ATT-DISPUTE-1',
+      1001
+    );
+
+    assert.equal(fixture.payloads.filter((payload) =>
+      payload.chat_id === '9001'
+      && payload.text
+      && payload.text.includes('PAYROLL-DISPUTE')
+    ).length, noticesBeforeReplay);
+  } finally {
+    fixture.restore();
+  }
+});
+
+test('stale payment buttons cannot confirm a newer submitted version', async () => {
+  const fixture = flowFixture();
+  try {
+    fixture.database.exec(`
+      INSERT INTO payroll_disbursements (
+        payroll_id, store_id, telegram_id, payroll_start_date,
+        scheduled_date, cycle_day, period_start, cutoff_at,
+        amount_snapshot_micros, currency, status,
+        accepts_bank, bank_details_snapshot, bank_micros,
+        current_admin_id, payment_sent_at, current_payment_attempt_id,
+        created_at, updated_at
+      ) VALUES (
+        'PAYROLL-VERSIONED', 'STORE1', '1001', '2026-07-01',
+        '2026-07-16', 16,
+        '2026-07-01T00:00:00.000Z',
+        '2026-07-16T03:00:00.000Z',
+        60000000, '$', 'awaiting_employee_confirmation',
+        1, 'Bank account 12345678', 60000000,
+        '9001', '2026-07-16T05:00:00.000Z', 'ATT-V2',
+        '2026-07-16T03:00:00.000Z',
+        '2026-07-16T05:00:00.000Z'
+      );
+      INSERT INTO payroll_payment_attempts (
+        attempt_id, payroll_id, version, status,
+        bank_micros, usdt_micros, cash_micros,
+        submitted_by, submitted_at,
+        employee_response, employee_responded_at,
+        created_at, updated_at
+      ) VALUES
+        ('ATT-V1', 'PAYROLL-VERSIONED', 1, 'employee_disputed',
+         60000000, 0, 0, '9001', '2026-07-16T04:00:00.000Z',
+         'disputed', '2026-07-16T04:30:00.000Z',
+         '2026-07-16T03:30:00.000Z', '2026-07-16T04:30:00.000Z'),
+        ('ATT-V2', 'PAYROLL-VERSIONED', 2, 'submitted',
+         60000000, 0, 0, '9001', '2026-07-16T05:00:00.000Z',
+         NULL, NULL,
+         '2026-07-16T04:45:00.000Z', '2026-07-16T05:00:00.000Z');
+    `);
+
+    await sendCallback(fixture.env, 'pok:ATT-V1', 1001);
+    await sendCallback(
+      fixture.env,
+      'pay:ok:PAYROLL-VERSIONED',
+      1001
+    );
+
+    const staleAnswers = fixture.payloads.filter((payload) =>
+      payload.callback_query_id === 'callback-1001'
+      && payload.text === '这条付款消息已过期，请使用最新消息。'
+    );
+    assert.equal(staleAnswers.length, 2);
+    assert.equal(fixture.database.prepare(`
+      SELECT status FROM payroll_payment_attempts
+      WHERE attempt_id = 'ATT-V2'
+    `).get().status, 'submitted');
+    assert.equal(fixture.database.prepare(`
+      SELECT COUNT(*) AS count FROM salary_records
+      WHERE request_id = 'PAYROLL-VERSIONED'
+    `).get().count, 0);
+
+    await sendCallback(fixture.env, 'pok:ATT-V2', 1001);
+
+    assert.deepEqual(fixture.database.prepare(`
+      SELECT version, status FROM payroll_payment_attempts
+      WHERE payroll_id = 'PAYROLL-VERSIONED' ORDER BY version
+    `).all().map((row) => ({ ...row })), [
+      { version: 1, status: 'employee_disputed' },
+      { version: 2, status: 'employee_confirmed' }
+    ]);
+    assert.equal(fixture.database.prepare(`
+      SELECT current_payment_attempt_id FROM payroll_disbursements
+      WHERE payroll_id = 'PAYROLL-VERSIONED'
+    `).get().current_payment_attempt_id, 'ATT-V2');
   } finally {
     fixture.restore();
   }
