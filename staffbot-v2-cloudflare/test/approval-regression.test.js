@@ -7,9 +7,11 @@ import worker from '../src/index.js';
 import {
   approveAbsenceFineRequest,
   approveIncomeRequest,
+  approveLeaveRequest,
   approveSalaryAdvanceRequest,
   approveSalaryRequest,
   insertSystemFine,
+  rejectAbsenceFineRequest,
   rejectIncomeRequest
 } from '../src/approvals.js';
 import { getTotalIncome } from '../src/payroll.js';
@@ -345,6 +347,54 @@ test('concurrent income approval and rejection produce one final decision', asyn
       WHERE request_id = 'INC-DECISION-RACE'
     `).get().total,
     status === 'approved' ? 2 : 0
+  );
+});
+
+test('non-financial approval services identify decided replays', async () => {
+  const { database, env } = approvalFixture();
+  database.exec(`
+    INSERT INTO leave_requests (
+      request_id, store_id, telegram_id, leave_date, status, requested_at
+    ) VALUES (
+      'LEAVE-REPLAY', 'STORE1', 'EMP1', '2026-08-03', 'pending',
+      '2026-07-29T00:00:00.000Z'
+    );
+    INSERT INTO absence_fine_requests (
+      request_id, store_id, telegram_id, business_date,
+      original_fine, fine, status, created_at
+    ) VALUES (
+      'ABS-REPLAY', 'STORE1', 'EMP1', '2026-07-28',
+      5, 5, 'pending', '2026-07-29T00:00:00.000Z'
+    );
+  `);
+
+  assert.equal((await approveLeaveRequest(
+    env,
+    'STORE1',
+    'LEAVE-REPLAY',
+    'ADMIN1'
+  )).ok, true);
+  assert.deepEqual(
+    await approveLeaveRequest(env, 'STORE1', 'LEAVE-REPLAY', 'ADMIN2'),
+    { ok: false, error: 'already_decided' }
+  );
+
+  assert.equal((await rejectAbsenceFineRequest(
+    env,
+    'ABS-REPLAY',
+    'ADMIN1',
+    'Approved exception',
+    'STORE1'
+  )).ok, true);
+  assert.deepEqual(
+    await rejectAbsenceFineRequest(
+      env,
+      'ABS-REPLAY',
+      'ADMIN2',
+      'Replay',
+      'STORE1'
+    ),
+    { ok: false, error: 'already_decided' }
   );
 });
 

@@ -1,9 +1,12 @@
 import { audit, makeId, nowIso } from './audit.js';
+import { render } from './i18n.js';
 import {
   absenceFineRecordDraft,
   approvedIncomeRecordDrafts,
   attendanceFineDecision,
-  checkoutFineRecordDrafts
+  checkoutFineRecordDrafts,
+  formatMoney,
+  formatPercent
 } from './money.js';
 import {
   amountToMicros,
@@ -15,6 +18,84 @@ import {
 } from './payroll-ledger.js';
 import { getTotalIncome } from './payroll.js';
 import { getStore } from './stores.js';
+
+const APPROVAL_NOTIFICATION_SOURCES = {
+  income: 'pending_income',
+  leave: 'leave_requests',
+  absence: 'absence_fine_requests',
+  advance: 'salary_advance_requests'
+};
+
+export async function approvalResultNotification(env, storeId, type, requestId) {
+  const table = APPROVAL_NOTIFICATION_SOURCES[String(type || '')];
+  if (!table) return null;
+  const row = await env.DB.prepare(`
+    SELECT * FROM ${table} WHERE store_id = ? AND request_id = ?
+  `).bind(String(storeId), String(requestId)).first();
+  if (!row) return null;
+  if (!['approved', 'rejected'].includes(row.status)) {
+    return { error: 'decision_required' };
+  }
+
+  const store = await getStore(env, storeId);
+  const preference = await env.DB.prepare(`
+    SELECT language FROM user_preferences WHERE telegram_id = ?
+  `).bind(row.telegram_id).first();
+  const lang = String(preference && preference.language || 'zh');
+  return {
+    recipient: String(row.telegram_id),
+    decision: String(row.status),
+    text: approvalResultText(type, row, store, lang)
+  };
+}
+
+function approvalResultText(type, row, store, lang) {
+  if (type === 'income') {
+    if (row.status === 'rejected') {
+      return render(lang, 'income_rejected', { reason: row.reject_reason });
+    }
+    return render(lang, 'income_approved', {
+      income: formatMoney(store, row.income),
+      commission: formatPercent(row.commission_rate),
+      commission_income: formatMoney(store, row.commission_income),
+      fine: formatMoney(store, row.fine)
+    });
+  }
+  if (type === 'leave') {
+    return render(lang, row.status === 'approved' ? 'leave_approved' : 'leave_rejected', {
+      date: row.leave_date,
+      reason: row.reject_reason
+    });
+  }
+  if (type === 'advance') {
+    return render(lang, row.status === 'approved' ? 'advance_approved' : 'advance_rejected', {
+      amount: formatMoney(store, row.amount),
+      reason: row.reject_reason
+    });
+  }
+  return absenceResultText(row, store, lang);
+}
+
+function absenceResultText(row, store, lang) {
+  const messages = {
+    approved: {
+      zh: '你的缺勤罚款已批准。\n日期：{date}\n罚款：{fine}',
+      en: 'Your absence fine was approved.\nDate: {date}\nFine: {fine}',
+      vi: 'Khoản phạt vắng mặt của bạn đã được duyệt.\nNgày: {date}\nTiền phạt: {fine}',
+      ru: 'Штраф за отсутствие одобрен.\nДата: {date}\nШтраф: {fine}'
+    },
+    rejected: {
+      zh: '你的缺勤罚款已被驳回。\n日期：{date}\n原因：{reason}',
+      en: 'Your absence fine was rejected.\nDate: {date}\nReason: {reason}',
+      vi: 'Khoản phạt vắng mặt của bạn đã bị từ chối.\nNgày: {date}\nLý do: {reason}',
+      ru: 'Штраф за отсутствие отклонен.\nДата: {date}\nПричина: {reason}'
+    }
+  };
+  return (messages[row.status][lang] || messages[row.status].zh)
+    .replace('{date}', String(row.business_date))
+    .replace('{fine}', formatMoney(store, row.fine))
+    .replace('{reason}', String(row.reject_reason || ''));
+}
 
 export async function insertSystemFine(env, storeId, userId, fine, source, sourceId, adminId = 'SYSTEM', originalFine = fine) {
   const approvedAt = nowIso();
@@ -231,7 +312,14 @@ export async function approveAbsenceFineRequest(env, requestId, adminId, expecte
   const found = await env.DB.prepare(`
     SELECT * FROM absence_fine_requests WHERE request_id = ? AND status = 'pending'${storeSql}
   `).bind(...requestParams).first();
-  if (!found) return { ok: false };
+  if (!found) {
+    const existing = await env.DB.prepare(`
+      SELECT status FROM absence_fine_requests WHERE request_id = ?${storeSql}
+    `).bind(...requestParams).first();
+    return existing
+      ? { ok: false, error: 'already_decided' }
+      : { ok: false };
+  }
 
   const decidedAt = nowIso();
   const recordId = makeId('REC');
@@ -284,7 +372,9 @@ export async function approveAbsenceFineRequest(env, requestId, adminId, expecte
     `).bind(decidedAt, adminId, recordId, ...requestParams)
   );
   const results = await env.DB.batch(statements);
-  if (mutationCount(results[updateIndex]) !== 1) return { ok: false };
+  if (mutationCount(results[updateIndex]) !== 1) {
+    return { ok: false, error: 'already_decided' };
+  }
   return { ok: true, row: found, recordId };
 }
 
@@ -294,14 +384,23 @@ export async function rejectAbsenceFineRequest(env, requestId, adminId, reason =
   const found = await env.DB.prepare(`
     SELECT * FROM absence_fine_requests WHERE request_id = ? AND status = 'pending'${storeSql}
   `).bind(...requestParams).first();
-  if (!found) return { ok: false };
+  if (!found) {
+    const existing = await env.DB.prepare(`
+      SELECT status FROM absence_fine_requests WHERE request_id = ?${storeSql}
+    `).bind(...requestParams).first();
+    return existing
+      ? { ok: false, error: 'already_decided' }
+      : { ok: false };
+  }
 
   const result = await env.DB.prepare(`
     UPDATE absence_fine_requests
     SET status = 'rejected', decided_at = ?, admin_id = ?, reject_reason = ?
     WHERE request_id = ? AND status = 'pending'${storeSql}
   `).bind(nowIso(), adminId, reason, ...requestParams).run();
-  if (mutationCount(result) !== 1) return { ok: false };
+  if (mutationCount(result) !== 1) {
+    return { ok: false, error: 'already_decided' };
+  }
   await audit(env, found.store_id, adminId, 'reject_absence_fine', requestId, { reason, ...found });
   return { ok: true, row: found, reason };
 }
@@ -728,7 +827,10 @@ export async function rejectSalaryAdvanceRequest(env, storeId, requestId, adminI
 
 export async function approveLeaveRequest(env, storeId, requestId, adminId) {
   const found = await env.DB.prepare(`SELECT * FROM leave_requests WHERE store_id = ? AND request_id = ?`).bind(storeId, requestId).first();
-  if (!found || !['pending', 'approved'].includes(found.status)) return { ok: false };
+  if (!found) return { ok: false };
+  if (!['pending', 'approved'].includes(found.status)) {
+    return { ok: false, error: 'already_decided' };
+  }
   if (found.status === 'pending') {
     const store = await getStore(env, storeId);
     const conflict = await env.DB.prepare(`
@@ -744,7 +846,9 @@ export async function approveLeaveRequest(env, storeId, requestId, adminId) {
     WHERE store_id = ? AND telegram_id = ? AND business_date = ?
       AND status IN ('pending', 'approved', 'rejected')
   `).bind(storeId, found.telegram_id, found.leave_date).first();
-  if (found.status === 'approved' && !absence) return { ok: false };
+  if (found.status === 'approved' && !absence) {
+    return { ok: false, error: 'already_decided' };
+  }
 
   const decidedAt = nowIso();
   const statements = [];
@@ -756,7 +860,9 @@ export async function approveLeaveRequest(env, storeId, requestId, adminId) {
   }
   if (absence) statements.push(...absenceCancellationStatements(env, storeId, absence.request_id, decidedAt, adminId));
   const results = await env.DB.batch(statements);
-  if (found.status === 'pending' && mutationCount(results[0]) !== 1) return { ok: false };
+  if (found.status === 'pending' && mutationCount(results[0]) !== 1) {
+    return { ok: false, error: 'already_decided' };
+  }
   const absenceResultIndex = statements.length - 1;
   if (absence && mutationCount(results[absenceResultIndex]) !== 1) return { ok: false };
   if (found.status === 'pending') await audit(env, storeId, adminId, 'approve_leave', requestId, found);
@@ -800,12 +906,18 @@ export async function cancelAbsenceForApprovedLeave(env, storeId, telegramId, le
 
 export async function rejectLeaveRequest(env, storeId, requestId, adminId, reason) {
   const found = await env.DB.prepare(`SELECT * FROM leave_requests WHERE store_id = ? AND request_id = ?`).bind(storeId, requestId).first();
-  if (!found || found.status !== 'pending') return { ok: false };
-  await env.DB.prepare(`
+  if (!found) return { ok: false };
+  if (found.status !== 'pending') {
+    return { ok: false, error: 'already_decided' };
+  }
+  const result = await env.DB.prepare(`
     UPDATE leave_requests
     SET status = 'rejected', decided_at = ?, admin_id = ?, reject_reason = ?
-    WHERE store_id = ? AND request_id = ?
+    WHERE store_id = ? AND request_id = ? AND status = 'pending'
   `).bind(nowIso(), adminId, reason, storeId, requestId).run();
+  if (mutationCount(result) !== 1) {
+    return { ok: false, error: 'already_decided' };
+  }
   await audit(env, storeId, adminId, 'reject_leave', requestId, { reason, ...found });
   return { ok: true, row: found, reason };
 }
