@@ -49,6 +49,46 @@ Expected:
 - `SCHEDULED_TASKS_ENABLED` is `false`.
 - A new `/start` sent to `@staffbot_v2_staging_bot` reaches staging D1.
 
+## Admin mobile PWA acceptance
+
+Keep local verification, staging changes, and device acceptance as separate
+gates. Passing local tests does not authorize a remote migration or deploy.
+
+### Local gate
+
+```bash
+npm run check
+node --test test/manage-page.test.js test/manage-security.test.js
+npm test
+git diff --check
+```
+
+The focused tests execute the manifest response as JSON and execute the real
+service-worker response in a fake Worker global. They verify the fixed app
+shell, network-only business requests, cache cleanup, install failure, offline
+mutation guards, and authoritative reconnect behavior.
+
+### Staging database and deploy gate
+
+Run only after the local change has passed independent review:
+
+```bash
+npx wrangler d1 migrations list staffbot_v2_staging --env staging --remote
+npx wrangler d1 migrations apply staffbot_v2_staging --env staging --remote
+npx wrangler d1 execute staffbot_v2_staging --env staging --remote --command \
+  "SELECT name FROM sqlite_master WHERE type='table' AND name IN ('admin_task_claims','payroll_payment_attempts') ORDER BY name"
+npx wrangler deploy --env staging
+curl -fsS https://staffbot-v2-staging.staffbot-v2.workers.dev/
+curl -fsS https://staffbot-v2-staging.staffbot-v2.workers.dev/manage
+curl -fsS https://staffbot-v2-staging.staffbot-v2.workers.dev/manage/manifest.webmanifest
+curl -fsS https://staffbot-v2-staging.staffbot-v2.workers.dev/admin
+```
+
+Record the migration output, deployed Worker version, smoke responses, and
+browser/device acceptance in
+`docs/reports/2026-07-29-staging-admin-mobile-pwa-validation.md`. Leave every
+unperformed item as `PENDING`; never infer a pass from local automation.
+
 ## Refresh staging data
 
 1. Confirm the target D1 is `staffbot_v2_staging` and contains no data that

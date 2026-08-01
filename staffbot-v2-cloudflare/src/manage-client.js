@@ -75,20 +75,24 @@ async function api(path, options = {}) {
 
 function loginView() {
   stopClaimTimer();
-  app.innerHTML = '<section class="auth-card">'
+  app.innerHTML = '<div id="offline-banner" class="offline" role="status"'
+    + (state.online ? ' hidden' : '')
+    + '>当前离线，只能查看已加载内容</div>'
+    + '<section class="auth-card">'
     + '<p class="eyebrow">StaffBot</p>'
     + '<h1>管理端登录</h1>'
     + '<p>验证码将发送到管理员的 Telegram。</p>'
     + '<label for="telegram-id">Telegram 管理员 ID</label>'
     + '<input id="telegram-id" autocomplete="username" inputmode="numeric">'
-    + '<button id="send-code" type="button">发送验证码</button>'
+    + '<button id="send-code" type="button"' + disabled(!state.online) + '>发送验证码</button>'
     + '<label for="login-code">验证码</label>'
     + '<input id="login-code" autocomplete="one-time-code" inputmode="numeric">'
-    + '<button id="verify-code" type="button">登录</button>'
+    + '<button id="verify-code" type="button"' + disabled(!state.online) + '>登录</button>'
     + '<p id="login-status" role="status"></p>'
     + '</section>';
 
   document.getElementById('send-code').onclick = async () => {
+    if (!state.online) return;
     const telegramId = document.getElementById('telegram-id').value;
     try {
       await api('/api/admin/login/start', {
@@ -102,6 +106,7 @@ function loginView() {
   };
 
   document.getElementById('verify-code').onclick = async () => {
+    if (!state.online) return;
     const telegramId = document.getElementById('telegram-id').value;
     const code = document.getElementById('login-code').value;
     try {
@@ -191,8 +196,10 @@ function renderCurrent() {
   }
   shell('<div class="more-panel"><h2>更多</h2>'
     + '<p id="session-admin">已登录：' + escapeHtml(state.session.telegram_id) + '</p>'
-    + '<button id="logout" class="secondary" type="button">退出登录</button></div>');
+    + '<button id="logout" class="secondary" type="button"'
+    + disabled(!state.online || state.authorityStale) + '>退出登录</button></div>');
   document.getElementById('logout').onclick = async () => {
+    if (!state.online || state.authorityStale) return;
     try {
       await api('/api/admin/logout', { method: 'POST' });
     } finally {
@@ -529,7 +536,8 @@ function payrollAttemptsSection(attempts) {
           + escapeHtml(formatDateTime(proof.uploaded_at)) + '</figcaption>'
           + (attempt.status === 'draft' && state.payrollMode === 'payment' && proof.superseded_at == null
             ? '<button id="delete-proof-' + escapeHtml(proof.proof_id)
-              + '" class="danger" type="button">删除回执</button>' : '')
+              + '" class="danger" type="button"' + disabled(!canMutatePayment())
+              + '>删除回执</button>' : '')
           + '</figure>'
       )).join('') + '</div></article>').join('')
     + '</div></section>';
@@ -572,6 +580,7 @@ function paymentForm(detail) {
 }
 
 function paymentMethodControl(method, draft) {
+  const locked = !canMutatePayment();
   const uploaded = (draft.proofs || []).filter((proof) => (
     proof.method === method && proof.superseded_at == null
   ));
@@ -581,15 +590,18 @@ function paymentMethodControl(method, draft) {
   return '<div class="payment-method"><label for="' + method + '-amount">'
     + paymentMethodLabel(method) + '金额</label>'
     + '<input id="' + method + '-amount" inputmode="decimal" value="'
-    + escapeHtml(state.paymentAmounts[method]) + '" aria-describedby="' + method + '-amount-error">'
+    + escapeHtml(state.paymentAmounts[method]) + '" aria-describedby="' + method + '-amount-error"'
+    + disabled(locked) + '>'
     + '<p id="' + method + '-amount-error" class="error">'
     + escapeHtml(state.paymentErrors[method]) + '</p>'
     + '<div class="upload-actions"><label class="file-action">拍照上传'
     + '<input id="' + method + '-camera" class="file-input" type="file"'
-    + ' accept="image/jpeg,image/png,image/webp" capture="environment"></label>'
+    + ' accept="image/jpeg,image/png,image/webp" capture="environment"'
+    + disabled(locked) + '></label>'
     + '<label class="file-action">从相册选择'
     + '<input id="' + method + '-library" class="file-input" type="file"'
-    + ' accept="image/jpeg,image/png,image/webp" multiple></label></div>'
+    + ' accept="image/jpeg,image/png,image/webp" multiple'
+    + disabled(locked) + '></label></div>'
     + '<p class="meta">已保存 ' + uploaded.length + ' 张回执</p>'
     + '<div class="upload-list">' + pending.map(uploadStatus).join('') + '</div></div>';
 }
@@ -599,7 +611,8 @@ function uploadStatus(upload) {
     : upload.status === 'uploaded' ? '已上传' : '上传失败';
   return '<div class="upload-item"><span>' + escapeHtml(upload.file.name) + ' · ' + status + '</span>'
     + (upload.status === 'error'
-      ? '<button id="retry-upload-' + upload.id + '" class="secondary" type="button">重试 '
+      ? '<button id="retry-upload-' + upload.id + '" class="secondary" type="button"'
+        + disabled(!canMutatePayment()) + '>重试 '
         + escapeHtml(upload.file.name) + '</button>' : '') + '</div>';
 }
 
@@ -1647,6 +1660,85 @@ async function openReturnPath() {
   await openTask(type, id, storeValues[0]);
 }
 
+async function refreshSessionAndStores(generation) {
+  const adminId = String(state.session && state.session.telegram_id || '');
+  const [session, storesResult] = await Promise.all([
+    api('/api/manage/session'),
+    api('/api/manage/stores')
+  ]);
+  if (
+    !state.session
+    || generation !== state.requestGeneration
+    || String(session.telegram_id || '') !== adminId
+  ) throw new Error('stale_manage_session');
+  state.session = session;
+  state.csrfToken = session.csrf_token || '';
+  state.stores = storesResult.stores || [];
+  if (state.storeId && !storeIsAuthorized(String(state.storeId))) state.storeId = '';
+}
+
+async function refreshTaskAfterReconnect() {
+  if (!state.currentTask) return;
+  const expected = currentDirectPageIdentity();
+  const generation = state.requestGeneration + 1;
+  state.requestGeneration = generation;
+  const key = currentTaskKey();
+  state.authorityStale = true;
+  state.mutationBusy = false;
+  state.message = '已恢复网络，正在刷新最新状态';
+  stopClaimTimer();
+  renderTaskDetail();
+  try {
+    await refreshSessionAndStores(generation);
+    if (!directPageIsCurrent(expected) || !storeIsAuthorized(expected.storeId)) {
+      throw new Error('task_access_changed');
+    }
+    await refreshCurrentTask('最新任务状态已刷新', generation, key);
+    if (
+      !directPageIsCurrent(expected)
+      || !state.currentTask.store
+      || String(state.currentTask.store.store_id) !== expected.storeId
+    ) throw new Error('invalid_task_detail');
+    state.authorityStale = false;
+    state.message = '最新任务状态已刷新';
+    renderTaskDetail();
+  } catch {
+    if (!state.session || generation !== state.requestGeneration) return;
+    state.authorityStale = true;
+    state.mutationBusy = false;
+    state.message = '任务状态刷新失败，当前详情保持只读，请稍后重试';
+    stopClaimTimer();
+    renderTaskDetail();
+  }
+}
+
+async function refreshListAfterReconnect() {
+  const generation = state.requestGeneration + 1;
+  state.requestGeneration = generation;
+  const nav = state.activeNav;
+  state.authorityStale = true;
+  state.message = '已恢复网络，正在刷新最新状态';
+  stopClaimTimer();
+  renderCurrent();
+  try {
+    await refreshSessionAndStores(generation);
+    if (nav !== state.activeNav || generation !== state.requestGeneration) return;
+    if (nav === 'payroll') await loadPayroll({ render: false, generation });
+    else if (nav === 'tasks' || nav === 'approvals') {
+      await loadTasks({ render: false, generation });
+    }
+    if (!state.session || nav !== state.activeNav || generation !== state.requestGeneration) return;
+    state.authorityStale = false;
+    state.message = '最新状态已刷新';
+    renderCurrent();
+  } catch {
+    if (!state.session || nav !== state.activeNav || generation !== state.requestGeneration) return;
+    state.authorityStale = true;
+    state.message = '状态刷新失败，当前页面保持只读，请稍后重试';
+    renderCurrent();
+  }
+}
+
 async function refreshPayrollAfterReconnect() {
   if (!state.currentPayroll) return;
   const payroll = state.currentPayroll.payroll;
@@ -1662,6 +1754,10 @@ async function refreshPayrollAfterReconnect() {
   stopClaimTimer();
   renderPayrollDetail();
   try {
+    await refreshSessionAndStores(generation);
+    if (!payrollRequestIsCurrent(generation, key) || !storeIsAuthorized(key.storeId)) {
+      throw new Error('payroll_access_changed');
+    }
     const [detail, tasks, payrollList] = await Promise.all([
       api(payrollPath(payroll.store_id, payroll.payroll_id)),
       api('/api/manage/tasks?store_id=' + encodeURIComponent(payroll.store_id) + '&type=payroll'),
@@ -1779,13 +1875,20 @@ async function boot() {
 
 window.addEventListener('online', async () => {
   state.online = true;
-  if (!state.session) return;
+  if (!state.session) {
+    loginView();
+    return;
+  }
   if (state.currentPayroll) await refreshPayrollAfterReconnect();
-  else renderCurrent();
+  else if (state.currentTask) await refreshTaskAfterReconnect();
+  else await refreshListAfterReconnect();
 });
 window.addEventListener('offline', () => {
   state.online = false;
+  state.authorityStale = true;
+  stopClaimTimer();
   if (state.session) renderCurrent();
+  else loginView();
 });
 
 if ('serviceWorker' in navigator) {

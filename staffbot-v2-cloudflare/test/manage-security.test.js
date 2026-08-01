@@ -1,17 +1,199 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import vm from 'node:vm';
 
+import worker from '../src/index.js';
 import {
   manageTaskKeyboard,
   manageTaskUrl,
   notifyStoreAdminsOfTask
 } from '../src/admin-notifications.js';
 
+function workerContext() {
+  return { waitUntil() {} };
+}
+
+async function manageAsset(path) {
+  return worker.fetch(
+    new Request(`https://staffbot.test${path}`),
+    { ENVIRONMENT: 'staging' },
+    workerContext()
+  );
+}
+
+async function executeServiceWorker({
+  cachedResponse = null,
+  cacheNames = [
+    'staffbot-manage-shell-v0',
+    'staffbot-manage-shell-v1',
+    'unrelated-app-cache'
+  ],
+  installError = null
+} = {}) {
+  const listeners = new Map();
+  const calls = {
+    addAll: [],
+    cacheMatch: [],
+    cacheDelete: [],
+    clientsClaim: 0,
+    network: [],
+    skipWaiting: 0
+  };
+  const cache = {
+    async addAll(urls) {
+      calls.addAll.push(Array.from(urls));
+      if (installError) throw installError;
+    },
+    async match(request) {
+      calls.cacheMatch.push(request.url || String(request));
+      return cachedResponse;
+    }
+  };
+  const self = {
+    location: { origin: 'https://staffbot.test' },
+    addEventListener(type, listener) {
+      listeners.set(type, listener);
+    },
+    skipWaiting() {
+      calls.skipWaiting += 1;
+    },
+    clients: {
+      async claim() {
+        calls.clientsClaim += 1;
+      }
+    }
+  };
+  const caches = {
+    async open() { return cache; },
+    async keys() { return Array.from(cacheNames); },
+    async delete(name) {
+      calls.cacheDelete.push(name);
+      return true;
+    }
+  };
+  const networkFetch = async (request) => {
+    calls.network.push({ method: request.method, url: request.url });
+    return new Response(`network:${request.method}:${request.url}`);
+  };
+  const response = await manageAsset('/manage/sw.js');
+  vm.runInNewContext(await response.text(), {
+    self,
+    caches,
+    fetch: networkFetch,
+    Request,
+    Response,
+    URL,
+    Promise
+  }, { filename: '/manage/sw.js' });
+
+  return {
+    calls,
+    async dispatch(type, request) {
+      let lifetime;
+      let responsePromise;
+      const event = {
+        request,
+        waitUntil(promise) { lifetime = Promise.resolve(promise); },
+        respondWith(promise) { responsePromise = Promise.resolve(promise); }
+      };
+      listeners.get(type)(event);
+      return {
+        lifetime,
+        response: responsePromise ? await responsePromise : null
+      };
+    }
+  };
+}
+
 const task = {
   task_type: 'payroll',
   task_id: 'PAYROLL-1',
   store_id: 'STORE-1'
 };
+
+test('manage manifest is parseable and contains complete install metadata', async () => {
+  const response = await manageAsset('/manage/manifest.webmanifest');
+  assert.equal(response.status, 200);
+  assert.equal(response.headers.get('content-type'), 'application/manifest+json; charset=utf-8');
+  assert.equal(response.headers.get('cache-control'), 'no-cache');
+  assert.match(response.headers.get('content-security-policy'), /manifest-src 'self'/);
+
+  const manifest = await response.json();
+  assert.equal(manifest.name, 'StaffBot 管理端');
+  assert.equal(manifest.short_name, 'StaffBot');
+  assert.equal(manifest.start_url, '/manage');
+  assert.equal(manifest.display, 'standalone');
+  assert.equal(manifest.theme_color, '#111827');
+  assert.deepEqual(manifest.icons, [{
+    src: '/manage/icon.svg',
+    sizes: 'any',
+    type: 'image/svg+xml',
+    purpose: 'any maskable'
+  }]);
+});
+
+test('manage service worker installs exactly the fixed shell and removes old caches on activate', async () => {
+  const serviceWorker = await executeServiceWorker();
+  const install = await serviceWorker.dispatch('install');
+  await install.lifetime;
+  assert.deepEqual(serviceWorker.calls.addAll, [[
+    '/manage',
+    '/manage/app.js',
+    '/manage/styles.css',
+    '/manage/manifest.webmanifest',
+    '/manage/icon.svg'
+  ]]);
+  assert.equal(serviceWorker.calls.skipWaiting, 1);
+
+  const activate = await serviceWorker.dispatch('activate');
+  await activate.lifetime;
+  assert.deepEqual(serviceWorker.calls.cacheDelete, ['staffbot-manage-shell-v0']);
+  assert.equal(serviceWorker.calls.clientsClaim, 1);
+});
+
+test('manage service worker is cache-first only for exact same-origin shell GET requests', async () => {
+  const cached = new Response('cached-shell');
+  const serviceWorker = await executeServiceWorker({ cachedResponse: cached });
+
+  const shell = await serviceWorker.dispatch(
+    'fetch',
+    new Request('https://staffbot.test/manage/app.js')
+  );
+  assert.equal(await shell.response.text(), 'cached-shell');
+  assert.deepEqual(serviceWorker.calls.cacheMatch, ['https://staffbot.test/manage/app.js']);
+  assert.deepEqual(serviceWorker.calls.network, []);
+
+  for (const request of [
+    new Request('https://staffbot.test/api/manage/tasks?store_id=STORE-1'),
+    new Request('https://staffbot.test/api/manage/stores/STORE-1/payroll/proofs/PROOF-1'),
+    new Request('https://staffbot.test/manage/app.js?stale=1'),
+    new Request('https://files.example.test/manage/app.js'),
+    new Request('https://staffbot.test/manage', { method: 'POST' })
+  ]) {
+    const result = await serviceWorker.dispatch('fetch', request);
+    assert.match(await result.response.text(), /^network:/);
+  }
+  assert.equal(serviceWorker.calls.cacheMatch.length, 1);
+  assert.deepEqual(
+    serviceWorker.calls.network.map(({ method, url }) => [method, url]),
+    [
+      ['GET', 'https://staffbot.test/api/manage/tasks?store_id=STORE-1'],
+      ['GET', 'https://staffbot.test/api/manage/stores/STORE-1/payroll/proofs/PROOF-1'],
+      ['GET', 'https://staffbot.test/manage/app.js?stale=1'],
+      ['GET', 'https://files.example.test/manage/app.js'],
+      ['POST', 'https://staffbot.test/manage']
+    ]
+  );
+});
+
+test('manage service worker install fails when the complete shell cannot be cached', async () => {
+  const serviceWorker = await executeServiceWorker({
+    installError: new Error('shell_cache_failed')
+  });
+  const install = await serviceWorker.dispatch('install');
+  await assert.rejects(install.lifetime, /shell_cache_failed/);
+  assert.equal(serviceWorker.calls.skipWaiting, 0);
+});
 
 test('builds an encoded task URL only from a strict HTTPS manage origin', () => {
   assert.equal(

@@ -37,12 +37,15 @@ function fixture({
   decisionConflictRefreshFails = false,
   claimConflictRefreshFails = false,
   deferRenew = false,
+  reconnectSessionGate = null,
+  failReconnectSession = false,
   detailOverrides = {}
 } = {}) {
   const requests = [];
   let currentTask = structuredClone(initialTask);
   let decisionMade = false;
   let authorityRefreshFails = false;
+  let sessionReads = 0;
   const renewResolvers = [];
   const detail = () => ({
     task: structuredClone(currentTask),
@@ -84,6 +87,11 @@ function fixture({
           });
           if (path === '/api/admin/me') return json({ ok: true, telegram_id: 'ADMIN-1' });
           if (path === '/api/manage/session') {
+            sessionReads += 1;
+            if (sessionReads > 1 && reconnectSessionGate) await reconnectSessionGate.promise;
+            if (sessionReads > 1 && failReconnectSession) {
+              return json({ ok: false, error: 'refresh_failed' }, 503);
+            }
             return json({ ok: true, telegram_id: 'ADMIN-1', global_admin: false, csrf_token: 'CSRF-1' });
           }
           if (path === '/api/manage/stores') {
@@ -260,6 +268,92 @@ test('offline, another owner, and an expired claim keep decision controls read-o
   await browser.setOnline(false);
   assert.equal(browser.document.getElementById('offline-banner').getAttribute('hidden'), null);
   assert.equal(browser.document.getElementById('approve').disabled, true);
+});
+
+test('offline login is visibly read-only and does not send or verify a code', async () => {
+  const requests = [];
+  const browser = await executeManageClient(MANAGE_CLIENT, {
+    online: false,
+    async fetch(path, options = {}) {
+      requests.push({ path, method: options.method || 'GET' });
+      return json({ ok: false, error: 'unauthorized' }, 401);
+    }
+  });
+
+  assert.match(browser.document.app.textContent, /当前离线，只能查看已加载内容/);
+  assert.deepEqual(browser.serviceWorkerRegistrations, ['/manage/sw.js']);
+  assert.equal(browser.document.getElementById('send-code').disabled, true);
+  assert.equal(browser.document.getElementById('verify-code').disabled, true);
+  const before = requests.length;
+  await browser.clickButton('发送验证码');
+  await browser.clickButton('登录');
+  assert.equal(requests.length, before);
+
+  await browser.setOnline(true);
+  assert.equal(browser.document.getElementById('send-code').disabled, false);
+  assert.equal(browser.document.getElementById('verify-code').disabled, false);
+});
+
+test('reconnecting an approval stays locked until session stores detail and tasks are authoritative', async () => {
+  const gate = deferred();
+  const app = fixture({
+    initialTask: {
+      ...task,
+      claim: {
+        claimed_by: 'ADMIN-1',
+        claimed_at: '2026-07-29T02:00:00.000Z',
+        lease_expires_at: '2099-07-29T02:15:00.000Z',
+        active: true
+      }
+    },
+    reconnectSessionGate: gate
+  });
+  const browser = await app.browser();
+  await browser.clickButton('查看详情');
+  await browser.setOnline(false);
+  app.setTask({
+    ...task,
+    claim: {
+      claimed_by: 'ADMIN-2',
+      claimed_at: '2026-07-29T02:05:00.000Z',
+      lease_expires_at: '2099-07-29T02:20:00.000Z',
+      active: true
+    }
+  });
+  await browser.setOnline(true);
+
+  assert.equal(browser.document.getElementById('approve').disabled, true);
+  assert.match(browser.document.app.textContent, /正在刷新最新状态/);
+  gate.resolve();
+  await new Promise((resolve) => setImmediate(resolve));
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.match(browser.document.getElementById('claim-status').textContent, /ADMIN-2/);
+  assert.equal(browser.document.getElementById('approve').disabled, true);
+  assert.ok(app.requests.filter((request) => request.path === '/api/manage/session').length >= 2);
+  assert.ok(app.requests.filter((request) => request.path === '/api/manage/stores').length >= 2);
+  assert.ok(app.requests.some((request) => request.path.startsWith('/api/manage/tasks?')));
+});
+
+test('failed approval reconnect keeps cached detail locked and read-only', async () => {
+  const app = fixture({
+    initialTask: {
+      ...task,
+      claim: {
+        claimed_by: 'ADMIN-1',
+        claimed_at: '2026-07-29T02:00:00.000Z',
+        lease_expires_at: '2099-07-29T02:15:00.000Z',
+        active: true
+      }
+    },
+    failReconnectSession: true
+  });
+  const browser = await app.browser();
+  await browser.clickButton('查看详情');
+  await browser.setOnline(false);
+  await browser.setOnline(true);
+
+  assert.equal(browser.document.getElementById('approve').disabled, true);
+  assert.match(browser.document.app.textContent, /刷新失败.*只读/);
 });
 
 test('a conflict refreshes detail and shows the current handler or result', async () => {
@@ -1365,8 +1459,21 @@ test('offline payroll payment becomes read-only without losing the loaded dossie
   await browser.setOnline(false);
 
   assert.match(browser.document.app.textContent, /Alice/);
+  assert.equal(browser.document.getElementById('bank-amount').disabled, true);
+  assert.equal(browser.document.getElementById('bank-camera').disabled, true);
+  assert.equal(browser.document.getElementById('bank-library').disabled, true);
   assert.equal(browser.document.getElementById('save-payment-draft').disabled, true);
   assert.equal(browser.document.getElementById('submit-payroll-payment').disabled, true);
+  const mutationCount = app.requests.filter((request) => request.method !== 'GET').length;
+  await browser.call('savePaymentDraft');
+  await browser.call('submitPayrollPayment');
+  await browser.changeFiles('bank-library', [
+    new File([new Uint8Array([1])], 'offline.jpg', { type: 'image/jpeg' })
+  ]);
+  assert.equal(
+    app.requests.filter((request) => request.method !== 'GET').length,
+    mutationCount
+  );
 });
 
 test('payroll submit uses the planned idempotent Task 11 route and cannot double-submit', async () => {
@@ -1456,6 +1563,8 @@ test('reconnecting a payroll page stays read-only until authoritative state is r
   await new Promise((resolve) => setImmediate(resolve));
   assert.match(browser.document.getElementById('claim-status').textContent, /ADMIN-2/);
   assert.equal(browser.document.getElementById('bank-amount'), null);
+  assert.ok(app.requests.filter((request) => request.path === '/api/manage/session').length >= 2);
+  assert.ok(app.requests.filter((request) => request.path === '/api/manage/stores').length >= 2);
 });
 
 test('failed reconnect refresh keeps the cached payroll dossier locked', async () => {

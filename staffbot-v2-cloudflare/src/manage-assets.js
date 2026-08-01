@@ -107,8 +107,52 @@ const MANAGE_MANIFEST = JSON.stringify({
   }]
 });
 
-const MANAGE_SERVICE_WORKER = `self.addEventListener('install', () => self.skipWaiting());
-self.addEventListener('activate', (event) => event.waitUntil(self.clients.claim()));
+const MANAGE_SERVICE_WORKER = `const CACHE_NAME = 'staffbot-manage-shell-v1';
+const SHELL_URLS = [
+  '/manage',
+  '/manage/app.js',
+  '/manage/styles.css',
+  '/manage/manifest.webmanifest',
+  '/manage/icon.svg'
+];
+
+self.addEventListener('install', (event) => {
+  event.waitUntil(
+    caches.open(CACHE_NAME)
+      .then((cache) => cache.addAll(SHELL_URLS))
+      .then(() => self.skipWaiting())
+  );
+});
+
+self.addEventListener('activate', (event) => {
+  event.waitUntil(
+    caches.keys()
+      .then((names) => Promise.all(
+        names
+          .filter((name) => name.startsWith('staffbot-manage-shell-') && name !== CACHE_NAME)
+          .map((name) => caches.delete(name))
+      ))
+      .then(() => self.clients.claim())
+  );
+});
+
+self.addEventListener('fetch', (event) => {
+  const request = event.request;
+  const url = new URL(request.url);
+  const isShell = request.method === 'GET'
+    && url.origin === self.location.origin
+    && !url.search
+    && SHELL_URLS.includes(url.pathname);
+  if (!isShell) {
+    event.respondWith(fetch(request));
+    return;
+  }
+  event.respondWith(
+    caches.open(CACHE_NAME)
+      .then((cache) => cache.match(request))
+      .then((cached) => cached || fetch(request))
+  );
+});
 `;
 
 const MANAGE_ICON = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-label="StaffBot">
@@ -132,6 +176,9 @@ export function handleManageAsset(request, env, url) {
     'content-type': contentType,
     ...manageSecurityHeaders()
   };
-  if (url.pathname === '/manage/sw.js') headers['cache-control'] = 'no-cache';
+  if (
+    url.pathname === '/manage/sw.js'
+    || url.pathname === '/manage/manifest.webmanifest'
+  ) headers['cache-control'] = 'no-cache';
   return new Response(body, { headers });
 }
