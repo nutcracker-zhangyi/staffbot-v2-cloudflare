@@ -1,23 +1,17 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { readFile } from 'node:fs/promises';
 import { DatabaseSync } from 'node:sqlite';
 
 import { handleAdminApi } from '../src/admin-api.js';
 import worker from '../src/index.js';
-import { processScheduledWork } from '../src/router.js';
+import routerWorker, { processScheduledWork } from '../src/router.js';
 import { createD1 } from './helpers/d1.js';
 
 const schema = readFileSync(
   new URL('../db/schema.sql', import.meta.url),
   'utf8'
 );
-const indexSource = await readFile(
-  new URL('../src/index.js', import.meta.url),
-  'utf8'
-);
-
 function context() {
   const promises = [];
   return {
@@ -38,11 +32,20 @@ function inlineAdminScript(document) {
   return match[1];
 }
 
-test('keeps the Worker entrypoint as a compatibility facade', () => {
-  assert.equal(indexSource.includes('async function handleAdminApi'), false);
-  assert.equal(indexSource.includes('function adminHtml'), false);
-  assert.equal(indexSource.includes('const TEXT ='), false);
-  assert.ok(indexSource.split('\n').length < 120);
+test('keeps the Worker entrypoint as a compatibility facade', async () => {
+  assert.equal(worker, routerWorker);
+
+  const response = await worker.fetch(
+    new Request('https://staffbot.test/'),
+    { ENVIRONMENT: 'staging' },
+    context()
+  );
+  assert.deepEqual(await response.json(), {
+    ok: true,
+    service: 'staffbot-v2',
+    environment: 'staging',
+    admin: '/admin'
+  });
 });
 
 test('preserves the complete admin document contract', async () => {

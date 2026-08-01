@@ -1,7 +1,11 @@
-import { securityHeaders } from './security.js';
+import { manageSecurityHeaders, securityHeaders } from './security.js';
 
 export const JSON_HEADERS = { 'content-type': 'application/json; charset=utf-8' };
 export const HTML_HEADERS = { 'content-type': 'text/html; charset=utf-8', ...securityHeaders() };
+export const MANAGE_HTML_HEADERS = {
+  'content-type': 'text/html; charset=utf-8',
+  ...manageSecurityHeaders()
+};
 export const TEXT_HEADERS = { 'content-type': 'text/plain; charset=utf-8' };
 export const CSV_HEADERS = {
   'content-type': 'text/csv; charset=utf-8',
@@ -25,6 +29,10 @@ export function json(data, status = 200, extraHeaders = {}) {
 
 export function html(text) {
   return new Response(text, { headers: HTML_HEADERS });
+}
+
+export function manageDocument(text) {
+  return new Response(text, { headers: MANAGE_HTML_HEADERS });
 }
 
 export function sessionCookieValue(cookieHeader) {

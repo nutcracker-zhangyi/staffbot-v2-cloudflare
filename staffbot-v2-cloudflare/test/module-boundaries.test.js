@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
+import { requireManageMutation } from '../src/admin-auth.js';
 import { adminOrderSql } from '../src/admin-query.js';
 import { dateRange } from '../src/dates.js';
 import { json } from '../src/http.js';
@@ -54,4 +55,24 @@ test('exposes hardened JSON responses from their owner module', async () => {
   assert.equal(response.status, 201);
   assert.deepEqual(await response.json(), { ok: true });
   assert.equal(response.headers.get('x-frame-options'), 'DENY');
+});
+
+test('manage mutations require the exact session CSRF token', () => {
+  const session = { csrf_token: 'CSRF-expected' };
+
+  assert.equal(requireManageMutation(new Request(
+    'https://staffbot.test/api/manage/task',
+    { headers: { 'x-csrf-token': 'CSRF-expected' } }
+  ), session), true);
+  assert.equal(requireManageMutation(new Request(
+    'https://staffbot.test/api/manage/task',
+    { headers: { 'x-csrf-token': 'csrf-expected' } }
+  ), session), false);
+  assert.equal(requireManageMutation(new Request(
+    'https://staffbot.test/api/manage/task'
+  ), session), false);
+  assert.equal(requireManageMutation(new Request(
+    'https://staffbot.test/api/manage/task',
+    { headers: { 'x-csrf-token': 'CSRF-expected' } }
+  ), null), false);
 });

@@ -31,10 +31,15 @@ import {
   audit,
   auditStatement,
   logError,
-  makeId,
   makeStoreId,
   nowIso
 } from './audit.js';
+import {
+  logoutAdminSession,
+  requireAdminSession,
+  startAdminLogin,
+  verifyAdminLogin
+} from './admin-auth.js';
 import { DEFAULT_STORE_ID } from './constants.js';
 import {
   addIsoDays,
@@ -55,9 +60,7 @@ import {
   CSV_HEADERS,
   clearSessionCookie,
   json,
-  readJson,
-  sessionCookieValue,
-  setSessionCookie
+  readJson
 } from './http.js';
 import { render, t } from './i18n.js';
 import {
@@ -72,12 +75,10 @@ import { readPayrollPaymentQr } from './payroll-payment-qr.js';
 import { readPayrollProof } from './payroll-proofs.js';
 import {
   adminIds,
-  isGlobalAdmin,
-  nextLoginFailureState
+  isGlobalAdmin
 } from './security.js';
 import {
   getStore,
-  isAnyAdmin,
   isStoreAdmin
 } from './stores.js';
 import { sendMessage } from './telegram-client.js';
@@ -170,14 +171,14 @@ function financialCorrectionResponse(result) {
 
 export async function handleAdminApi(request, env, url, ctx) {
   try {
-    if (request.method === 'POST' && url.pathname === '/api/admin/login/start') return adminLoginStart(request, env);
-    if (request.method === 'POST' && url.pathname === '/api/admin/login/verify') return adminLoginVerify(request, env);
+    if (request.method === 'POST' && url.pathname === '/api/admin/login/start') return startAdminLogin(request, env);
+    if (request.method === 'POST' && url.pathname === '/api/admin/login/verify') return verifyAdminLogin(request, env);
 
     const session = await requireAdminSession(request, env);
     if (!session) return json({ ok: false, error: 'unauthorized' }, 401);
 
     if (request.method === 'POST' && url.pathname === '/api/admin/logout') {
-      ctx.waitUntil(env.DB.prepare(`DELETE FROM admin_sessions WHERE token = ?`).bind(session.token).run());
+      ctx.waitUntil(logoutAdminSession(env, session.token));
       return json({ ok: true }, 200, clearSessionCookie());
     }
 
@@ -493,69 +494,6 @@ async function handleAdminDashboard(
     }
     throw error;
   }
-}
-
-async function adminLoginStart(request, env) {
-  const body = await readJson(request);
-  const telegramId = String(body.telegram_id || '').trim();
-  if (!telegramId || !(await isAnyAdmin(env, telegramId))) {
-    return json({ ok: false, error: 'forbidden' }, 403);
-  }
-  const existing = await env.DB.prepare(`SELECT locked_until FROM admin_login_codes WHERE telegram_id = ?`).bind(telegramId).first();
-  if (existing && existing.locked_until && existing.locked_until > nowIso()) {
-    return json({ ok: false, error: 'too_many_attempts' }, 429);
-  }
-  const code = makeNumericCode();
-  const now = new Date();
-  const expiresAt = new Date(now.getTime() + 10 * 60 * 1000).toISOString();
-  await env.DB.prepare(`
-    INSERT INTO admin_login_codes (telegram_id, code, expires_at, created_at, failed_attempts, locked_until)
-    VALUES (?, ?, ?, ?, 0, NULL)
-    ON CONFLICT(telegram_id) DO UPDATE SET
-      code = excluded.code,
-      expires_at = excluded.expires_at,
-      created_at = excluded.created_at,
-      failed_attempts = 0,
-      locked_until = NULL
-  `).bind(telegramId, code, expiresAt, now.toISOString()).run();
-  await sendMessage(env, telegramId, `StaffBot 后台登录验证码：${code}\n10 分钟内有效。`);
-  return json({ ok: true });
-}
-
-async function adminLoginVerify(request, env) {
-  const body = await readJson(request);
-  const telegramId = String(body.telegram_id || '').trim();
-  const code = String(body.code || '').trim();
-  const found = await env.DB.prepare(`SELECT * FROM admin_login_codes WHERE telegram_id = ?`).bind(telegramId).first();
-  if (found && found.locked_until && found.locked_until > nowIso()) {
-    return json({ ok: false, error: 'too_many_attempts' }, 429);
-  }
-  if (!found || found.code !== code || found.expires_at <= nowIso() || !(await isAnyAdmin(env, telegramId))) {
-    if (found) {
-      const next = nextLoginFailureState(found.failed_attempts, new Date());
-      await env.DB.prepare(`
-        UPDATE admin_login_codes SET failed_attempts = ?, locked_until = ? WHERE telegram_id = ?
-      `).bind(next.failedAttempts, next.lockedUntil, telegramId).run();
-    }
-    return json({ ok: false, error: 'invalid_code' }, 403);
-  }
-  await env.DB.prepare(`DELETE FROM admin_login_codes WHERE telegram_id = ?`).bind(telegramId).run();
-  const token = makeId('SESS');
-  const now = new Date();
-  const expiresAt = new Date(now.getTime() + 7 * 24 * 60 * 60 * 1000).toISOString();
-  await env.DB.prepare(`
-    INSERT INTO admin_sessions (token, telegram_id, expires_at, created_at)
-    VALUES (?, ?, ?, ?)
-  `).bind(token, telegramId, expiresAt, now.toISOString()).run();
-  return json({ ok: true }, 200, setSessionCookie(token, expiresAt));
-}
-
-async function requireAdminSession(request, env) {
-  const token = sessionCookieValue(request.headers.get('cookie') || '');
-  if (!token) return null;
-  const row = await env.DB.prepare(`SELECT * FROM admin_sessions WHERE token = ? AND expires_at > ?`).bind(token, nowIso()).first();
-  if (!row || !(await isAnyAdmin(env, row.telegram_id))) return null;
-  return { ...row, token };
 }
 
 async function listAdminStores(env, url, adminId) {
@@ -1713,13 +1651,6 @@ function monthRange(monthFrom, monthTo) {
     startDate: start.toISOString().slice(0, 10),
     endDate: end.toISOString().slice(0, 10)
   };
-}
-
-function makeNumericCode() {
-  const bytes = new Uint8Array(4);
-  crypto.getRandomValues(bytes);
-  const value = ((bytes[0] << 24) >>> 0) + (bytes[1] << 16) + (bytes[2] << 8) + bytes[3];
-  return String(value % 1000000).padStart(6, '0');
 }
 
 function cleanStoreId(value) {

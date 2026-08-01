@@ -2,7 +2,9 @@ import { handleAdminApi } from './admin-api.js';
 import { adminHtml } from './admin-page.js';
 import { processAbsenceFines } from './absence.js';
 import { logEvent } from './audit.js';
-import { html, json } from './http.js';
+import { html, json, manageDocument } from './http.js';
+import { handleManageAsset } from './manage-assets.js';
+import { manageHtml } from './manage-page.js';
 import { deliverPayrollEmailOutbox } from './payroll-email.js';
 import { deliverPayrollNotifications } from './payroll-notifications.js';
 import { processPayrollSettlements } from './payroll-settlement.js';
@@ -38,6 +40,15 @@ export default {
 
     if (request.method === 'GET' && url.pathname === '/admin') {
       return html(adminHtml(env));
+    }
+
+    if (request.method === 'GET' && url.pathname === '/manage') {
+      return manageDocument(manageHtml(env));
+    }
+
+    if (request.method === 'GET' && url.pathname.startsWith('/manage/')) {
+      const asset = handleManageAsset(request, env, url);
+      if (asset) return asset;
     }
 
     if (url.pathname.startsWith('/api/admin/')) {

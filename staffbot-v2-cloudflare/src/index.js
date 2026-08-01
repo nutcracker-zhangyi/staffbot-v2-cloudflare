@@ -1,8 +1,11 @@
 export { default } from './router.js';
+export * from './admin-auth.js';
 export * from './admin-query.js';
 export * from './dates.js';
 export * from './ids.js';
 export * from './money.js';
+export * from './manage-assets.js';
+export * from './manage-page.js';
 export * from './payroll-cycle.js';
 export * from './payroll-ledger.js';
 export * from './payroll-email.js';
