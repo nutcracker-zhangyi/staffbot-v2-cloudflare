@@ -1,14 +1,14 @@
 # Admin Mobile PWA Staging Validation
 
 - Validation date: 2026-08-01
-- Local code base: `e51cc90d6e21c4b7aab70c73f0a9a9ff71c9a8dd`
-- Local implementation commit: recorded in the Task 14 SDD report after commit
+- Local/deployed implementation commit: `9da4f4979b44d39ebc3533c1349b299bc0ece8a2`
+- Staging Worker version: `f1a0be2e-081b-4223-bd6a-87869e0e7ecb`
+- Staging URL: `https://staffbot-v2-staging.staffbot-v2.workers.dev`
 - Target environment: staging only
 - Production deployed: **NO**
 
-This report intentionally separates completed local evidence from remote and
-real-device work. No remote D1 command, staging deploy, staging HTTP smoke test,
-or real-device operation was performed during the local implementation stage.
+This report separates completed local and staging evidence from the remaining
+real-device and authenticated business-flow acceptance.
 
 ## Local automated evidence
 
@@ -25,24 +25,27 @@ or real-device operation was performed during the local implementation stage.
 | Offline safety | PASS | Persistent banner and mutation guards exercised for login, approvals, splits, uploads, and submit |
 | Reconnect safety | PASS | Approval and payroll remain locked until session, stores, and current authority are reloaded; refresh failure remains read-only |
 
-The local Wrangler executable was not present. `npx wrangler` was not invoked
-because it could download a package or access the network; Wrangler and remote
-evidence remain pending.
+Wrangler `4.100.0` authenticated as `nutcracker.zhangyi@gmail.com`. The staging
+dry-run confirmed the `staffbot_v2_staging` D1 database, staging payroll-proof
+R2 bucket, disabled scheduled tasks, Telegram allowlist mode, and staging
+manage origin before deployment.
 
 ## Staging infrastructure evidence
 
 | Check | Status | Evidence |
 | --- | --- | --- |
-| Remote migration list | PENDING | Not run |
-| Migration 023 applied | PENDING | Not run |
-| Migration 024 applied | PENDING | Not run |
-| `admin_task_claims` table | PENDING | Not queried remotely |
-| `payroll_payment_attempts` table | PENDING | Not queried remotely |
-| Backfill reconciliation counts | PENDING | Not queried remotely |
-| Staging deployment/version | PENDING | Not deployed |
-| `GET /` staging health | PENDING | Not requested |
-| `/manage/` shell and manifest | PENDING | Not requested |
-| `/admin` unchanged/staging marker | PENDING | Not requested |
+| Remote migration list | PASS | 023 and 024 were the only pending migrations before apply; no migrations remain afterward |
+| Migration 023 applied | PASS | Wrangler remote migration apply completed successfully |
+| Migration 024 applied | PASS | Wrangler remote migration apply completed successfully |
+| `admin_task_claims` table | PASS | Present in remote staging D1 |
+| `payroll_payment_attempts` table | PASS | Present in remote staging D1 |
+| Backfill reconciliation counts | PASS | 2/2 payrolls have current attempts; 2 version-1 attempts; 4/4 proofs linked; zero invalid or orphan references |
+| Staging deployment/version | PASS | Worker version `f1a0be2e-081b-4223-bd6a-87869e0e7ecb` |
+| `GET /` staging health | PASS | HTTP 200, JSON |
+| `/manage/` shell and manifest | PASS | Shell and all five PWA resources return HTTP 200 with expected MIME types; `/manage` redirects to `/manage/` |
+| `/admin` unchanged/staging marker | PASS | HTTP 200, HTML |
+| Browser mobile layout | PASS | In-app Chromium viewport 390x844 rendered the login form without console warnings/errors |
+| PWA response headers | PASS | Strict CSP/security headers; manifest and service worker use `no-cache`; manifest start URL and scope are `/manage/` |
 
 ## Real-device and business-flow acceptance
 
@@ -63,8 +66,6 @@ evidence remain pending.
 
 ## Evidence still required
 
-- Deployed staging Worker version and exact implementation commit.
-- Remote migration output and reconciliation counts.
 - iPhone Safari and Android Chrome versions.
 - Redacted task, attempt, proof, and audit IDs for each business scenario.
 - Telegram failure/retry delivery evidence without Bot Tokens or private proof
@@ -73,7 +74,9 @@ evidence remain pending.
 
 ## Known limitations at this stage
 
-- The PWA has only been validated through local automation.
+- The PWA shell and mobile login layout have been validated in staging through
+  HTTP smoke tests and an in-app Chromium browser; authenticated business flows
+  remain pending.
 - Install prompts, camera/photo-library integration, offline browser behavior,
   and Telegram round trips still require staging devices.
 - No claim is made that staging has been validated or that production is ready.
