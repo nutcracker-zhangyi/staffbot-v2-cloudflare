@@ -29,6 +29,7 @@ function json(body, status = 200) {
 function fixture({
   initialTask = task,
   pathname = '/manage',
+  search = '',
   now,
   decisionGate = null,
   claimGate = null,
@@ -71,6 +72,7 @@ function fixture({
     async browser() {
       return executeManageClient(MANAGE_CLIENT, {
         pathname,
+        search,
         now,
         async fetch(path, options = {}) {
           const method = options.method || 'GET';
@@ -285,21 +287,147 @@ test('only a manage return path opens an approval detail after login', async () 
   await safe.browser();
   assert.equal(safe.requests.at(-1).path, '/api/manage/stores/STORE-1/approvals/income/INC-1');
 
-  const taskDeepLink = fixture({
-    pathname: '/manage/tasks/income/INC-1'
-  });
-  await taskDeepLink.browser();
-  assert.equal(
-    taskDeepLink.requests.at(-1).path,
-    '/api/manage/stores/STORE-1/approvals/income/INC-1'
-  );
-
   const unsafe = fixture({ pathname: '/admin/approvals/income/INC-1' });
   await unsafe.browser();
   assert.equal(
     unsafe.requests.some((request) => request.path.includes('/approvals/income/INC-1')),
     false
   );
+});
+
+function completedApprovalDetail({
+  type = 'income',
+  id = 'INC-1',
+  storeId = 'STORE-1',
+  storeName = 'Tokyo Club'
+} = {}) {
+  return {
+    task: {
+      ...task,
+      task_type: type,
+      task_id: id,
+      store_id: storeId,
+      store_name: storeName,
+      status: 'approved'
+    },
+    request: { request_id: id, income: 100, status: 'approved' },
+    employee: { telegram_id: 'EMP-1', display_name: 'Alice', language: 'zh' },
+    store: { store_id: storeId, name: storeName, currency: '₫', timezone: 'Asia/Tokyo' },
+    attachments: [],
+    history: [{
+      id: 1,
+      admin_id: 'ADMIN-1',
+      action: 'approve_income',
+      details: {},
+      created_at: '2026-07-29T02:10:00.000Z'
+    }]
+  };
+}
+
+async function directApprovalBrowser({
+  pathname = '/manage/tasks/income/INC-1',
+  search = '?store=STORE-1',
+  stores = [{ store_id: 'STORE-1', name: 'Tokyo Club' }],
+  detailForPath = () => completedApprovalDetail()
+} = {}) {
+  const requests = [];
+  const browser = await executeManageClient(MANAGE_CLIENT, {
+    pathname,
+    search,
+    async fetch(path, options = {}) {
+      requests.push({ path, method: options.method || 'GET' });
+      if (path === '/api/admin/me') return json({ ok: true });
+      if (path === '/api/manage/session') {
+        return json({ telegram_id: 'ADMIN-1', csrf_token: 'CSRF-1' });
+      }
+      if (path === '/api/manage/stores') return json({ stores });
+      if (path === '/api/manage/tasks?') return json({ tasks: [] });
+      if (path.includes('/approvals/')) return json(detailForPath(path));
+      return json({ ok: false, error: 'not_found' }, 404);
+    }
+  });
+  return { browser, requests };
+}
+
+test('a completed approval deep link opens exact authorized detail without a pending task', async () => {
+  const app = await directApprovalBrowser({
+    pathname: '/manage/tasks/income/INC%2F1',
+    search: '?store=STORE%2F1',
+    stores: [{ store_id: 'STORE/1', name: 'Tokyo Club' }],
+    detailForPath: () => completedApprovalDetail({ id: 'INC/1', storeId: 'STORE/1' })
+  });
+
+  assert.ok(app.requests.some((request) =>
+    request.path === '/api/manage/stores/STORE%2F1/approvals/income/INC%2F1'
+  ));
+  assert.ok(
+    app.requests.findIndex((request) => request.path === '/api/manage/stores')
+    < app.requests.findIndex((request) => request.path.includes('/approvals/'))
+  );
+  assert.match(app.browser.document.app.textContent, /已通过/);
+  assert.equal(app.browser.document.getElementById('approve').disabled, true);
+  assert.equal(app.requests.some((request) => request.method !== 'GET'), false);
+});
+
+test('task deep links reject missing duplicate blank and unauthorized stores before detail fetch', async (context) => {
+  for (const [name, search] of [
+    ['missing', ''],
+    ['duplicate', '?store=STORE-1&store=STORE-2'],
+    ['blank', '?store=%20%20'],
+    ['unauthorized', '?store=STORE-2']
+  ]) {
+    await context.test(name, async () => {
+      const app = await directApprovalBrowser({ search });
+      assert.equal(
+        app.requests.some((request) => request.path.includes('/approvals/')),
+        false
+      );
+      assert.match(app.browser.document.app.textContent, /任务不存在或无权查看/);
+    });
+  }
+});
+
+test('mismatched approval response identity is rejected and never adopted', async (context) => {
+  for (const [name, mutate] of [
+    ['type', (detail) => { detail.task.task_type = 'leave'; }],
+    ['id', (detail) => { detail.task.task_id = 'INC-2'; }],
+    ['task store', (detail) => { detail.task.store_id = 'STORE-2'; }],
+    ['detail store', (detail) => { detail.store.store_id = 'STORE-2'; }]
+  ]) {
+    await context.test(name, async () => {
+      const app = await directApprovalBrowser({
+        detailForPath: () => {
+          const detail = completedApprovalDetail({ storeName: 'Injected Store' });
+          mutate(detail);
+          return detail;
+        }
+      });
+      assert.match(app.browser.document.app.textContent, /任务不存在或无权查看/);
+      assert.doesNotMatch(app.browser.document.app.textContent, /Injected Store|Alice/);
+    });
+  }
+});
+
+test('the URL store selects the exact same-id task across authorized stores', async () => {
+  const app = await directApprovalBrowser({
+    search: '?store=STORE-2',
+    stores: [
+      { store_id: 'STORE-1', name: 'Tokyo Club' },
+      { store_id: 'STORE-2', name: 'Osaka Club' }
+    ],
+    detailForPath: () => completedApprovalDetail({
+      storeId: 'STORE-2',
+      storeName: 'Osaka Club'
+    })
+  });
+
+  assert.ok(app.requests.some((request) =>
+    request.path === '/api/manage/stores/STORE-2/approvals/income/INC-1'
+  ));
+  assert.equal(app.requests.some((request) =>
+    request.path === '/api/manage/stores/STORE-1/approvals/income/INC-1'
+  ), false);
+  assert.match(app.browser.document.app.textContent, /Osaka Club/);
 });
 
 test('logout clears all tenant data and network events cannot revive it before another login', async () => {
@@ -711,6 +839,7 @@ function payrollFixture({
   storeName = 'Tokyo Club',
   initialTasks = [],
   pathname = '/manage',
+  search = '',
   draftFallbackAttempt = null,
   confirm = () => true
 } = {}) {
@@ -735,6 +864,7 @@ function payrollFixture({
       return executeManageClient(MANAGE_CLIENT, {
         confirm,
         pathname,
+        search,
         async fetch(path, options = {}) {
           const method = options.method || 'GET';
           requests.push({ path, method, headers: options.headers, body: options.body });
@@ -857,20 +987,15 @@ test('payroll opens a dossier with facts and immutable attempt history before ed
   assert.equal(browser.document.getElementById('delete-proof-PROOF-OLD'), null);
 });
 
-test('a payroll task deep link opens its dossier after login', async () => {
+test('a completed payroll deep link opens its dossier without a pending task or payment action', async () => {
+  const completed = payrollDossier();
+  completed.payroll.status = 'confirmed';
+  completed.payroll.claim = null;
   const app = payrollFixture({
+    initialDossier: completed,
     pathname: '/manage/tasks/payroll/PAYROLL-1',
-    initialTasks: [{
-      task_type: 'payroll',
-      task_id: 'PAYROLL-1',
-      store_id: 'STORE-1',
-      store_name: 'Tokyo Club',
-      employee_name: 'Alice',
-      status: 'awaiting_admin_payment',
-      submitted_at: '2026-07-29T01:00:00.000Z',
-      urgency: 300,
-      claim: null
-    }]
+    search: '?store=STORE-1',
+    initialTasks: []
   });
   const browser = await app.browser();
 
@@ -878,6 +1003,29 @@ test('a payroll task deep link opens its dossier after login', async () => {
     request.path === '/api/manage/stores/STORE-1/payroll/PAYROLL-1'
   ));
   assert.match(browser.document.app.textContent, /工资档案/);
+  assert.equal(browser.document.getElementById('start-payroll-payment'), null);
+  assert.equal(app.requests.some((request) => request.method === 'POST'), false);
+});
+
+test('a payroll deep link rejects a dossier with mismatched store or id', async (context) => {
+  for (const [name, field, value] of [
+    ['store', 'store_id', 'STORE-2'],
+    ['id', 'payroll_id', 'PAYROLL-2']
+  ]) {
+    await context.test(name, async () => {
+      const mismatched = payrollDossier();
+      mismatched.payroll[field] = value;
+      const app = payrollFixture({
+        initialDossier: mismatched,
+        pathname: '/manage/tasks/payroll/PAYROLL-1',
+        search: '?store=STORE-1'
+      });
+      const browser = await app.browser();
+
+      assert.match(browser.document.app.textContent, /工资记录不存在或无权查看/);
+      assert.doesNotMatch(browser.document.app.textContent, /工资档案/);
+    });
+  }
 });
 
 test('payroll payment enables submit only for an exact evidenced integer-micros split', async () => {

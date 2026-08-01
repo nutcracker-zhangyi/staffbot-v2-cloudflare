@@ -417,7 +417,11 @@ async function openPayrollItem(item) {
   try {
     const detail = await api(payrollPath(item.store_id, item.payroll_id));
     if (generation !== state.requestGeneration || !state.session) return;
-    if (!detail.payroll || detail.payroll.store_id + ':' + detail.payroll.payroll_id !== key) return;
+    if (!detail.payroll || detail.payroll.store_id + ':' + detail.payroll.payroll_id !== key) {
+      state.message = '工资记录不存在或无权查看';
+      renderCurrent();
+      return;
+    }
     adoptPayrollDossier(detail);
     state.message = '';
     renderPayrollDetail();
@@ -1256,15 +1260,37 @@ async function loadTasks({ render = true, generation = state.requestGeneration }
   return state.tasks;
 }
 
-async function openTask(type, id) {
-  if (!approvalTypes.has(type) && type !== 'payroll') return;
-  const task = state.tasks.find((item) => item.task_type === type && item.task_id === id);
-  if (!task) {
-    state.message = '任务不存在或无权查看';
-    renderCurrent();
+function storeIsAuthorized(storeId) {
+  return state.stores.some((store) => String(store.store_id) === storeId);
+}
+
+function rejectTaskDeepLink(type) {
+  state.message = type === 'payroll'
+    ? '工资记录不存在或无权查看'
+    : '任务不存在或无权查看';
+  renderCurrent();
+}
+
+async function openTask(type, id, directStoreId = null) {
+  const isPayroll = type === 'payroll';
+  if (!approvalTypes.has(type) && !isPayroll) {
+    if (directStoreId !== null) rejectTaskDeepLink(type);
     return;
   }
-  if (type === 'payroll') {
+  const direct = directStoreId !== null;
+  const storeId = String(directStoreId || '');
+  if (direct && (!storeId.trim() || !storeIsAuthorized(storeId))) {
+    rejectTaskDeepLink(type);
+    return;
+  }
+  const task = direct
+    ? { task_type: type, task_id: id, store_id: storeId }
+    : state.tasks.find((item) => item.task_type === type && item.task_id === id);
+  if (!task) {
+    rejectTaskDeepLink(type);
+    return;
+  }
+  if (isPayroll) {
     state.activeNav = 'payroll';
     return openPayrollItem({
       store_id: task.store_id,
@@ -1284,8 +1310,17 @@ async function openTask(type, id) {
     if (generation !== state.requestGeneration || !state.session) return;
     if (
       !detail.task
-      || detail.task.task_type + ':' + detail.task.task_id !== key
-    ) return;
+      || String(detail.task.task_type) !== type
+      || String(detail.task.task_id) !== id
+      || (direct && (
+        String(detail.task.store_id) !== String(task.store_id)
+        || !detail.store
+        || String(detail.store.store_id) !== String(task.store_id)
+      ))
+    ) {
+      rejectTaskDeepLink(type);
+      return;
+    }
     state.currentTask = detail;
     state.decisionMode = '';
     state.message = '';
@@ -1527,18 +1562,28 @@ async function openReturnPath() {
   const path = String(location.pathname || '');
   if (!path.startsWith('/manage/')) return;
   const match = path.match(
-    /^\/manage\/(?:tasks|approvals)\/([^/]+)\/([^/]+)$/
+    /^\/manage\/(tasks|approvals)\/([^/]+)\/([^/]+)$/
   );
   if (!match) return;
   let type;
   let id;
   try {
-    type = decodeURIComponent(match[1]);
-    id = decodeURIComponent(match[2]);
+    type = decodeURIComponent(match[2]);
+    id = decodeURIComponent(match[3]);
   } catch {
     return;
   }
-  await openTask(type, id);
+  if (match[1] === 'approvals') {
+    await openTask(type, id);
+    return;
+  }
+  const storeValues = new URLSearchParams(String(location.search || ''))
+    .getAll('store');
+  if (storeValues.length !== 1 || !storeValues[0].trim()) {
+    rejectTaskDeepLink(type);
+    return;
+  }
+  await openTask(type, id, storeValues[0]);
 }
 
 async function refreshPayrollAfterReconnect() {

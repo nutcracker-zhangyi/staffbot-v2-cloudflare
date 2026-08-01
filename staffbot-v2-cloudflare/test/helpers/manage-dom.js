@@ -127,6 +127,7 @@ async function settle() {
 export async function executeManageClient(source, {
   fetch,
   pathname = '/manage',
+  search = '',
   online = true,
   now: initialNow = Date.now(),
   confirm = () => true
@@ -156,7 +157,7 @@ export async function executeManageClient(source, {
       }
     }
   };
-  const location = { pathname };
+  const location = { pathname, search };
   const objectUrls = new Set();
   let objectUrlId = 0;
   class BrowserURL extends URL {
