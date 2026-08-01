@@ -1,5 +1,5 @@
 import { isGlobalAdmin } from './security.js';
-import { isStoreOwner } from './stores.js';
+import { isStoreAdmin, isStoreOwner } from './stores.js';
 
 const CLAIM_LEASE_MS = 15 * 60 * 1000;
 
@@ -20,6 +20,9 @@ async function getTaskClaim(env, task) {
 
 export async function claimTask(env, actorId, task, now) {
   const actor = String(actorId);
+  if (!await isStoreAdmin(env, actor, task.store_id)) {
+    throw new Error('forbidden');
+  }
   const { claimedAt, leaseExpiresAt } = claimTimes(now);
   await env.DB.prepare(`
     INSERT INTO admin_task_claims (
@@ -112,18 +115,21 @@ export async function forceTakeoverTask(env, actorId, task, reason, now) {
     env.DB.prepare(`
       INSERT INTO admin_audit_logs (
         store_id, admin_id, action, target_id, details_json, created_at
-      ) VALUES (
+      ) SELECT
         ?, ?, 'force_takeover_task', ?,
         json_object(
           'task_type', ?,
           'prior_actor', (
             SELECT claimed_by FROM admin_task_claims
-            WHERE task_type = ? AND task_id = ?
+            WHERE task_type = ? AND task_id = ? AND store_id = ?
           ),
           'new_actor', ?,
           'reason', ?,
           'time', ?
         ), ?
+      WHERE NOT EXISTS (
+        SELECT 1 FROM admin_task_claims
+        WHERE task_type = ? AND task_id = ? AND store_id <> ?
       )
     `).bind(
       task.store_id,
@@ -132,10 +138,14 @@ export async function forceTakeoverTask(env, actorId, task, reason, now) {
       task.task_type,
       task.task_type,
       task.task_id,
+      task.store_id,
       actor,
       String(reason),
       claimedAt,
-      claimedAt
+      claimedAt,
+      task.task_type,
+      task.task_id,
+      task.store_id
     ),
     env.DB.prepare(`
       INSERT INTO admin_task_claims (
@@ -148,6 +158,7 @@ export async function forceTakeoverTask(env, actorId, task, reason, now) {
         claimed_at = excluded.claimed_at,
         lease_expires_at = excluded.lease_expires_at,
         updated_at = excluded.updated_at
+      WHERE admin_task_claims.store_id = excluded.store_id
     `).bind(
       task.task_type,
       task.task_id,
