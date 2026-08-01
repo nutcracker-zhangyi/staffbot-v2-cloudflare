@@ -124,14 +124,25 @@ async function settle() {
 export async function executeManageClient(source, {
   fetch,
   pathname = '/manage',
-  online = true
+  online = true,
+  now: initialNow = Date.now()
 }) {
   const document = new BrowserDocument();
   const serviceWorkerRegistrations = [];
   const listeners = new Map();
   const timers = new Map();
   let timerId = 0;
-  let now = 0;
+  let elapsed = 0;
+  const clockStart = new Date(initialNow).getTime();
+  class BrowserDate extends Date {
+    constructor(...values) {
+      super(...(values.length ? values : [clockStart + elapsed]));
+    }
+
+    static now() {
+      return clockStart + elapsed;
+    }
+  }
   const navigator = {
     onLine: online,
     serviceWorker: {
@@ -153,10 +164,18 @@ export async function executeManageClient(source, {
     },
     setInterval(callback, delay) {
       timerId += 1;
-      timers.set(timerId, { callback, delay, next: now + delay });
+      timers.set(timerId, { callback, delay, next: elapsed + delay, repeat: true });
       return timerId;
     },
     clearInterval(id) {
+      timers.delete(id);
+    },
+    setTimeout(callback, delay = 0) {
+      timerId += 1;
+      timers.set(timerId, { callback, delay, next: elapsed + delay, repeat: false });
+      return timerId;
+    },
+    clearTimeout(id) {
       timers.delete(id);
     }
   };
@@ -167,9 +186,12 @@ export async function executeManageClient(source, {
     location,
     navigator,
     window,
+    Date: BrowserDate,
     URLSearchParams,
     setInterval: window.setInterval,
-    clearInterval: window.clearInterval
+    clearInterval: window.clearInterval,
+    setTimeout: window.setTimeout,
+    clearTimeout: window.clearTimeout
   });
 
   vm.runInContext(source, browser, { filename: '/manage/app.js' });
@@ -197,19 +219,20 @@ export async function executeManageClient(source, {
       await settle();
     },
     async advanceTimers(milliseconds) {
-      const target = now + milliseconds;
+      const target = elapsed + milliseconds;
       while (true) {
         const due = Array.from(timers.entries())
           .filter(([, timer]) => timer.next <= target)
           .sort((left, right) => left[1].next - right[1].next)[0];
         if (!due) break;
         const [id, timer] = due;
-        now = timer.next;
+        elapsed = timer.next;
+        if (!timer.repeat) timers.delete(id);
         await timer.callback();
-        if (timers.has(id)) timer.next += timer.delay;
+        if (timer.repeat && timers.has(id)) timer.next += timer.delay;
         await settle();
       }
-      now = target;
+      elapsed = target;
     },
     async call(name, ...args) {
       if (typeof browser[name] !== 'function') throw new Error(`function_not_found:${name}`);

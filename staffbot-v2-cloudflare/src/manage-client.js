@@ -12,7 +12,9 @@ const state = {
   claimTimer: 0,
   online: navigator.onLine,
   decisionMode: '',
-  message: ''
+  message: '',
+  requestGeneration: 0,
+  mutationBusy: false
 };
 
 const approvalTypes = new Set(['income', 'leave', 'absence', 'advance']);
@@ -103,6 +105,23 @@ function loginView() {
   };
 }
 
+function resetAuthenticatedState() {
+  stopClaimTimer();
+  state.requestGeneration += 1;
+  state.session = null;
+  state.csrfToken = '';
+  state.stores = [];
+  state.storeId = '';
+  state.taskType = '';
+  state.tasks = [];
+  state.activeNav = 'tasks';
+  state.currentTask = null;
+  state.online = navigator.onLine;
+  state.decisionMode = '';
+  state.message = '';
+  state.mutationBusy = false;
+}
+
 function shell(content) {
   app.innerHTML = '<header class="app-header">'
     + '<div><p class="eyebrow">StaffBot</p><h1>移动管理端</h1></div>'
@@ -123,6 +142,7 @@ function shell(content) {
 
   for (const [name, id] of [['tasks', 'nav-tasks'], ['approvals', 'nav-approvals'], ['payroll', 'nav-payroll'], ['more', 'nav-more']]) {
     document.getElementById(id).onclick = () => {
+      state.requestGeneration += 1;
       state.activeNav = name;
       state.currentTask = null;
       state.decisionMode = '';
@@ -152,10 +172,12 @@ function renderCurrent() {
     + '<p id="session-admin">已登录：' + escapeHtml(state.session.telegram_id) + '</p>'
     + '<button id="logout" class="secondary" type="button">退出登录</button></div>');
   document.getElementById('logout').onclick = async () => {
-    await api('/api/admin/logout', { method: 'POST' });
-    state.session = null;
-    state.csrfToken = '';
-    loginView();
+    try {
+      await api('/api/admin/logout', { method: 'POST' });
+    } finally {
+      resetAuthenticatedState();
+      loginView();
+    }
   };
 }
 
@@ -206,7 +228,7 @@ function renderTaskList() {
 }
 
 function taskCard(task, index) {
-  const amount = task.amount_micros
+  const amount = task.amount_micros !== null && task.amount_micros !== undefined
     ? formatMoney(task.amount_micros, task.currency)
     : escapeHtml(task.business_date || '无金额');
   const handler = claimIsActive(task.claim)
@@ -254,6 +276,15 @@ function ownsActiveClaim(task) {
   );
 }
 
+function ownsClaim(task) {
+  const claim = task && task.claim;
+  return Boolean(
+    claim
+    && claimIsActive(claim)
+    && claim.claimed_by === state.session.telegram_id
+  );
+}
+
 function claimIsActive(claim) {
   return Boolean(
     claim
@@ -268,7 +299,7 @@ function renderTaskDetail() {
   const claim = task.claim;
   const owned = ownsActiveClaim(task);
   const pending = task.status === 'pending';
-  const canDecide = owned && pending;
+  const canDecide = owned && pending && !state.mutationBusy;
   const handler = claimIsActive(claim)
     ? '当前处理人：' + escapeHtml(claim.claimed_by)
     : '当前未领取';
@@ -286,10 +317,12 @@ function renderTaskDetail() {
       + '<button id="decision-cancel" class="secondary" type="button">取消</button></div>';
   }
   const claimAction = !pending ? '' : owned
-    ? '<button id="release" class="secondary" type="button"' + disabled(!state.online) + '>释放</button>'
-    : '<button id="claim" type="button"' + disabled(!state.online || claimIsActive(claim)) + '>领取</button>';
+    ? '<button id="release" class="secondary" type="button"'
+      + disabled(!state.online || state.mutationBusy) + '>释放</button>'
+    : '<button id="claim" type="button"'
+      + disabled(!state.online || state.mutationBusy || claimIsActive(claim)) + '>领取</button>';
   const requestFacts = Object.entries(detail.request || {}).map(([key, value]) => (
-    '<div><dt>' + escapeHtml(factLabel(key)) + '</dt><dd>' + escapeHtml(value == null ? '—' : value) + '</dd></div>'
+    '<div><dt>' + escapeHtml(factLabel(key)) + '</dt><dd>' + escapeHtml(factValue(key, value)) + '</dd></div>'
   )).join('');
 
   shell('<button id="back-to-tasks" class="text-button" type="button">← 返回待办</button>'
@@ -298,19 +331,24 @@ function renderTaskDetail() {
     + '</span><span class="urgency">' + urgencyLabel(task.urgency) + '</span></div>'
     + '<h2>' + escapeHtml(task.employee_name) + '</h2>'
     + '<p>' + escapeHtml(task.store_name)
-    + (task.amount_micros ? ' · ' + formatMoney(task.amount_micros, task.currency) : '')
+    + (task.amount_micros !== null && task.amount_micros !== undefined
+      ? ' · ' + formatMoney(task.amount_micros, task.currency) : '')
     + '</p><p>业务日期：' + escapeHtml(task.business_date || '—') + '</p>'
     + '<p>提交：' + escapeHtml(formatDateTime(task.submitted_at)) + '</p>'
     + '<p id="claim-status" class="claim-status">' + handler + '</p>'
     + '<p id="decision-status" class="decision-status">' + escapeHtml(result) + '</p>'
     + '<div class="claim-actions">' + claimAction + '</div>'
     + '<section><h3>申请信息</h3><dl class="facts">' + requestFacts + '</dl></section>'
+    + employeeSection(detail.employee)
+    + attachmentSection(detail.attachments)
+    + historySection(detail.history)
     + '<div id="approval-actions" class="approval-actions" aria-disabled="' + (!canDecide) + '">'
     + '<button id="approve" type="button"' + disabled(!canDecide) + '>批准</button>'
     + '<button id="reject" class="danger" type="button"' + disabled(!canDecide) + '>拒绝</button></div>'
     + decision + '</article>');
 
   document.getElementById('back-to-tasks').onclick = () => {
+    state.requestGeneration += 1;
     state.currentTask = null;
     state.decisionMode = '';
     state.message = '';
@@ -361,13 +399,67 @@ function factLabel(key) {
   return labels[key] || key;
 }
 
-async function loadTasks() {
+function factValue(key, value) {
+  if (value == null || value === '') return '—';
+  if (key === 'status') return statusLabels[value] || value;
+  return value;
+}
+
+function employeeSection(employee = {}) {
+  return '<section><h3>员工信息</h3><dl class="facts">'
+    + '<div><dt>姓名</dt><dd>' + escapeHtml(employee.display_name || '—') + '</dd></div>'
+    + '<div><dt>Telegram ID</dt><dd>' + escapeHtml(employee.telegram_id || '—') + '</dd></div>'
+    + '<div><dt>语言</dt><dd>' + escapeHtml(employee.language || '—') + '</dd></div>'
+    + '</dl></section>';
+}
+
+function attachmentSection(attachments) {
+  const count = Array.isArray(attachments) ? attachments.length : 0;
+  return '<section><h3>附件</h3><p class="empty-copy">'
+    + (count ? '共有 ' + count + ' 个附件' : '暂无附件')
+    + '</p></section>';
+}
+
+function historySection(history) {
+  const rows = Array.isArray(history) ? history : [];
+  if (!rows.length) {
+    return '<section><h3>处理时间线</h3><p class="empty-copy">暂无处理记录</p></section>';
+  }
+  return '<section><h3>处理时间线</h3><ol class="timeline">'
+    + rows.map((item) => '<li><strong>' + escapeHtml(item.action || '处理') + '</strong>'
+      + '<span>' + escapeHtml(item.admin_id || '—') + ' · '
+      + escapeHtml(formatDateTime(item.created_at)) + '</span>'
+      + (item.details && item.details.reason
+        ? '<span>原因：' + escapeHtml(item.details.reason) + '</span>' : '')
+      + '</li>').join('')
+    + '</ol></section>';
+}
+
+function currentTaskKey() {
+  const task = state.currentTask && state.currentTask.task;
+  return task ? task.task_type + ':' + task.task_id : '';
+}
+
+function requestIsCurrent(generation, key = '') {
+  return Boolean(
+    state.session
+    && generation === state.requestGeneration
+    && (!key || key === currentTaskKey())
+  );
+}
+
+function taskQueryPath() {
   const query = new URLSearchParams();
   if (state.storeId) query.set('store_id', state.storeId);
   if (state.taskType) query.set('type', state.taskType);
-  const result = await api('/api/manage/tasks?' + query.toString());
+  return '/api/manage/tasks?' + query.toString();
+}
+
+async function loadTasks({ render = true, generation = state.requestGeneration } = {}) {
+  const result = await api(taskQueryPath());
+  if (!requestIsCurrent(generation)) return state.tasks;
   state.tasks = result.tasks || [];
-  renderCurrent();
+  if (render) renderCurrent();
   return state.tasks;
 }
 
@@ -379,14 +471,25 @@ async function openTask(type, id) {
     renderCurrent();
     return;
   }
+  const generation = state.requestGeneration + 1;
+  state.requestGeneration = generation;
+  state.mutationBusy = false;
+  const key = type + ':' + id;
   try {
-    state.currentTask = await api('/api/manage/stores/'
+    const detail = await api('/api/manage/stores/'
       + encodeURIComponent(task.store_id) + '/approvals/'
       + encodeURIComponent(type) + '/' + encodeURIComponent(id));
+    if (generation !== state.requestGeneration || !state.session) return;
+    if (
+      !detail.task
+      || detail.task.task_type + ':' + detail.task.task_id !== key
+    ) return;
+    state.currentTask = detail;
     state.decisionMode = '';
     state.message = '';
     renderTaskDetail();
   } catch (error) {
+    if (generation !== state.requestGeneration || !state.session) return;
     state.message = error.status === 403 || error.status === 404
       ? '任务不存在或无权查看'
       : '暂时无法加载任务';
@@ -395,26 +498,35 @@ async function openTask(type, id) {
 }
 
 async function mutateClaim(action) {
-  if (!state.currentTask || !state.online) return;
+  if (!state.currentTask || !state.online || state.mutationBusy) return;
   const task = state.currentTask.task;
+  const generation = state.requestGeneration;
+  const key = currentTaskKey();
+  state.mutationBusy = true;
+  renderTaskDetail();
   try {
     const result = await api('/api/manage/tasks/'
       + encodeURIComponent(task.task_type) + '/'
       + encodeURIComponent(task.task_id) + '/' + action, { method: 'POST' });
+    if (!requestIsCurrent(generation, key)) return null;
     task.claim = result.claim;
     state.message = action === 'release'
       ? '任务已释放'
       : action === 'renew' ? '领取状态已续期' : '任务已领取';
-    renderTaskDetail();
     return result.claim;
   } catch (error) {
+    if (!requestIsCurrent(generation, key)) return null;
     if (error.status === 409) {
-      await refreshCurrentTask('任务状态已更新');
+      await refreshCurrentTask('任务状态已更新', generation, key);
       return null;
     }
     state.message = '操作失败，请稍后重试';
-    renderTaskDetail();
     return null;
+  } finally {
+    if (requestIsCurrent(generation, key)) {
+      state.mutationBusy = false;
+      renderTaskDetail();
+    }
   }
 }
 
@@ -431,7 +543,11 @@ function releaseCurrentTask() {
 }
 
 async function submitApproval(decision) {
-  if (!state.currentTask || !ownsActiveClaim(state.currentTask.task)) return;
+  if (
+    !state.currentTask
+    || !ownsActiveClaim(state.currentTask.task)
+    || state.mutationBusy
+  ) return;
   let reason = '';
   if (decision === 'reject') {
     reason = document.getElementById('reject-reason').value.trim();
@@ -441,6 +557,10 @@ async function submitApproval(decision) {
     }
   }
   const task = state.currentTask.task;
+  const generation = state.requestGeneration;
+  const key = currentTaskKey();
+  state.mutationBusy = true;
+  renderTaskDetail();
   try {
     const result = await api('/api/manage/stores/'
       + encodeURIComponent(task.store_id) + '/approvals/'
@@ -449,31 +569,55 @@ async function submitApproval(decision) {
       method: 'POST',
       body: decision === 'reject' ? JSON.stringify({ reason }) : undefined
     });
-    task.status = decision === 'approve' ? 'approved' : 'rejected';
-    task.claim = null;
+    if (!requestIsCurrent(generation, key)) return;
     state.decisionMode = '';
-    state.message = result.notification && result.notification.status === 'failed'
+    const committedMessage = result.notification && result.notification.status === 'failed'
       ? '审批已保存，Telegram 通知发送失败，可稍后重试'
       : '审批已完成';
-    renderTaskDetail();
+    state.message = committedMessage;
+    try {
+      await refreshCurrentTask(committedMessage, generation, key);
+    } catch {
+      if (!requestIsCurrent(generation, key)) return;
+      state.currentTask = null;
+      state.tasks = [];
+      state.decisionMode = '';
+      state.message = '审批已保存，但最新状态加载失败，请刷新待办';
+      state.mutationBusy = false;
+      renderCurrent();
+    }
   } catch (error) {
+    if (!requestIsCurrent(generation, key)) return;
     if (error.status === 409) {
-      await refreshCurrentTask('任务已由其他管理员处理');
+      await refreshCurrentTask('任务已由其他管理员处理', generation, key);
       return;
     }
     state.message = error.message === 'rejection_reason_required'
       ? '请填写拒绝原因'
       : '审批失败，请稍后重试';
-    renderTaskDetail();
+  } finally {
+    if (requestIsCurrent(generation, key)) {
+      state.mutationBusy = false;
+      renderTaskDetail();
+    }
   }
 }
 
-async function refreshCurrentTask(message) {
+async function refreshCurrentTask(
+  message,
+  generation = state.requestGeneration,
+  key = currentTaskKey()
+) {
   const task = state.currentTask.task;
-  const detail = await api('/api/manage/stores/'
-    + encodeURIComponent(task.store_id) + '/approvals/'
-    + encodeURIComponent(task.task_type) + '/' + encodeURIComponent(task.task_id));
+  const [detail, tasks] = await Promise.all([
+    api('/api/manage/stores/'
+      + encodeURIComponent(task.store_id) + '/approvals/'
+      + encodeURIComponent(task.task_type) + '/' + encodeURIComponent(task.task_id)),
+    api(taskQueryPath())
+  ]);
+  if (!requestIsCurrent(generation, key)) return;
   state.currentTask = detail;
+  state.tasks = tasks.tasks || [];
   state.decisionMode = '';
   state.message = message;
   renderTaskDetail();
@@ -481,16 +625,35 @@ async function refreshCurrentTask(message) {
 
 function startClaimTimer() {
   stopClaimTimer();
-  if (!state.currentTask || !ownsActiveClaim(state.currentTask.task)) return;
-  state.claimTimer = setInterval(() => {
-    if (state.currentTask && ownsActiveClaim(state.currentTask.task)) {
+  if (!state.currentTask) return;
+  const task = state.currentTask.task;
+  const claim = task.claim;
+  if (!claimIsActive(claim)) return;
+  const remaining = new Date(claim.lease_expires_at).getTime() - Date.now();
+  const generation = state.requestGeneration;
+  const key = currentTaskKey();
+
+  if (ownsClaim(task) && state.online && !state.mutationBusy) {
+    if (remaining <= 5 * 60 * 1000) {
       renewCurrentClaim();
+      return;
     }
-  }, 5 * 60 * 1000);
+    const renewIn = Math.min(5 * 60 * 1000, Math.max(0, remaining - 30 * 1000));
+    state.claimTimer = setTimeout(() => {
+      state.claimTimer = 0;
+      if (requestIsCurrent(generation, key)) renewCurrentClaim();
+    }, renewIn);
+    return;
+  }
+
+  state.claimTimer = setTimeout(() => {
+    state.claimTimer = 0;
+    if (requestIsCurrent(generation, key)) renderTaskDetail();
+  }, Math.max(0, remaining) + 1);
 }
 
 function stopClaimTimer() {
-  if (state.claimTimer) clearInterval(state.claimTimer);
+  if (state.claimTimer) clearTimeout(state.claimTimer);
   state.claimTimer = 0;
 }
 
@@ -511,9 +674,11 @@ async function openReturnPath() {
 }
 
 async function boot() {
+  resetAuthenticatedState();
   try {
     await api('/api/admin/me');
   } catch {
+    resetAuthenticatedState();
     loginView();
     return;
   }
@@ -525,17 +690,18 @@ async function boot() {
     await loadTasks();
     await openReturnPath();
   } catch {
+    resetAuthenticatedState();
     loginView();
   }
 }
 
 window.addEventListener('online', () => {
   state.online = true;
-  renderCurrent();
+  if (state.session) renderCurrent();
 });
 window.addEventListener('offline', () => {
   state.online = false;
-  renderCurrent();
+  if (state.session) renderCurrent();
 });
 
 if ('serviceWorker' in navigator) {

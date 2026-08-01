@@ -51,6 +51,11 @@ h1, h2, p { margin-top: 0; }
 .facts div { display: grid; grid-template-columns: minmax(90px, 1fr) 2fr; gap: 12px; border-bottom: 1px solid #f3f4f6; padding-bottom: 10px; }
 .facts dt { color: #6b7280; }
 .facts dd { margin: 0; overflow-wrap: anywhere; text-align: right; }
+.empty-copy { margin-bottom: 0; color: #6b7280; }
+.timeline { display: grid; gap: 12px; margin: 0; padding-left: 22px; }
+.timeline li { padding-left: 4px; }
+.timeline strong, .timeline span { display: block; overflow-wrap: anywhere; }
+.timeline span { margin-top: 3px; color: #6b7280; font-size: 13px; }
 .approval-actions { margin-top: 24px; }
 .approval-actions button { flex: 1; }
 .confirm-panel { display: grid; gap: 10px; margin-top: 16px; border-top: 1px solid #e5e7eb; padding-top: 16px; }
