@@ -159,6 +159,50 @@ function manageRequest(env, path, { method = 'GET', body, csrf = true } = {}) {
   }), env, { waitUntil() {} });
 }
 
+function oversizedStreamingUploadRequest(contentLength) {
+  let sent = 0;
+  let cancelled = 0;
+  let parsed = 0;
+  const chunk = new Uint8Array(1024 * 1024);
+  const body = new ReadableStream({
+    pull(controller) {
+      if (sent === 100) {
+        controller.close();
+        return;
+      }
+      sent += 1;
+      controller.enqueue(chunk);
+    },
+    cancel() {
+      cancelled += 1;
+    }
+  });
+  const headers = {
+    cookie: 'staffbot_admin_session=SESSION-1',
+    'x-csrf-token': 'CSRF-1',
+    'content-type': 'multipart/form-data; boundary=test',
+    ...(contentLength === undefined
+      ? {}
+      : { 'content-length': String(contentLength) })
+  };
+  const request = new Request(
+    'https://staffbot.test/api/manage/stores/STORE-1/payroll/PAYROLL-1/attempts/ATTEMPT-1/proofs',
+    { method: 'POST', headers, body, duplex: 'half' }
+  );
+  Object.defineProperty(request, 'formData', {
+    value: async () => {
+      parsed += 1;
+      throw new Error('original FormData parser must not run');
+    }
+  });
+  return {
+    request,
+    sent: () => sent,
+    cancelled: () => cancelled,
+    parsed: () => parsed
+  };
+}
+
 test('browser upload validates real image bytes and stores R2 before guarded metadata', async () => {
   let fixture;
   const order = [];
@@ -700,6 +744,58 @@ test('manage upload rejects an oversized multipart body before parsing FormData'
     assert.equal(response.status, 413);
     assert.equal((await response.json()).error, 'proof_too_large');
     assert.equal(parsed, 0);
+  } finally {
+    fixture.database.close();
+  }
+});
+
+test('manage upload bounds and cancels an oversized body without Content-Length', async () => {
+  const fixture = setup();
+  const upload = oversizedStreamingUploadRequest();
+  let response;
+  let thrown;
+  try {
+    try {
+      response = await worker.fetch(
+        upload.request,
+        fixture.env,
+        { waitUntil() {} }
+      );
+    } catch (error) {
+      thrown = error;
+    }
+    assert.equal(thrown, undefined);
+    assert.equal(response.status, 413);
+    assert.equal((await response.json()).error, 'proof_too_large');
+    assert.equal(upload.parsed(), 0);
+    assert.equal(upload.cancelled(), 1);
+    assert.ok(upload.sent() <= 12);
+  } finally {
+    fixture.database.close();
+  }
+});
+
+test('manage upload ignores a forged small Content-Length and bounds the actual body', async () => {
+  const fixture = setup();
+  const upload = oversizedStreamingUploadRequest(1024);
+  let response;
+  let thrown;
+  try {
+    try {
+      response = await worker.fetch(
+        upload.request,
+        fixture.env,
+        { waitUntil() {} }
+      );
+    } catch (error) {
+      thrown = error;
+    }
+    assert.equal(thrown, undefined);
+    assert.equal(response.status, 413);
+    assert.equal((await response.json()).error, 'proof_too_large');
+    assert.equal(upload.parsed(), 0);
+    assert.equal(upload.cancelled(), 1);
+    assert.ok(upload.sent() <= 12);
   } finally {
     fixture.database.close();
   }

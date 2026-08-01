@@ -49,6 +49,73 @@ import {
 
 const MAX_PROOF_MULTIPART_BYTES = 10 * 1024 * 1024 + 64 * 1024;
 
+async function boundedProofMultipartRequest(request) {
+  const contentLength = request.headers.get('content-length');
+  if (contentLength !== null) {
+    if (!/^\d+$/.test(contentLength)) {
+      throw new TypeError('invalid payroll proof body');
+    }
+    if (Number(contentLength) > MAX_PROOF_MULTIPART_BYTES) {
+      throw new RangeError('payroll proof body is too large');
+    }
+  }
+  if (!request.body || typeof request.body.getReader !== 'function') {
+    throw new TypeError('invalid payroll proof body');
+  }
+
+  const reader = request.body.getReader();
+  const chunks = [];
+  let total = 0;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (!(value instanceof Uint8Array)) {
+        throw new TypeError('invalid payroll proof body');
+      }
+      if (total + value.byteLength > MAX_PROOF_MULTIPART_BYTES) {
+        try {
+          await reader.cancel('payroll proof body is too large');
+        } catch {
+          // The size result remains authoritative even if cancellation fails.
+        }
+        throw new RangeError('payroll proof body is too large');
+      }
+      chunks.push(value);
+      total += value.byteLength;
+    }
+  } catch (error) {
+    if (error instanceof RangeError) throw error;
+    try {
+      await reader.cancel('invalid payroll proof body');
+    } catch {
+      // Preserve the stable client error when an errored stream cannot cancel.
+    }
+    throw new TypeError('invalid payroll proof body');
+  } finally {
+    try {
+      reader.releaseLock();
+    } catch {
+      // A cancelled or errored body can already have released its reader.
+    }
+  }
+  if (total === 0) throw new TypeError('invalid payroll proof body');
+
+  const body = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    body.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  const headers = new Headers(request.headers);
+  headers.delete('content-length');
+  return new Request(request.url, {
+    method: request.method,
+    headers,
+    body
+  });
+}
+
 export async function handleManageApi(request, env, url, ctx) {
   try {
     const session = await requireAdminSession(request, env);
@@ -276,12 +343,15 @@ async function handleManagePayroll(request, env, session, parts) {
       return json({ ok: false, error: 'not_found' }, 404);
     }
     try {
-      const contentLength = request.headers.get('content-length');
-      if (/^\d+$/.test(contentLength || '')
-        && Number(contentLength) > MAX_PROOF_MULTIPART_BYTES) {
-        return json({ ok: false, error: 'proof_too_large' }, 413);
+      const multipartRequest = await boundedProofMultipartRequest(request);
+      let form;
+      try {
+        form = await multipartRequest.formData();
+      } catch (error) {
+        const invalid = new TypeError('invalid payroll proof body');
+        invalid.cause = error;
+        throw invalid;
       }
-      const form = await request.formData();
       const proof = await storeBrowserDraftProof(
         env,
         session.telegram_id,
