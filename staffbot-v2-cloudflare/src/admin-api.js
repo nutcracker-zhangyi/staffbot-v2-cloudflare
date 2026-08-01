@@ -211,7 +211,8 @@ export async function handleAdminApi(request, env, url, ctx) {
         env,
         {
           telegram_id: session.telegram_id,
-          store_id: storeId
+          store_id: storeId,
+          access: 'admin'
         },
         parts[6]
       );

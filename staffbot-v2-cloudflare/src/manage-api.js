@@ -47,6 +47,8 @@ import {
   telegramErrorSummary
 } from './telegram-client.js';
 
+const MAX_PROOF_MULTIPART_BYTES = 10 * 1024 * 1024 + 64 * 1024;
+
 export async function handleManageApi(request, env, url, ctx) {
   try {
     const session = await requireAdminSession(request, env);
@@ -183,7 +185,11 @@ async function handleManagePayroll(request, env, session, parts) {
   ) {
     return readPayrollProof(
       env,
-      { telegram_id: session.telegram_id, store_id: storeId },
+      {
+        telegram_id: session.telegram_id,
+        store_id: storeId,
+        access: 'admin'
+      },
       parts[6]
     );
   }
@@ -270,14 +276,18 @@ async function handleManagePayroll(request, env, session, parts) {
       return json({ ok: false, error: 'not_found' }, 404);
     }
     try {
+      const contentLength = request.headers.get('content-length');
+      if (/^\d+$/.test(contentLength || '')
+        && Number(contentLength) > MAX_PROOF_MULTIPART_BYTES) {
+        return json({ ok: false, error: 'proof_too_large' }, 413);
+      }
       const form = await request.formData();
       const proof = await storeBrowserDraftProof(
         env,
         session.telegram_id,
         attemptId,
         form.get('method'),
-        form.get('proof'),
-        new Date()
+        form.get('proof')
       );
       return json({ ok: true, proof: manageProof(proof) });
     } catch (error) {

@@ -41,20 +41,46 @@ export function proofObjectKey(
 }
 
 function isJpeg(bytes) {
-  return bytes.length >= 3
-    && bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff;
+  return bytes.length >= 4
+    && bytes[0] === 0xff
+    && bytes[1] === 0xd8
+    && bytes[bytes.length - 2] === 0xff
+    && bytes[bytes.length - 1] === 0xd9;
 }
 
 function isPng(bytes) {
   const signature = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a];
-  return bytes.length >= signature.length
-    && signature.every((value, index) => bytes[index] === value);
+  if (bytes.length < 33
+    || !signature.every((value, index) => bytes[index] === value)) {
+    return false;
+  }
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  return view.getUint32(8) === 13
+    && String.fromCharCode(...bytes.slice(12, 16)) === 'IHDR'
+    && view.getUint32(16) > 0
+    && view.getUint32(20) > 0;
 }
 
 function isWebp(bytes) {
-  return bytes.length >= 12
-    && String.fromCharCode(...bytes.slice(0, 4)) === 'RIFF'
-    && String.fromCharCode(...bytes.slice(8, 12)) === 'WEBP';
+  if (bytes.length < 20
+    || String.fromCharCode(...bytes.slice(0, 4)) !== 'RIFF'
+    || String.fromCharCode(...bytes.slice(8, 12)) !== 'WEBP') {
+    return false;
+  }
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  if (view.getUint32(4, true) !== bytes.length - 8) return false;
+  const chunkType = String.fromCharCode(...bytes.slice(12, 16));
+  const minimumSize = { 'VP8 ': 10, VP8L: 5, VP8X: 10 }[chunkType];
+  if (!minimumSize) return false;
+  const chunkSize = view.getUint32(16, true);
+  return chunkSize >= minimumSize
+    && 20 + chunkSize + (chunkSize % 2) <= bytes.length;
+}
+
+function proofClock(now) {
+  if (typeof now === 'function') return () => new Date(now());
+  if (now !== undefined) return () => new Date(now);
+  return () => new Date();
 }
 
 async function browserImage(file) {
@@ -304,7 +330,7 @@ export async function storeBrowserDraftProof(
   attemptId,
   method,
   file,
-  now = new Date()
+  now
 ) {
   if (!env.PAYROLL_PROOFS) {
     throw new Error('payroll proof storage is not configured');
@@ -313,7 +339,8 @@ export async function storeBrowserDraftProof(
   if (!['bank', 'usdt', 'cash'].includes(paymentMethod)) {
     throw new TypeError('unsupported proof method');
   }
-  const checkedAt = new Date(now);
+  const clock = proofClock(now);
+  const checkedAt = clock();
   const context = await browserAttemptContext(
     env,
     adminId,
@@ -340,7 +367,7 @@ export async function storeBrowserDraftProof(
   });
   if (!stored) throw new Error('payroll proof object already exists');
 
-  const uploadedAt = checkedAt.toISOString();
+  const uploadedAt = clock().toISOString();
   try {
     const results = await env.DB.batch([
       env.DB.prepare(`
@@ -400,6 +427,38 @@ export async function storeBrowserDraftProof(
         MAX_PROOFS_PER_METHOD
       ),
       env.DB.prepare(`
+        UPDATE payroll_payment_attempts
+        SET updated_at = ?
+        WHERE attempt_id = ? AND payroll_id = ? AND status = 'draft'
+          AND EXISTS (
+            SELECT 1
+            FROM payroll_payment_proofs p
+            JOIN payroll_disbursements d
+              ON d.payroll_id = payroll_payment_attempts.payroll_id
+             AND d.current_payment_attempt_id = payroll_payment_attempts.attempt_id
+            JOIN admin_task_claims c
+              ON c.task_type = 'payroll'
+             AND c.task_id = d.payroll_id
+             AND c.store_id = d.store_id
+            WHERE p.proof_id = ?
+              AND p.attempt_id = payroll_payment_attempts.attempt_id
+              AND d.store_id = ?
+              AND d.status IN ('awaiting_admin_payment', 'disputed')
+              AND d.current_admin_id = ?
+              AND c.claimed_by = ?
+              AND c.lease_expires_at > ?
+          )
+      `).bind(
+        uploadedAt,
+        context.attempt_id,
+        context.payroll_id,
+        proofId,
+        context.store_id,
+        String(adminId),
+        String(adminId),
+        uploadedAt
+      ),
+      env.DB.prepare(`
         INSERT INTO admin_audit_logs (
           store_id, admin_id, action, target_id, details_json, created_at
         )
@@ -412,8 +471,17 @@ export async function storeBrowserDraftProof(
           ), ?
         FROM payroll_payment_proofs
         WHERE proof_id = ?
+        UNION ALL
+        SELECT NULL, ?, 'upload_payroll_draft_proof', ?, '{}', ?
+        WHERE NOT EXISTS (
+          SELECT 1 FROM payroll_payment_proofs WHERE proof_id = ?
+        )
       `).bind(
         context.store_id,
+        String(adminId),
+        context.payroll_id,
+        uploadedAt,
+        proofId,
         String(adminId),
         context.payroll_id,
         uploadedAt,
@@ -421,7 +489,8 @@ export async function storeBrowserDraftProof(
       )
     ]);
     if (Number(results[0] && results[0].meta.changes) !== 1
-      || Number(results[1] && results[1].meta.changes) !== 1) {
+      || Number(results[1] && results[1].meta.changes) !== 1
+      || Number(results[2] && results[2].meta.changes) !== 1) {
       throw new Error('payroll proof upload conflict');
     }
   } catch (error) {
@@ -436,7 +505,9 @@ export async function storeBrowserDraftProof(
         attempt_id: context.attempt_id
       }, cleanupError);
     }
-    throw error;
+    const conflict = new Error('payroll proof upload conflict');
+    conflict.cause = error;
+    throw conflict;
   }
   return env.DB.prepare(`
     SELECT * FROM payroll_payment_proofs WHERE proof_id = ?
@@ -574,6 +645,7 @@ export async function deleteBrowserDraftProof(
 
 export async function cleanupAbandonedDraftProofs(env, now = new Date()) {
   const checkedAt = new Date(now);
+  const checkedAtIso = checkedAt.toISOString();
   const cutoff = new Date(checkedAt.getTime() - 7 * 24 * 60 * 60 * 1000)
     .toISOString();
   const rows = await env.DB.prepare(`
@@ -581,10 +653,22 @@ export async function cleanupAbandonedDraftProofs(env, now = new Date()) {
     FROM payroll_payment_proofs p
     JOIN payroll_payment_attempts a ON a.attempt_id = p.attempt_id
     JOIN payroll_disbursements d ON d.payroll_id = a.payroll_id
-    WHERE a.status IN ('draft', 'abandoned')
-      AND a.updated_at <= ?
+    WHERE p.uploaded_at <= ?
+      AND (
+        (a.status = 'abandoned' AND a.updated_at <= ?)
+        OR (
+          a.status = 'draft' AND a.updated_at <= ?
+          AND NOT EXISTS (
+            SELECT 1 FROM admin_task_claims c
+            WHERE c.task_type = 'payroll'
+              AND c.task_id = d.payroll_id
+              AND c.store_id = d.store_id
+              AND c.lease_expires_at > ?
+          )
+        )
+      )
     ORDER BY p.uploaded_at, p.proof_id
-  `).bind(cutoff).all();
+  `).bind(cutoff, cutoff, cutoff, checkedAtIso).all();
   let deleted = 0;
   let failed = 0;
   for (const proof of rows.results || []) {
@@ -604,13 +688,34 @@ export async function cleanupAbandonedDraftProofs(env, now = new Date()) {
         env.DB.prepare(`
           DELETE FROM payroll_payment_proofs
           WHERE proof_id = ? AND attempt_id = ?
+            AND uploaded_at <= ?
             AND EXISTS (
-              SELECT 1 FROM payroll_payment_attempts a
+              SELECT 1
+              FROM payroll_payment_attempts a
+              JOIN payroll_disbursements d ON d.payroll_id = a.payroll_id
               WHERE a.attempt_id = payroll_payment_proofs.attempt_id
-                AND a.status IN ('draft', 'abandoned')
-                AND a.updated_at <= ?
+                AND (
+                  (a.status = 'abandoned' AND a.updated_at <= ?)
+                  OR (
+                    a.status = 'draft' AND a.updated_at <= ?
+                    AND NOT EXISTS (
+                      SELECT 1 FROM admin_task_claims c
+                      WHERE c.task_type = 'payroll'
+                        AND c.task_id = d.payroll_id
+                        AND c.store_id = d.store_id
+                        AND c.lease_expires_at > ?
+                    )
+                  )
+                )
             )
-        `).bind(proof.proof_id, proof.attempt_id, cutoff),
+        `).bind(
+          proof.proof_id,
+          proof.attempt_id,
+          cutoff,
+          cutoff,
+          cutoff,
+          checkedAtIso
+        ),
         env.DB.prepare(`
           INSERT INTO admin_audit_logs (
             store_id, admin_id, action, target_id, details_json, created_at
@@ -628,7 +733,7 @@ export async function cleanupAbandonedDraftProofs(env, now = new Date()) {
           proof.proof_id,
           proof.method,
           proof.object_key,
-          checkedAt.toISOString()
+          checkedAtIso
         )
       ]);
       if (Number(results[0] && results[0].meta.changes) !== 1
@@ -896,9 +1001,15 @@ export async function readPayrollProof(env, actor, proofId) {
   `).bind(proofId).first();
   if (!proof) return new Response('not_found', { status: 404 });
   const telegramId = String(actor && actor.telegram_id || '');
-  const employeeAccess = telegramId === String(proof.telegram_id);
-  const adminAccess = (!actor || !actor.store_id
-    || String(actor.store_id) === String(proof.store_id))
+  const actorMode = actor && actor.access
+    ? String(actor.access)
+    : (actor && actor.store_id ? 'admin' : 'employee');
+  const employeeAccess = actorMode === 'employee'
+    && !(actor && actor.store_id)
+    && telegramId === String(proof.telegram_id);
+  const adminAccess = actorMode === 'admin'
+    && actor
+    && String(actor.store_id || '') === String(proof.store_id)
     && await isStoreAdmin(env, telegramId, proof.store_id);
   const allowed = employeeAccess || adminAccess;
   if (!allowed) return new Response('forbidden', { status: 403 });

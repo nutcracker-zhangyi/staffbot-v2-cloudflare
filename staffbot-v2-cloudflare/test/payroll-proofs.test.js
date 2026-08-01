@@ -920,17 +920,17 @@ test('serves a private proof only to its employee or store admin', async () => {
 
     const employeeResponse = await readPayrollProof(
       fixture.env,
-      { telegram_id: 'EMP-1' },
+      { telegram_id: 'EMP-1', access: 'employee' },
       'PROOF-READ'
     );
     const adminResponse = await readPayrollProof(
       fixture.env,
-      { telegram_id: 'ADMIN-1' },
+      { telegram_id: 'ADMIN-1', store_id: 'STORE-1', access: 'admin' },
       'PROOF-READ'
     );
     const denied = await readPayrollProof(
       fixture.env,
-      { telegram_id: 'OTHER' },
+      { telegram_id: 'OTHER', access: 'employee' },
       'PROOF-READ'
     );
 

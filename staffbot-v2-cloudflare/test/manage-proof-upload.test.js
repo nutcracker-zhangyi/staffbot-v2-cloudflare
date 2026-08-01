@@ -6,6 +6,7 @@ import { DatabaseSync } from 'node:sqlite';
 import worker, {
   cleanupAbandonedDraftProofs,
   deleteBrowserDraftProof,
+  readPayrollProof,
   storeBrowserDraftProof
 } from '../src/index.js';
 import { createD1 } from './helpers/d1.js';
@@ -122,6 +123,30 @@ function imageFile(type = 'image/jpeg', bytes = [0xff, 0xd8, 0xff, 0xd9], name =
   return new File([new Uint8Array(bytes)], name, { type });
 }
 
+function pngBytes(width = 1, height = 1) {
+  return [
+    0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a,
+    0x00, 0x00, 0x00, 0x0d,
+    0x49, 0x48, 0x44, 0x52,
+    0x00, 0x00, 0x00, width,
+    0x00, 0x00, 0x00, height,
+    0x08, 0x06, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00
+  ];
+}
+
+function webpBytes() {
+  return [
+    0x52, 0x49, 0x46, 0x46,
+    0x12, 0x00, 0x00, 0x00,
+    0x57, 0x45, 0x42, 0x50,
+    0x56, 0x50, 0x38, 0x4c,
+    0x05, 0x00, 0x00, 0x00,
+    0x2f, 0x00, 0x00, 0x00, 0x00,
+    0x00
+  ];
+}
+
 function manageRequest(env, path, { method = 'GET', body, csrf = true } = {}) {
   const headers = {
     cookie: 'staffbot_admin_session=SESSION-1',
@@ -170,6 +195,10 @@ test('browser upload validates real image bytes and stores R2 before guarded met
     assert.equal(proof.telegram_file_id, null);
     assert.equal(proof.telegram_delivered_at, null);
     assert.equal(proof.file_name, 'receipt.jpg');
+    assert.equal(fixture.database.prepare(`
+      SELECT updated_at FROM payroll_payment_attempts
+      WHERE attempt_id = 'ATTEMPT-1'
+    `).get().updated_at, NOW.toISOString());
   } finally {
     fixture.database.close();
   }
@@ -177,8 +206,8 @@ test('browser upload validates real image bytes and stores R2 before guarded met
 
 test('browser upload accepts PNG and WebP magic and rejects MIME spoofing or oversized files', async () => {
   const valid = [
-    ['image/png', [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a], 'proof.png'],
-    ['image/webp', [...Buffer.from('RIFF'), 0, 0, 0, 0, ...Buffer.from('WEBP')], 'proof.webp']
+    ['image/png', pngBytes(), 'proof.png'],
+    ['image/webp', webpBytes(), 'proof.webp']
   ];
   for (const [type, bytes, name] of valid) {
     const fixture = setup();
@@ -202,6 +231,25 @@ test('browser upload accepts PNG and WebP magic and rejects MIME spoofing or ove
       ),
       /must match its image type/
     );
+    for (const [type, bytes, name] of [
+      ['image/jpeg', [0xff, 0xd8, 0xff, 0x00], 'missing-eoi.jpg'],
+      ['image/png', [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a], 'short.png'],
+      ['image/png', pngBytes(0, 1), 'zero-width.png'],
+      ['image/webp', [...Buffer.from('RIFF'), 0, 0, 0, 0, ...Buffer.from('WEBP')], 'short.webp'],
+      ['image/webp', [
+        0x52, 0x49, 0x46, 0x46, 0x0c, 0, 0, 0,
+        0x57, 0x45, 0x42, 0x50,
+        0x4a, 0x55, 0x4e, 0x4b, 0, 0, 0, 0
+      ], 'fake.webp']
+    ]) {
+      await assert.rejects(
+        storeBrowserDraftProof(
+          fixture.env, 'ADMIN-1', 'ATTEMPT-1', 'bank',
+          imageFile(type, bytes, name), NOW
+        ),
+        /must match its image type/
+      );
+    }
     await assert.rejects(
       storeBrowserDraftProof(
         fixture.env, 'ADMIN-1', 'ATTEMPT-1', 'bank',
@@ -268,6 +316,84 @@ test('browser upload rechecks active claim at metadata insert and removes only i
     );
     assert.deepEqual([...fixture.objects.keys()], ['pre-existing']);
     assert.equal(fixture.operations.filter(([action]) => action === 'delete').length, 1);
+  } finally {
+    fixture.database.close();
+  }
+});
+
+test('browser upload uses a fresh post-R2 clock value for the final lease guard', async () => {
+  const fixture = setup();
+  fixture.database.exec(`
+    UPDATE admin_task_claims
+    SET lease_expires_at = '2026-07-16T05:00:01.000Z'
+    WHERE task_type = 'payroll' AND task_id = 'PAYROLL-1';
+  `);
+  const times = [
+    new Date('2026-07-16T05:00:00.000Z'),
+    new Date('2026-07-16T05:00:02.000Z')
+  ];
+  try {
+    await assert.rejects(
+      storeBrowserDraftProof(
+        fixture.env,
+        'ADMIN-1',
+        'ATTEMPT-1',
+        'bank',
+        imageFile(),
+        () => times.shift()
+      ),
+      /upload conflict/
+    );
+    assert.equal(
+      fixture.operations.filter(([action]) => action === 'put').length,
+      1
+    );
+    assert.equal(
+      fixture.operations.filter(([action]) => action === 'delete').length,
+      1
+    );
+    assert.equal(fixture.objects.size, 0);
+    assert.equal(fixture.database.prepare(`
+      SELECT COUNT(*) AS total FROM payroll_payment_proofs
+    `).get().total, 0);
+  } finally {
+    fixture.database.close();
+  }
+});
+
+test('a zero-row upload audit rolls back the attempt activity before R2 cleanup', async () => {
+  let removed = false;
+  const fixture = setup({
+    dbHooks: {
+      beforeBatchStatement(sql) {
+        if (!removed && sql.includes("'upload_payroll_draft_proof'")) {
+          removed = true;
+          fixture.database.prepare(`
+            DELETE FROM payroll_payment_proofs
+          `).run();
+        }
+      }
+    }
+  });
+  try {
+    await assert.rejects(
+      storeBrowserDraftProof(
+        fixture.env,
+        'ADMIN-1',
+        'ATTEMPT-1',
+        'bank',
+        imageFile(),
+        NOW
+      )
+    );
+    assert.equal(fixture.objects.size, 0);
+    assert.equal(fixture.database.prepare(`
+      SELECT COUNT(*) AS total FROM payroll_payment_proofs
+    `).get().total, 0);
+    assert.equal(fixture.database.prepare(`
+      SELECT updated_at FROM payroll_payment_attempts
+      WHERE attempt_id = 'ATTEMPT-1'
+    `).get().updated_at, '2026-07-16T03:10:00.000Z');
   } finally {
     fixture.database.close();
   }
@@ -454,6 +580,51 @@ test('manage upload/delete routes require CSRF and private proof route wins over
   }
 });
 
+test('a manage store URL cannot reuse employee identity to read another store proof', async () => {
+  const fixture = setup();
+  try {
+    fixture.database.exec(`
+      INSERT INTO store_members (
+        store_id, telegram_id, display_name, role, status,
+        cycle_start, joined_at, updated_at
+      ) VALUES (
+        'STORE-2', 'ADMIN-1', 'Osaka Manager', 'admin', 'active',
+        '2026-07-01T00:00:00.000Z', '2026-07-01T00:00:00.000Z',
+        '2026-07-01T00:00:00.000Z'
+      );
+      UPDATE payroll_disbursements
+      SET telegram_id = 'ADMIN-1'
+      WHERE payroll_id = 'PAYROLL-1';
+      INSERT INTO payroll_payment_proofs (
+        proof_id, payroll_id, attempt_id, method, object_key,
+        mime_type, size_bytes, sort_order, uploaded_by, uploaded_at
+      ) VALUES (
+        'PROOF-A', 'PAYROLL-1', 'ATTEMPT-1', 'bank', 'proof-a',
+        'image/jpeg', 4, 1, 'ADMIN-1', '2026-07-16T04:00:00.000Z'
+      );
+    `);
+    fixture.objects.set('proof-a', {
+      body: new Uint8Array([0xff, 0xd8, 0xff, 0xd9]),
+      options: { httpMetadata: { contentType: 'image/jpeg' } }
+    });
+
+    const crossStore = await manageRequest(
+      fixture.env,
+      '/api/manage/stores/STORE-2/payroll/proofs/PROOF-A'
+    );
+    assert.equal(crossStore.status, 403);
+
+    const employee = await readPayrollProof(
+      fixture.env,
+      { telegram_id: 'ADMIN-1', access: 'employee' },
+      'PROOF-A'
+    );
+    assert.equal(employee.status, 200);
+  } finally {
+    fixture.database.close();
+  }
+});
+
 test('manage upload maps unavailable private storage without exposing an internal error', async () => {
   const fixture = setup();
   try {
@@ -498,6 +669,136 @@ test('manage upload maps a zero-value payment method to a stable conflict', asyn
   }
 });
 
+test('manage upload rejects an oversized multipart body before parsing FormData', async () => {
+  const fixture = setup();
+  let parsed = 0;
+  try {
+    const request = new Request(
+      'https://staffbot.test/api/manage/stores/STORE-1/payroll/PAYROLL-1/attempts/ATTEMPT-1/proofs',
+      {
+        method: 'POST',
+        headers: {
+          cookie: 'staffbot_admin_session=SESSION-1',
+          'x-csrf-token': 'CSRF-1',
+          'content-type': 'multipart/form-data; boundary=test',
+          'content-length': String(10 * 1024 * 1024 + 64 * 1024 + 1)
+        },
+        body: '--test--\r\n'
+      }
+    );
+    Object.defineProperty(request, 'formData', {
+      value: async () => {
+        parsed += 1;
+        throw new Error('FormData should not be parsed');
+      }
+    });
+    const response = await worker.fetch(
+      request,
+      fixture.env,
+      { waitUntil() {} }
+    );
+    assert.equal(response.status, 413);
+    assert.equal((await response.json()).error, 'proof_too_large');
+    assert.equal(parsed, 0);
+  } finally {
+    fixture.database.close();
+  }
+});
+
+test('cleanup keeps an old draft with an active claim and a newly uploaded abandoned proof', async () => {
+  const fixture = setup();
+  try {
+    fixture.database.exec(`
+      UPDATE payroll_payment_attempts
+      SET updated_at = '2026-07-01T00:00:00.000Z'
+      WHERE attempt_id = 'ATTEMPT-1';
+      INSERT INTO payroll_payment_proofs (
+        proof_id, payroll_id, attempt_id, method, object_key,
+        mime_type, size_bytes, sort_order, uploaded_by, uploaded_at
+      ) VALUES (
+        'PROOF-ACTIVE', 'PAYROLL-1', 'ATTEMPT-1', 'bank', 'proof-active',
+        'image/jpeg', 4, 1, 'ADMIN-1', '2026-07-01T00:00:00.000Z'
+      );
+    `);
+    fixture.objects.set('proof-active', {
+      body: new Uint8Array([1]),
+      options: { httpMetadata: { contentType: 'image/jpeg' } }
+    });
+    assert.deepEqual(
+      await cleanupAbandonedDraftProofs(fixture.env, NOW),
+      { deleted: 0, failed: 0 }
+    );
+    assert.equal(fixture.objects.has('proof-active'), true);
+
+    fixture.database.exec(`
+      UPDATE payroll_payment_attempts
+      SET status = 'abandoned', updated_at = '2026-07-01T00:00:00.000Z'
+      WHERE attempt_id = 'ATTEMPT-1';
+      UPDATE payroll_payment_proofs
+      SET uploaded_at = '2026-07-16T04:59:00.000Z'
+      WHERE proof_id = 'PROOF-ACTIVE';
+    `);
+    assert.deepEqual(
+      await cleanupAbandonedDraftProofs(fixture.env, NOW),
+      { deleted: 0, failed: 0 }
+    );
+    assert.equal(fixture.objects.has('proof-active'), true);
+    assert.equal(fixture.database.prepare(`
+      SELECT COUNT(*) AS total FROM payroll_payment_proofs
+      WHERE proof_id = 'PROOF-ACTIVE'
+    `).get().total, 1);
+  } finally {
+    fixture.database.close();
+  }
+});
+
+test('cleanup final guard keeps an abandoned proof when its draft is restored', async () => {
+  let restored = false;
+  const fixture = setup({
+    dbHooks: {
+      beforeBatchStatement(sql) {
+        if (!restored && sql.includes('DELETE FROM payroll_payment_proofs')) {
+          restored = true;
+          fixture.database.exec(`
+            UPDATE payroll_payment_attempts
+            SET status = 'draft', updated_at = '2026-07-16T05:00:00.000Z'
+            WHERE attempt_id = 'ATTEMPT-1';
+          `);
+        }
+      }
+    }
+  });
+  try {
+    fixture.database.exec(`
+      UPDATE payroll_payment_attempts
+      SET status = 'abandoned', updated_at = '2026-07-01T00:00:00.000Z'
+      WHERE attempt_id = 'ATTEMPT-1';
+      INSERT INTO payroll_payment_proofs (
+        proof_id, payroll_id, attempt_id, method, object_key,
+        mime_type, size_bytes, sort_order, uploaded_by, uploaded_at
+      ) VALUES (
+        'PROOF-RESTORED', 'PAYROLL-1', 'ATTEMPT-1', 'bank', 'proof-restored',
+        'image/jpeg', 4, 1, 'ADMIN-1', '2026-07-01T00:00:00.000Z'
+      );
+    `);
+    fixture.objects.set('proof-restored', {
+      body: new Uint8Array([1]),
+      options: { httpMetadata: { contentType: 'image/jpeg' } }
+    });
+    assert.deepEqual(
+      await cleanupAbandonedDraftProofs(fixture.env, NOW),
+      { deleted: 0, failed: 0 }
+    );
+    assert.equal(fixture.objects.has('proof-restored'), true);
+    assert.equal(fixture.database.prepare(`
+      SELECT COUNT(*) AS total FROM payroll_payment_proofs
+      WHERE proof_id = 'PROOF-RESTORED'
+    `).get().total, 1);
+  } finally {
+    fixture.database.close();
+  }
+});
+
 test('abandoned proof cleanup rechecks age and draft status per object and reports failures', async () => {
   let raced = false;
   const fixture = setup({
@@ -524,6 +825,8 @@ test('abandoned proof cleanup rechecks age and draft status per object and repor
       UPDATE payroll_payment_attempts
       SET status = 'abandoned', updated_at = '2026-07-01T00:00:00.000Z'
       WHERE attempt_id = 'ATTEMPT-1';
+      DELETE FROM admin_task_claims
+      WHERE task_type = 'payroll' AND task_id = 'PAYROLL-1';
       INSERT INTO payroll_payment_attempts (
         attempt_id, payroll_id, version, status, created_at, updated_at
       ) VALUES
