@@ -162,13 +162,39 @@ async function handleManageApproval(request, env, session, parts) {
     if (detail.request.status === 'pending') {
       return json({ ok: false, error: 'decision_required' }, 409);
     }
+    const notification = await approvalResultNotification(
+      env,
+      storeId,
+      type,
+      requestId
+    );
+    if (!notification) return json({ ok: false, error: 'not_found' }, 404);
+    if (notification.error) {
+      return json({ ok: false, error: notification.error }, 409);
+    }
+    const retryClaimed = await claimApprovalNotificationRetry(
+      env,
+      session.telegram_id,
+      storeId,
+      type,
+      requestId
+    );
+    if (!retryClaimed) {
+      return existingApprovalNotificationResult(
+        env,
+        storeId,
+        type,
+        requestId
+      );
+    }
     return deliverApprovalNotification(
       env,
       session.telegram_id,
       storeId,
       type,
       requestId,
-      true
+      true,
+      notification
     );
   }
   if (parts.length !== 8 || !['approve', 'reject'].includes(parts[7])) {
@@ -188,12 +214,17 @@ async function handleManageApproval(request, env, session, parts) {
     return json({ ok: false, error: 'already_decided' }, 409);
   }
 
-  await requireActiveTaskClaim(
+  const checkedAt = new Date();
+  const activeClaim = await requireActiveTaskClaim(
     env,
     session.telegram_id,
     detail.task,
-    new Date()
+    checkedAt
   );
+  const claim = {
+    ...activeClaim,
+    checked_at: checkedAt.toISOString()
+  };
   const result = await decideApproval(
     env,
     storeId,
@@ -201,7 +232,8 @@ async function handleManageApproval(request, env, session, parts) {
     requestId,
     session.telegram_id,
     action,
-    reason
+    reason,
+    claim
   );
   if (!result.ok) {
     return json({
@@ -210,7 +242,6 @@ async function handleManageApproval(request, env, session, parts) {
     }, 409);
   }
 
-  await releaseTaskClaim(env, session.telegram_id, detail.task, new Date());
   return deliverApprovalNotification(
     env,
     session.telegram_id,
@@ -221,26 +252,26 @@ async function handleManageApproval(request, env, session, parts) {
   );
 }
 
-function decideApproval(env, storeId, type, requestId, adminId, action, reason) {
+function decideApproval(env, storeId, type, requestId, adminId, action, reason, claim) {
   if (type === 'income') {
     return action === 'approve'
-      ? approveIncomeRequest(env, storeId, requestId, adminId)
-      : rejectIncomeRequest(env, storeId, requestId, adminId, reason);
+      ? approveIncomeRequest(env, storeId, requestId, adminId, claim)
+      : rejectIncomeRequest(env, storeId, requestId, adminId, reason, claim);
   }
   if (type === 'leave') {
     return action === 'approve'
-      ? approveLeaveRequest(env, storeId, requestId, adminId)
-      : rejectLeaveRequest(env, storeId, requestId, adminId, reason);
+      ? approveLeaveRequest(env, storeId, requestId, adminId, claim)
+      : rejectLeaveRequest(env, storeId, requestId, adminId, reason, claim);
   }
   if (type === 'absence') {
     return action === 'approve'
-      ? approveAbsenceFineRequest(env, requestId, adminId, storeId)
-      : rejectAbsenceFineRequest(env, requestId, adminId, reason, storeId);
+      ? approveAbsenceFineRequest(env, requestId, adminId, storeId, claim)
+      : rejectAbsenceFineRequest(env, requestId, adminId, reason, storeId, claim);
   }
   if (type === 'advance') {
     return action === 'approve'
-      ? approveSalaryAdvanceRequest(env, storeId, requestId, adminId)
-      : rejectSalaryAdvanceRequest(env, storeId, requestId, adminId, reason);
+      ? approveSalaryAdvanceRequest(env, storeId, requestId, adminId, claim)
+      : rejectSalaryAdvanceRequest(env, storeId, requestId, adminId, reason, claim);
   }
   return Promise.resolve({ ok: false, error: 'not_found' });
 }
@@ -251,9 +282,10 @@ async function deliverApprovalNotification(
   storeId,
   type,
   requestId,
-  retried
+  retried,
+  preparedNotification = null
 ) {
-  const notification = await approvalResultNotification(
+  const notification = preparedNotification || await approvalResultNotification(
     env,
     storeId,
     type,
@@ -297,6 +329,7 @@ async function deliverApprovalNotification(
       'approval_notification_failed',
       requestId,
       {
+        task_type: type,
         recipient: notification.recipient,
         decision: notification.decision,
         telegram
@@ -316,6 +349,20 @@ async function deliverApprovalNotification(
       'approval_notification_retried',
       requestId,
       {
+        task_type: type,
+        recipient: notification.recipient,
+        decision: notification.decision
+      }
+    );
+  } else {
+    await audit(
+      env,
+      storeId,
+      adminId,
+      'approval_notification_sent',
+      requestId,
+      {
+        task_type: type,
         recipient: notification.recipient,
         decision: notification.decision
       }
@@ -325,4 +372,96 @@ async function deliverApprovalNotification(
     ok: true,
     notification: { status: 'sent', retryable: false }
   });
+}
+
+const NOTIFICATION_RETRY_LEASE_MS = 15 * 60 * 1000;
+const NOTIFICATION_STATE_ACTIONS = [
+  'approval_notification_failed',
+  'approval_notification_retry_claimed',
+  'approval_notification_retried',
+  'approval_notification_sent'
+];
+
+async function approvalNotificationState(env, storeId, type, requestId) {
+  const placeholders = NOTIFICATION_STATE_ACTIONS.map(() => '?').join(', ');
+  return env.DB.prepare(`
+    SELECT action, details_json, created_at
+    FROM admin_audit_logs
+    WHERE store_id = ? AND target_id = ?
+      AND action IN (${placeholders})
+      AND json_extract(details_json, '$.task_type') = ?
+    ORDER BY id DESC
+    LIMIT 1
+  `).bind(
+    storeId,
+    requestId,
+    ...NOTIFICATION_STATE_ACTIONS,
+    type
+  ).first();
+}
+
+async function claimApprovalNotificationRetry(
+  env,
+  adminId,
+  storeId,
+  type,
+  requestId
+) {
+  const claimedAt = new Date().toISOString();
+  const staleBefore = new Date(
+    new Date(claimedAt).getTime() - NOTIFICATION_RETRY_LEASE_MS
+  ).toISOString();
+  const details = JSON.stringify({ task_type: type });
+  const result = await env.DB.prepare(`
+    INSERT INTO admin_audit_logs (
+      store_id, admin_id, action, target_id, details_json, created_at
+    )
+    SELECT ?, ?, 'approval_notification_retry_claimed', ?, ?, ?
+    WHERE COALESCE((
+      SELECT CASE
+        WHEN action = 'approval_notification_failed' THEN 1
+        WHEN action = 'approval_notification_retry_claimed' AND created_at <= ? THEN 1
+        ELSE 0
+      END
+      FROM admin_audit_logs
+      WHERE store_id = ? AND target_id = ?
+        AND action IN (
+          'approval_notification_failed',
+          'approval_notification_retry_claimed',
+          'approval_notification_retried',
+          'approval_notification_sent'
+        )
+        AND json_extract(details_json, '$.task_type') = ?
+      ORDER BY id DESC
+      LIMIT 1
+    ), 0) = 1
+  `).bind(
+    storeId,
+    adminId,
+    requestId,
+    details,
+    claimedAt,
+    staleBefore,
+    storeId,
+    requestId,
+    type
+  ).run();
+  return Number(result && result.meta ? result.meta.changes : 0) === 1;
+}
+
+async function existingApprovalNotificationResult(env, storeId, type, requestId) {
+  const state = await approvalNotificationState(env, storeId, type, requestId);
+  if (state && state.action === 'approval_notification_retried') {
+    return json({
+      ok: true,
+      notification: { status: 'sent', retryable: false }
+    });
+  }
+  if (state && state.action === 'approval_notification_retry_claimed') {
+    return json({
+      ok: true,
+      notification: { status: 'retrying', retryable: false }
+    });
+  }
+  return json({ ok: false, error: 'notification_retry_not_available' }, 409);
 }

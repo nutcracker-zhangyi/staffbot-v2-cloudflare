@@ -320,6 +320,7 @@ test('Telegram failure does not undo a committed decision and is safely audited'
     `).get();
     assert.equal(audit.action, 'approval_notification_failed');
     assert.deepEqual(JSON.parse(audit.details_json), {
+      task_type: 'income',
       recipient: 'EMP-INCOME',
       decision: 'rejected',
       telegram: {
@@ -406,6 +407,282 @@ test('notification retry refuses pending and cross-store records', async () => {
     assert.equal(crossStore.status, 404);
     assert.equal((await crossStore.json()).error, 'not_found');
   } finally {
+    fixture.database.close();
+  }
+});
+
+for (const type of ['income', 'leave', 'absence', 'advance']) {
+  test(`${type} decision cannot commit after its validated claim is taken over`, async () => {
+    const fixture = setup();
+    const originalFetch = globalThis.fetch;
+    let sends = 0;
+    globalThis.fetch = async (...args) => {
+      sends += 1;
+      return telegramFetch()(...args);
+    };
+    try {
+      await claim(fixture.env, type);
+      let takenOver = false;
+      fixture.env.DB = createD1(fixture.database, {
+        afterFirst(sql) {
+          if (
+            takenOver
+            || !sql.includes('SELECT * FROM admin_task_claims')
+            || !sql.includes('AND claimed_by = ?')
+          ) return;
+          takenOver = true;
+          fixture.database.prepare(`
+            UPDATE admin_task_claims
+            SET claimed_by = 'ADMIN-2',
+                claimed_at = '2026-08-01T01:00:00.000Z',
+                lease_expires_at = '2099-01-01T01:15:00.000Z',
+                updated_at = '2026-08-01T01:00:00.000Z'
+            WHERE task_type = ? AND task_id = ?
+          `).run(type, ids[type]);
+        }
+      });
+
+      const response = await managePost(
+        fixture.env,
+        `/api/manage/stores/STORE-1/approvals/${type}/${ids[type]}/approve`
+      );
+
+      assert.equal(response.status, 409);
+      assert.equal((await response.json()).error, 'task_claim_required');
+      assert.equal(
+        fixture.database.prepare(`
+          SELECT status FROM ${tables[type]} WHERE request_id = ?
+        `).get(ids[type]).status,
+        'pending'
+      );
+      assert.equal(
+        fixture.database.prepare(`
+          SELECT claimed_by FROM admin_task_claims
+          WHERE task_type = ? AND task_id = ?
+        `).get(type, ids[type]).claimed_by,
+        'ADMIN-2'
+      );
+      assert.equal(sends, 0);
+    } finally {
+      globalThis.fetch = originalFetch;
+      fixture.database.close();
+    }
+  });
+}
+
+test('income decision cannot commit after its validated claim expires', async () => {
+  const fixture = setup();
+  const originalFetch = globalThis.fetch;
+  let sends = 0;
+  globalThis.fetch = async (...args) => {
+    sends += 1;
+    return telegramFetch()(...args);
+  };
+  try {
+    await claim(fixture.env, 'income');
+    let expired = false;
+    fixture.env.DB = createD1(fixture.database, {
+      async afterFirst(sql) {
+        if (
+          expired
+          || !sql.includes('SELECT * FROM admin_task_claims')
+          || !sql.includes('AND claimed_by = ?')
+        ) return;
+        expired = true;
+        fixture.database.prepare(`
+          UPDATE admin_task_claims
+          SET lease_expires_at = ?
+          WHERE task_type = 'income' AND task_id = 'INC-1'
+        `).run(new Date(Date.now() + 5).toISOString());
+        await new Promise((resolve) => setTimeout(resolve, 15));
+      }
+    });
+
+    const response = await managePost(
+      fixture.env,
+      '/api/manage/stores/STORE-1/approvals/income/INC-1/approve'
+    );
+
+    assert.equal(response.status, 409);
+    assert.equal((await response.json()).error, 'task_claim_required');
+    assert.equal(
+      fixture.database.prepare(`
+        SELECT status FROM pending_income WHERE request_id = 'INC-1'
+      `).get().status,
+      'pending'
+    );
+    assert.equal(sends, 0);
+  } finally {
+    globalThis.fetch = originalFetch;
+    fixture.database.close();
+  }
+});
+
+test('notification retry is unavailable after an already successful delivery', async () => {
+  const fixture = setup();
+  const originalFetch = globalThis.fetch;
+  let sends = 0;
+  globalThis.fetch = async (...args) => {
+    sends += 1;
+    return telegramFetch()(...args);
+  };
+  try {
+    await claim(fixture.env, 'income');
+    const decided = await managePost(
+      fixture.env,
+      '/api/manage/stores/STORE-1/approvals/income/INC-1/approve'
+    );
+    assert.equal(decided.status, 200);
+    assert.equal((await decided.json()).notification.status, 'sent');
+
+    const retry = await managePost(
+      fixture.env,
+      '/api/manage/stores/STORE-1/approvals/income/INC-1/notify/retry'
+    );
+
+    assert.equal(retry.status, 409);
+    assert.equal((await retry.json()).error, 'notification_retry_not_available');
+    assert.equal(sends, 1);
+  } finally {
+    globalThis.fetch = originalFetch;
+    fixture.database.close();
+  }
+});
+
+test('concurrent notification retries atomically claim one employee delivery', async () => {
+  const fixture = setup();
+  const originalFetch = globalThis.fetch;
+  let releaseFirst;
+  let firstRetry;
+  let firstStarted;
+  const firstSendStarted = new Promise((resolve) => { firstStarted = resolve; });
+  globalThis.fetch = telegramFetch({
+    ok: false,
+    error_code: 500,
+    description: 'temporary failure'
+  });
+  try {
+    await claim(fixture.env, 'leave');
+    const decided = await managePost(
+      fixture.env,
+      '/api/manage/stores/STORE-1/approvals/leave/LEAVE-1/reject',
+      { reason: 'Coverage unavailable' }
+    );
+    assert.equal((await decided.json()).notification.status, 'failed');
+
+    let sends = 0;
+    globalThis.fetch = async () => {
+      sends += 1;
+      if (sends === 1) {
+        firstStarted();
+        await new Promise((resolve) => { releaseFirst = resolve; });
+      }
+      return new Response(JSON.stringify({ ok: true, result: { message_id: sends } }), {
+        headers: { 'content-type': 'application/json' }
+      });
+    };
+
+    firstRetry = managePost(
+      fixture.env,
+      '/api/manage/stores/STORE-1/approvals/leave/LEAVE-1/notify/retry'
+    );
+    await firstSendStarted;
+    const concurrentRetry = await managePost(
+      fixture.env,
+      '/api/manage/stores/STORE-1/approvals/leave/LEAVE-1/notify/retry'
+    );
+    assert.deepEqual(await concurrentRetry.json(), {
+      ok: true,
+      notification: { status: 'retrying', retryable: false }
+    });
+
+    releaseFirst();
+    const completed = await firstRetry;
+    assert.equal((await completed.json()).notification.status, 'sent');
+
+    const replay = await managePost(
+      fixture.env,
+      '/api/manage/stores/STORE-1/approvals/leave/LEAVE-1/notify/retry'
+    );
+    assert.deepEqual(await replay.json(), {
+      ok: true,
+      notification: { status: 'sent', retryable: false }
+    });
+    assert.equal(sends, 1);
+    assert.equal(
+      fixture.database.prepare(`
+        SELECT COUNT(*) AS total FROM admin_audit_logs
+        WHERE target_id = 'LEAVE-1'
+          AND action = 'approval_notification_retry_claimed'
+      `).get().total,
+      1
+    );
+  } finally {
+    if (releaseFirst) releaseFirst();
+    if (firstRetry) await firstRetry.catch(() => {});
+    globalThis.fetch = originalFetch;
+    fixture.database.close();
+  }
+});
+
+test('leave approval stays successful when its related absence was already cancelled', async () => {
+  const fixture = setup();
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = telegramFetch();
+  try {
+    fixture.database.prepare(`
+      INSERT INTO absence_fine_requests (
+        request_id, store_id, telegram_id, business_date,
+        original_fine, fine, status, created_at
+      ) VALUES (
+        'ABS-LEAVE-RACE', 'STORE-1', 'EMP-LEAVE', '2026-08-03',
+        10, 10, 'pending', '2026-07-29T01:04:00.000Z'
+      )
+    `).run();
+    await claim(fixture.env, 'leave');
+    let cancelled = false;
+    fixture.env.DB = createD1(fixture.database, {
+      beforeBatchStatement(sql) {
+        if (cancelled || !sql.includes('UPDATE leave_requests SET status =')) return;
+        cancelled = true;
+        fixture.database.prepare(`
+          UPDATE absence_fine_requests
+          SET status = 'cancelled', cancellation_reason = 'Approved elsewhere'
+          WHERE request_id = 'ABS-LEAVE-RACE'
+        `).run();
+      }
+    });
+
+    const response = await managePost(
+      fixture.env,
+      '/api/manage/stores/STORE-1/approvals/leave/LEAVE-1/approve'
+    );
+
+    assert.equal(response.status, 200);
+    assert.equal((await response.json()).notification.status, 'sent');
+    assert.equal(
+      fixture.database.prepare(`
+        SELECT status FROM leave_requests WHERE request_id = 'LEAVE-1'
+      `).get().status,
+      'approved'
+    );
+    assert.equal(
+      fixture.database.prepare(`
+        SELECT COUNT(*) AS total FROM admin_task_claims
+        WHERE task_type = 'leave' AND task_id = 'LEAVE-1'
+      `).get().total,
+      0
+    );
+    assert.equal(
+      fixture.database.prepare(`
+        SELECT COUNT(*) AS total FROM admin_audit_logs
+        WHERE action = 'cancel_absence_for_leave'
+          AND target_id = 'ABS-LEAVE-RACE'
+      `).get().total,
+      0
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
     fixture.database.close();
   }
 });

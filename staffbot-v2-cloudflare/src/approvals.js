@@ -165,7 +165,88 @@ export function mutationCount(result) {
   return Number(result && result.meta ? result.meta.changes : 0);
 }
 
-function pendingRequestIncomeRecordStatement(env, tableName, draft) {
+function claimGuard(claim) {
+  if (!claim) return { sql: '', params: [] };
+  return {
+    sql: `
+      AND EXISTS (
+        SELECT 1 FROM admin_task_claims c
+        WHERE c.task_type = ? AND c.task_id = ? AND c.store_id = ?
+          AND c.claimed_by = ? AND c.updated_at = ?
+          AND c.lease_expires_at > ?
+      )
+    `,
+    params: [
+      claim.task_type,
+      claim.task_id,
+      claim.store_id,
+      claim.claimed_by,
+      claim.updated_at,
+      claim.checked_at
+    ]
+  };
+}
+
+function claimAt(claim, checkedAt) {
+  return claim ? { ...claim, checked_at: checkedAt } : null;
+}
+
+function claimConsumeStatement(
+  env,
+  claim,
+  tableName,
+  status,
+  adminId,
+  decidedAt
+) {
+  if (!claim) return null;
+  return env.DB.prepare(`
+    DELETE FROM admin_task_claims
+    WHERE task_type = ? AND task_id = ? AND store_id = ?
+      AND claimed_by = ? AND updated_at = ? AND lease_expires_at > ?
+      AND EXISTS (
+        SELECT 1 FROM ${tableName} r
+        WHERE r.store_id = ? AND r.request_id = ? AND r.status = ?
+          AND r.admin_id = ? AND r.decided_at = ?
+      )
+  `).bind(
+    claim.task_type,
+    claim.task_id,
+    claim.store_id,
+    claim.claimed_by,
+    claim.updated_at,
+    claim.checked_at,
+    claim.store_id,
+    claim.task_id,
+    status,
+    adminId,
+    decidedAt
+  );
+}
+
+async function decisionFailure(env, claim) {
+  if (!claim) return { ok: false, error: 'already_decided' };
+  const current = await env.DB.prepare(`
+    SELECT 1 FROM admin_task_claims
+    WHERE task_type = ? AND task_id = ? AND store_id = ?
+      AND claimed_by = ? AND updated_at = ?
+      AND lease_expires_at > ?
+  `).bind(
+    claim.task_type,
+    claim.task_id,
+    claim.store_id,
+    claim.claimed_by,
+    claim.updated_at,
+    claim.checked_at
+  ).first();
+  return {
+    ok: false,
+    error: current ? 'already_decided' : 'task_claim_required'
+  };
+}
+
+function pendingRequestIncomeRecordStatement(env, tableName, draft, claim = null) {
+  const guard = claimGuard(claim);
   return env.DB.prepare(`
     INSERT INTO income_records (
       record_id, store_id, telegram_id, income, commission_rate,
@@ -175,6 +256,7 @@ function pendingRequestIncomeRecordStatement(env, tableName, draft) {
     SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
     FROM ${tableName}
     WHERE store_id = ? AND request_id = ? AND status = 'pending'
+      ${guard.sql}
   `).bind(
     draft.record_id,
     draft.store_id,
@@ -190,11 +272,13 @@ function pendingRequestIncomeRecordStatement(env, tableName, draft) {
     draft.approved_at,
     draft.admin_id,
     draft.store_id,
-    draft.request_id
+    draft.request_id,
+    ...guard.params
   );
 }
 
-function pendingRequestLedgerStatement(env, tableName, entry, storeId, requestId) {
+function pendingRequestLedgerStatement(env, tableName, entry, storeId, requestId, claim = null) {
+  const guard = claimGuard(claim);
   return env.DB.prepare(`
     INSERT INTO payroll_entries (
       entry_id, store_id, telegram_id, type, amount_micros, currency,
@@ -204,6 +288,7 @@ function pendingRequestLedgerStatement(env, tableName, entry, storeId, requestId
     SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
     FROM ${tableName}
     WHERE store_id = ? AND request_id = ? AND status = 'pending'
+      ${guard.sql}
   `).bind(
     entry.entry_id,
     entry.store_id,
@@ -219,7 +304,8 @@ function pendingRequestLedgerStatement(env, tableName, entry, storeId, requestId
     entry.reverses_entry_id,
     entry.metadata_json,
     storeId,
-    requestId
+    requestId,
+    ...guard.params
   );
 }
 
@@ -231,8 +317,10 @@ function pendingRequestAuditStatement(
   adminId,
   action,
   details,
-  createdAt
+  createdAt,
+  claim = null
 ) {
+  const guard = claimGuard(claim);
   return env.DB.prepare(`
     INSERT INTO admin_audit_logs (
       store_id, admin_id, action, target_id, details_json, created_at
@@ -240,6 +328,7 @@ function pendingRequestAuditStatement(
     SELECT ?, ?, ?, ?, ?, ?
     FROM ${tableName}
     WHERE store_id = ? AND request_id = ? AND status = 'pending'
+      ${guard.sql}
   `).bind(
     storeId,
     adminId,
@@ -248,15 +337,17 @@ function pendingRequestAuditStatement(
     JSON.stringify(details || {}),
     createdAt,
     storeId,
-    requestId
+    requestId,
+    ...guard.params
   );
 }
 
-function pendingAbsenceLedgerStatement(env, entry, requestId, expectedStoreId) {
+function pendingAbsenceLedgerStatement(env, entry, requestId, expectedStoreId, claim = null) {
   const storeSql = expectedStoreId ? ` AND store_id = ?` : '';
   const requestParams = expectedStoreId
     ? [requestId, expectedStoreId]
     : [requestId];
+  const guard = claimGuard(claim);
   return env.DB.prepare(`
     INSERT INTO payroll_entries (
       entry_id, store_id, telegram_id, type, amount_micros, currency,
@@ -266,6 +357,7 @@ function pendingAbsenceLedgerStatement(env, entry, requestId, expectedStoreId) {
     SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
     FROM absence_fine_requests
     WHERE request_id = ? AND status = 'pending'${storeSql}
+      ${guard.sql}
   `).bind(
     entry.entry_id,
     entry.store_id,
@@ -280,15 +372,17 @@ function pendingAbsenceLedgerStatement(env, entry, requestId, expectedStoreId) {
     entry.created_at,
     entry.reverses_entry_id,
     entry.metadata_json,
-    ...requestParams
+    ...requestParams,
+    ...guard.params
   );
 }
 
-function pendingAbsenceAuditStatement(env, found, adminId, decidedAt, expectedStoreId) {
+function pendingAbsenceAuditStatement(env, found, adminId, decidedAt, expectedStoreId, claim = null) {
   const storeSql = expectedStoreId ? ` AND store_id = ?` : '';
   const requestParams = expectedStoreId
     ? [found.request_id, expectedStoreId]
     : [found.request_id];
+  const guard = claimGuard(claim);
   return env.DB.prepare(`
     INSERT INTO admin_audit_logs (
       store_id, admin_id, action, target_id, details_json, created_at
@@ -296,17 +390,19 @@ function pendingAbsenceAuditStatement(env, found, adminId, decidedAt, expectedSt
     SELECT ?, ?, 'approve_absence_fine', ?, ?, ?
     FROM absence_fine_requests
     WHERE request_id = ? AND status = 'pending'${storeSql}
+      ${guard.sql}
   `).bind(
     found.store_id,
     adminId,
     found.request_id,
     JSON.stringify(found),
     decidedAt,
-    ...requestParams
+    ...requestParams,
+    ...guard.params
   );
 }
 
-export async function approveAbsenceFineRequest(env, requestId, adminId, expectedStoreId = '') {
+export async function approveAbsenceFineRequest(env, requestId, adminId, expectedStoreId = '', claim = null) {
   const storeSql = expectedStoreId ? ` AND store_id = ?` : '';
   const requestParams = expectedStoreId ? [requestId, expectedStoreId] : [requestId];
   const found = await env.DB.prepare(`
@@ -322,18 +418,21 @@ export async function approveAbsenceFineRequest(env, requestId, adminId, expecte
   }
 
   const decidedAt = nowIso();
+  claim = claimAt(claim, decidedAt);
   const recordId = makeId('REC');
   const draft = absenceFineRecordDraft(found, adminId, decidedAt, recordId);
+  const guard = claimGuard(claim);
   const statements = [
     env.DB.prepare(`
       INSERT INTO income_records
         (record_id, store_id, telegram_id, income, commission_rate, commission_income, original_fine, fine, type, source, request_id, approved_at, admin_id)
       SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
       FROM absence_fine_requests WHERE request_id = ? AND status = 'pending'${storeSql}
+        ${guard.sql}
     `).bind(
       draft.record_id, draft.store_id, draft.telegram_id, draft.income, draft.commission_rate,
       draft.commission_income, draft.original_fine, draft.fine, draft.type, draft.source, draft.request_id,
-      draft.approved_at, draft.admin_id, ...requestParams
+      draft.approved_at, draft.admin_id, ...requestParams, ...guard.params
     )
   ];
   if (payrollLedgerWritesEnabled(env)) {
@@ -349,7 +448,8 @@ export async function approveAbsenceFineRequest(env, requestId, adminId, expecte
           env,
           entry,
           requestId,
-          expectedStoreId
+          expectedStoreId,
+          claim
         )
       );
     }
@@ -360,7 +460,8 @@ export async function approveAbsenceFineRequest(env, requestId, adminId, expecte
       found,
       adminId,
       decidedAt,
-      expectedStoreId
+      expectedStoreId,
+      claim
     )
   );
   const updateIndex = statements.length;
@@ -369,16 +470,31 @@ export async function approveAbsenceFineRequest(env, requestId, adminId, expecte
       UPDATE absence_fine_requests
       SET status = 'approved', decided_at = ?, admin_id = ?, income_record_id = ?
       WHERE request_id = ? AND status = 'pending'${storeSql}
-    `).bind(decidedAt, adminId, recordId, ...requestParams)
+        ${guard.sql}
+    `).bind(decidedAt, adminId, recordId, ...requestParams, ...guard.params)
   );
+  const claimIndex = claim ? statements.length : -1;
+  if (claim) {
+    statements.push(claimConsumeStatement(
+      env,
+      claim,
+      'absence_fine_requests',
+      'approved',
+      adminId,
+      decidedAt
+    ));
+  }
   const results = await env.DB.batch(statements);
-  if (mutationCount(results[updateIndex]) !== 1) {
-    return { ok: false, error: 'already_decided' };
+  if (
+    mutationCount(results[updateIndex]) !== 1
+    || (claim && mutationCount(results[claimIndex]) !== 1)
+  ) {
+    return decisionFailure(env, claim);
   }
   return { ok: true, row: found, recordId };
 }
 
-export async function rejectAbsenceFineRequest(env, requestId, adminId, reason = 'Rejected by admin', expectedStoreId = '') {
+export async function rejectAbsenceFineRequest(env, requestId, adminId, reason = 'Rejected by admin', expectedStoreId = '', claim = null) {
   const storeSql = expectedStoreId ? ` AND store_id = ?` : '';
   const requestParams = expectedStoreId ? [requestId, expectedStoreId] : [requestId];
   const found = await env.DB.prepare(`
@@ -393,19 +509,43 @@ export async function rejectAbsenceFineRequest(env, requestId, adminId, reason =
       : { ok: false };
   }
 
-  const result = await env.DB.prepare(`
+  const decidedAt = nowIso();
+  claim = claimAt(claim, decidedAt);
+  const guard = claimGuard(claim);
+  const updateStatement = env.DB.prepare(`
     UPDATE absence_fine_requests
     SET status = 'rejected', decided_at = ?, admin_id = ?, reject_reason = ?
     WHERE request_id = ? AND status = 'pending'${storeSql}
-  `).bind(nowIso(), adminId, reason, ...requestParams).run();
-  if (mutationCount(result) !== 1) {
-    return { ok: false, error: 'already_decided' };
+      ${guard.sql}
+  `).bind(decidedAt, adminId, reason, ...requestParams, ...guard.params);
+  let updateResult;
+  let claimResult = null;
+  if (claim) {
+    [updateResult, claimResult] = await env.DB.batch([
+      updateStatement,
+      claimConsumeStatement(
+        env,
+        claim,
+        'absence_fine_requests',
+        'rejected',
+        adminId,
+        decidedAt
+      )
+    ]);
+  } else {
+    updateResult = await updateStatement.run();
+  }
+  if (
+    mutationCount(updateResult) !== 1
+    || (claim && mutationCount(claimResult) !== 1)
+  ) {
+    return decisionFailure(env, claim);
   }
   await audit(env, found.store_id, adminId, 'reject_absence_fine', requestId, { reason, ...found });
   return { ok: true, row: found, reason };
 }
 
-export async function approveIncomeRequest(env, storeId, requestId, adminId) {
+export async function approveIncomeRequest(env, storeId, requestId, adminId, claim = null) {
   const found = await env.DB.prepare(`SELECT * FROM pending_income WHERE store_id = ? AND request_id = ?`).bind(storeId, requestId).first();
   if (!found) return { ok: false };
   if (found.status !== 'pending') {
@@ -413,9 +553,10 @@ export async function approveIncomeRequest(env, storeId, requestId, adminId) {
   }
   const store = await getStore(env, storeId);
   const approvedAt = nowIso();
+  claim = claimAt(claim, approvedAt);
   const drafts = approvedIncomeRecordDrafts(found, adminId, approvedAt, [makeId('REC'), makeId('REC')]);
   const statements = drafts.map((draft) => (
-    pendingRequestIncomeRecordStatement(env, 'pending_income', draft)
+    pendingRequestIncomeRecordStatement(env, 'pending_income', draft, claim)
   ));
   if (payrollLedgerWritesEnabled(env)) {
     for (const draft of drafts) {
@@ -431,7 +572,8 @@ export async function approveIncomeRequest(env, storeId, requestId, adminId) {
             'pending_income',
             entry,
             storeId,
-            requestId
+            requestId,
+            claim
           )
         );
       }
@@ -446,31 +588,49 @@ export async function approveIncomeRequest(env, storeId, requestId, adminId) {
       adminId,
       'approve_income',
       found,
-      approvedAt
+      approvedAt,
+      claim
     )
   );
+  const guard = claimGuard(claim);
   const updateIndex = statements.length;
   statements.push(
     env.DB.prepare(`
       UPDATE pending_income
       SET status = 'approved', decided_at = ?, admin_id = ?
       WHERE store_id = ? AND request_id = ? AND status = 'pending'
-    `).bind(approvedAt, adminId, storeId, requestId)
+        ${guard.sql}
+    `).bind(approvedAt, adminId, storeId, requestId, ...guard.params)
   );
+  const claimIndex = claim ? statements.length : -1;
+  if (claim) {
+    statements.push(claimConsumeStatement(
+      env,
+      claim,
+      'pending_income',
+      'approved',
+      adminId,
+      approvedAt
+    ));
+  }
   const results = await env.DB.batch(statements);
-  if (mutationCount(results[updateIndex]) !== 1) {
-    return { ok: false, error: 'already_decided' };
+  if (
+    mutationCount(results[updateIndex]) !== 1
+    || (claim && mutationCount(results[claimIndex]) !== 1)
+  ) {
+    return decisionFailure(env, claim);
   }
   return { ok: true, row: found, store };
 }
 
-export async function rejectIncomeRequest(env, storeId, requestId, adminId, reason) {
+export async function rejectIncomeRequest(env, storeId, requestId, adminId, reason, claim = null) {
   const found = await env.DB.prepare(`SELECT * FROM pending_income WHERE store_id = ? AND request_id = ?`).bind(storeId, requestId).first();
   if (!found) return { ok: false };
   if (found.status !== 'pending') {
     return { ok: false, error: 'already_decided' };
   }
   const decidedAt = nowIso();
+  claim = claimAt(claim, decidedAt);
   const statements = [
     pendingRequestAuditStatement(
       env,
@@ -480,17 +640,37 @@ export async function rejectIncomeRequest(env, storeId, requestId, adminId, reas
       adminId,
       'reject_income',
       { reason, ...found },
-      decidedAt
+      decidedAt,
+      claim
     ),
+  ];
+  const guard = claimGuard(claim);
+  statements.push(
     env.DB.prepare(`
       UPDATE pending_income
       SET status = 'rejected', decided_at = ?, admin_id = ?, reject_reason = ?
       WHERE store_id = ? AND request_id = ? AND status = 'pending'
-    `).bind(decidedAt, adminId, reason, storeId, requestId)
-  ];
+        ${guard.sql}
+    `).bind(decidedAt, adminId, reason, storeId, requestId, ...guard.params)
+  );
+  const updateIndex = statements.length - 1;
+  const claimIndex = claim ? statements.length : -1;
+  if (claim) {
+    statements.push(claimConsumeStatement(
+      env,
+      claim,
+      'pending_income',
+      'rejected',
+      adminId,
+      decidedAt
+    ));
+  }
   const results = await env.DB.batch(statements);
-  if (mutationCount(results[1]) !== 1) {
-    return { ok: false, error: 'already_decided' };
+  if (
+    mutationCount(results[updateIndex]) !== 1
+    || (claim && mutationCount(results[claimIndex]) !== 1)
+  ) {
+    return decisionFailure(env, claim);
   }
   return { ok: true, row: found, reason };
 }
@@ -716,7 +896,7 @@ export async function rejectSalaryRequest(env, storeId, requestId, adminId, reas
   return { ok: true, row: found, reason };
 }
 
-export async function approveSalaryAdvanceRequest(env, storeId, requestId, adminId) {
+export async function approveSalaryAdvanceRequest(env, storeId, requestId, adminId, claim = null) {
   const found = await env.DB.prepare(`SELECT * FROM salary_advance_requests WHERE store_id = ? AND request_id = ?`).bind(storeId, requestId).first();
   if (!found) return { ok: false };
   if (found.status !== 'pending') {
@@ -726,6 +906,7 @@ export async function approveSalaryAdvanceRequest(env, storeId, requestId, admin
   const total = await getTotalIncome(env, storeId, found.telegram_id);
   if (Number(found.amount || 0) > total) return { ok: false, error: 'amount_exceeds_salary', store, total };
   const decidedAt = nowIso();
+  claim = claimAt(claim, decidedAt);
   const recordId = makeId('REC');
   const draft = {
     record_id: recordId,
@@ -746,7 +927,8 @@ export async function approveSalaryAdvanceRequest(env, storeId, requestId, admin
     pendingRequestIncomeRecordStatement(
       env,
       'salary_advance_requests',
-      draft
+      draft,
+      claim
     )
   ];
   if (payrollLedgerWritesEnabled(env)) {
@@ -762,7 +944,8 @@ export async function approveSalaryAdvanceRequest(env, storeId, requestId, admin
           'salary_advance_requests',
           entry,
           storeId,
-          requestId
+          requestId,
+          claim
         )
       );
     }
@@ -776,31 +959,49 @@ export async function approveSalaryAdvanceRequest(env, storeId, requestId, admin
       adminId,
       'approve_salary_advance',
       found,
-      decidedAt
+      decidedAt,
+      claim
     )
   );
+  const guard = claimGuard(claim);
   const updateIndex = statements.length;
   statements.push(
     env.DB.prepare(`
       UPDATE salary_advance_requests
       SET status = 'approved', decided_at = ?, admin_id = ?
       WHERE store_id = ? AND request_id = ? AND status = 'pending'
-    `).bind(decidedAt, adminId, storeId, requestId)
+        ${guard.sql}
+    `).bind(decidedAt, adminId, storeId, requestId, ...guard.params)
   );
+  const claimIndex = claim ? statements.length : -1;
+  if (claim) {
+    statements.push(claimConsumeStatement(
+      env,
+      claim,
+      'salary_advance_requests',
+      'approved',
+      adminId,
+      decidedAt
+    ));
+  }
   const results = await env.DB.batch(statements);
-  if (mutationCount(results[updateIndex]) !== 1) {
-    return { ok: false, error: 'already_decided' };
+  if (
+    mutationCount(results[updateIndex]) !== 1
+    || (claim && mutationCount(results[claimIndex]) !== 1)
+  ) {
+    return decisionFailure(env, claim);
   }
   return { ok: true, row: found, store };
 }
 
-export async function rejectSalaryAdvanceRequest(env, storeId, requestId, adminId, reason) {
+export async function rejectSalaryAdvanceRequest(env, storeId, requestId, adminId, reason, claim = null) {
   const found = await env.DB.prepare(`SELECT * FROM salary_advance_requests WHERE store_id = ? AND request_id = ?`).bind(storeId, requestId).first();
   if (!found) return { ok: false };
   if (found.status !== 'pending') {
     return { ok: false, error: 'already_decided' };
   }
   const decidedAt = nowIso();
+  claim = claimAt(claim, decidedAt);
   const statements = [
     pendingRequestAuditStatement(
       env,
@@ -810,22 +1011,42 @@ export async function rejectSalaryAdvanceRequest(env, storeId, requestId, adminI
       adminId,
       'reject_salary_advance',
       { reason, ...found },
-      decidedAt
+      decidedAt,
+      claim
     ),
+  ];
+  const guard = claimGuard(claim);
+  statements.push(
     env.DB.prepare(`
       UPDATE salary_advance_requests
       SET status = 'rejected', decided_at = ?, admin_id = ?, reject_reason = ?
       WHERE store_id = ? AND request_id = ? AND status = 'pending'
-    `).bind(decidedAt, adminId, reason, storeId, requestId)
-  ];
+        ${guard.sql}
+    `).bind(decidedAt, adminId, reason, storeId, requestId, ...guard.params)
+  );
+  const updateIndex = statements.length - 1;
+  const claimIndex = claim ? statements.length : -1;
+  if (claim) {
+    statements.push(claimConsumeStatement(
+      env,
+      claim,
+      'salary_advance_requests',
+      'rejected',
+      adminId,
+      decidedAt
+    ));
+  }
   const results = await env.DB.batch(statements);
-  if (mutationCount(results[1]) !== 1) {
-    return { ok: false, error: 'already_decided' };
+  if (
+    mutationCount(results[updateIndex]) !== 1
+    || (claim && mutationCount(results[claimIndex]) !== 1)
+  ) {
+    return decisionFailure(env, claim);
   }
   return { ok: true, row: found, reason };
 }
 
-export async function approveLeaveRequest(env, storeId, requestId, adminId) {
+export async function approveLeaveRequest(env, storeId, requestId, adminId, claim = null) {
   const found = await env.DB.prepare(`SELECT * FROM leave_requests WHERE store_id = ? AND request_id = ?`).bind(storeId, requestId).first();
   if (!found) return { ok: false };
   if (!['pending', 'approved'].includes(found.status)) {
@@ -851,26 +1072,60 @@ export async function approveLeaveRequest(env, storeId, requestId, adminId) {
   }
 
   const decidedAt = nowIso();
+  claim = claimAt(claim, decidedAt);
   const statements = [];
+  const guard = claimGuard(claim);
+  let leaveUpdateIndex = -1;
   if (found.status === 'pending') {
+    leaveUpdateIndex = statements.length;
     statements.push(env.DB.prepare(`
       UPDATE leave_requests SET status = 'approved', decided_at = ?, admin_id = ?
       WHERE store_id = ? AND request_id = ? AND status = 'pending'
-    `).bind(decidedAt, adminId, storeId, requestId));
+        ${guard.sql}
+    `).bind(decidedAt, adminId, storeId, requestId, ...guard.params));
   }
-  if (absence) statements.push(...absenceCancellationStatements(env, storeId, absence.request_id, decidedAt, adminId));
+  let absenceUpdateIndex = -1;
+  if (absence) {
+    absenceUpdateIndex = statements.length + 1;
+    statements.push(...absenceCancellationStatements(
+      env,
+      storeId,
+      absence.request_id,
+      decidedAt,
+      adminId,
+      claim
+    ));
+  }
+  const claimIndex = claim ? statements.length : -1;
+  if (claim) {
+    statements.push(claimConsumeStatement(
+      env,
+      claim,
+      'leave_requests',
+      'approved',
+      adminId,
+      decidedAt
+    ));
+  }
   const results = await env.DB.batch(statements);
-  if (found.status === 'pending' && mutationCount(results[0]) !== 1) {
-    return { ok: false, error: 'already_decided' };
+  if (
+    found.status === 'pending'
+    && (
+      mutationCount(results[leaveUpdateIndex]) !== 1
+      || (claim && mutationCount(results[claimIndex]) !== 1)
+    )
+  ) {
+    return decisionFailure(env, claim);
   }
-  const absenceResultIndex = statements.length - 1;
-  if (absence && mutationCount(results[absenceResultIndex]) !== 1) return { ok: false };
   if (found.status === 'pending') await audit(env, storeId, adminId, 'approve_leave', requestId, found);
-  if (absence) await audit(env, storeId, adminId, 'cancel_absence_for_leave', absence.request_id, absence);
+  if (absence && mutationCount(results[absenceUpdateIndex]) === 1) {
+    await audit(env, storeId, adminId, 'cancel_absence_for_leave', absence.request_id, absence);
+  }
   return { ok: true, row: found };
 }
 
-export function absenceCancellationStatements(env, storeId, requestId, decidedAt, adminId) {
+export function absenceCancellationStatements(env, storeId, requestId, decidedAt, adminId, claim = null) {
+  const guard = claimGuard(claim);
   return [
     env.DB.prepare(`
       UPDATE income_records SET fine = 0
@@ -878,14 +1133,16 @@ export function absenceCancellationStatements(env, storeId, requestId, decidedAt
         AND record_id = (
           SELECT income_record_id FROM absence_fine_requests
           WHERE request_id = ? AND status = 'approved'
+            ${guard.sql}
         )
-    `).bind(storeId, requestId),
+    `).bind(storeId, requestId, ...guard.params),
     env.DB.prepare(`
       UPDATE absence_fine_requests
       SET status = 'cancelled', cancellation_reason = 'Approved leave',
           decided_at = COALESCE(decided_at, ?), admin_id = COALESCE(admin_id, ?)
       WHERE request_id = ? AND status IN ('pending', 'approved', 'rejected')
-    `).bind(decidedAt, adminId, requestId)
+        ${guard.sql}
+    `).bind(decidedAt, adminId, requestId, ...guard.params)
   ];
 }
 
@@ -904,19 +1161,43 @@ export async function cancelAbsenceForApprovedLeave(env, storeId, telegramId, le
   return { ok: true, row: found };
 }
 
-export async function rejectLeaveRequest(env, storeId, requestId, adminId, reason) {
+export async function rejectLeaveRequest(env, storeId, requestId, adminId, reason, claim = null) {
   const found = await env.DB.prepare(`SELECT * FROM leave_requests WHERE store_id = ? AND request_id = ?`).bind(storeId, requestId).first();
   if (!found) return { ok: false };
   if (found.status !== 'pending') {
     return { ok: false, error: 'already_decided' };
   }
-  const result = await env.DB.prepare(`
+  const decidedAt = nowIso();
+  claim = claimAt(claim, decidedAt);
+  const guard = claimGuard(claim);
+  const updateStatement = env.DB.prepare(`
     UPDATE leave_requests
     SET status = 'rejected', decided_at = ?, admin_id = ?, reject_reason = ?
     WHERE store_id = ? AND request_id = ? AND status = 'pending'
-  `).bind(nowIso(), adminId, reason, storeId, requestId).run();
-  if (mutationCount(result) !== 1) {
-    return { ok: false, error: 'already_decided' };
+      ${guard.sql}
+  `).bind(decidedAt, adminId, reason, storeId, requestId, ...guard.params);
+  let updateResult;
+  let claimResult = null;
+  if (claim) {
+    [updateResult, claimResult] = await env.DB.batch([
+      updateStatement,
+      claimConsumeStatement(
+        env,
+        claim,
+        'leave_requests',
+        'rejected',
+        adminId,
+        decidedAt
+      )
+    ]);
+  } else {
+    updateResult = await updateStatement.run();
+  }
+  if (
+    mutationCount(updateResult) !== 1
+    || (claim && mutationCount(claimResult) !== 1)
+  ) {
+    return decisionFailure(env, claim);
   }
   await audit(env, storeId, adminId, 'reject_leave', requestId, { reason, ...found });
   return { ok: true, row: found, reason };
