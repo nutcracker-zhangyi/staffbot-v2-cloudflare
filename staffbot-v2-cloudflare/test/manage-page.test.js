@@ -647,10 +647,17 @@ const payrollListItem = {
   claim: null
 };
 
-function payrollDossier({ claim = null, draft = false } = {}) {
+function payrollDossier({
+  claim = null,
+  draft = false,
+  draftId = 'ATTEMPT-DRAFT',
+  amountMicros = 100_000_000,
+  draftProofs = []
+} = {}) {
   return {
     payroll: {
       ...payrollListItem,
+      amount_snapshot_micros: amountMicros,
       payment_profile: {
         accepts_bank: true,
         accepts_usdt: true,
@@ -664,8 +671,8 @@ function payrollDossier({ claim = null, draft = false } = {}) {
     },
     attempts: [
       ...(draft ? [{
-        attempt_id: 'ATTEMPT-DRAFT', version: 2, status: 'draft',
-        bank_micros: 0, usdt_micros: 0, cash_micros: 0, proofs: []
+        attempt_id: draftId, version: draftId.endsWith('2') ? 3 : 2, status: 'draft',
+        bank_micros: 0, usdt_micros: 0, cash_micros: 0, proofs: draftProofs
       }] : []),
       {
         attempt_id: 'ATTEMPT-OLD', version: 1, status: 'submitted',
@@ -686,9 +693,13 @@ function payrollDossier({ claim = null, draft = false } = {}) {
 }
 
 function payrollFixture({
+  initialDossier = payrollDossier(),
   uploadFailureAt = 0,
   uploadGate = null,
+  uploadGates = new Map(),
+  submitFailures = 0,
   splitConflict = false,
+  storeName = 'Tokyo Club',
   confirm = () => true
 } = {}) {
   const requests = [];
@@ -696,10 +707,14 @@ function payrollFixture({
     claimed_by: 'ADMIN-1', claimed_at: '2026-07-29T02:00:00.000Z',
     lease_expires_at: '2099-07-29T02:15:00.000Z', active: true
   };
-  let dossier = payrollDossier();
+  let dossier = structuredClone(initialDossier);
   let uploadCount = 0;
+  let remainingSubmitFailures = submitFailures;
+  let nextDossierGate = null;
   return {
     requests,
+    setDossier(value) { dossier = structuredClone(value); },
+    gateNextDossier(gate) { nextDossierGate = gate; },
     async browser() {
       return executeManageClient(MANAGE_CLIENT, {
         confirm,
@@ -711,13 +726,26 @@ function payrollFixture({
             return json({ telegram_id: 'ADMIN-1', csrf_token: 'CSRF-1' });
           }
           if (path === '/api/manage/stores') {
-            return json({ stores: [{ store_id: 'STORE-1', name: 'Tokyo Club', currency: '$' }] });
+            return json({ stores: [{ store_id: 'STORE-1', name: storeName, currency: '$' }] });
           }
           if (path === '/api/manage/tasks?') return json({ tasks: [] });
+          if (path === '/api/manage/tasks?store_id=STORE-1&type=payroll') {
+            return json({ tasks: [] });
+          }
           if (path === '/api/manage/stores/STORE-1/payroll') {
-            return json({ payroll: [structuredClone(payrollListItem)] });
+            return json({ payroll: [{
+              ...structuredClone(payrollListItem),
+              amount_snapshot_micros: dossier.payroll.amount_snapshot_micros,
+              status: dossier.payroll.status,
+              claim: dossier.payroll.claim
+            }] });
           }
           if (path === '/api/manage/stores/STORE-1/payroll/PAYROLL-1' && method === 'GET') {
+            if (nextDossierGate) {
+              const gate = nextDossierGate;
+              nextDossierGate = null;
+              return gate.promise;
+            }
             return json(structuredClone(dossier));
           }
           if (path === '/api/manage/tasks/payroll/PAYROLL-1/claim') {
@@ -725,28 +753,38 @@ function payrollFixture({
             return json({ ok: true, claim: activeClaim });
           }
           if (path.endsWith('/attempts/draft')) {
-            dossier = payrollDossier({ claim: activeClaim, draft: true });
-            return json({ ok: true, attempt: structuredClone(dossier.attempts[0]) });
+            let draft = dossier.attempts.find((attempt) => attempt.status === 'draft');
+            if (!draft) {
+              dossier = payrollDossier({ claim: activeClaim, draft: true });
+              draft = dossier.attempts[0];
+            }
+            return json({ ok: true, attempt: structuredClone(draft) });
           }
-          if (path.endsWith('/attempts/ATTEMPT-DRAFT/split')) {
+          const splitMatch = path.match(/\/attempts\/([^/]+)\/split$/);
+          if (splitMatch) {
             if (splitConflict) return json({ error: 'task_claim_required' }, 409);
             const split = JSON.parse(options.body);
-            Object.assign(dossier.attempts[0], split);
-            return json({ ok: true, attempt: structuredClone(dossier.attempts[0]) });
+            const draft = dossier.attempts.find((attempt) => attempt.attempt_id === splitMatch[1]);
+            Object.assign(draft, split);
+            return json({ ok: true, attempt: structuredClone(draft) });
           }
-          if (path.endsWith('/attempts/ATTEMPT-DRAFT/proofs') && method === 'POST') {
+          const proofMatch = path.match(/\/attempts\/([^/]+)\/proofs$/);
+          if (proofMatch && method === 'POST') {
             uploadCount += 1;
             if (uploadGate) return uploadGate.promise;
             if (uploadCount === uploadFailureAt) return json({ error: 'upload_failed' }, 503);
             const methodName = options.body.get('method');
+            const file = options.body.get('proof');
+            const namedGate = uploadGates.get(file.name);
+            if (namedGate) return namedGate.promise;
             const proof = {
-              proof_id: `PROOF-${uploadCount}`, attempt_id: 'ATTEMPT-DRAFT',
-              method: methodName, file_name: options.body.get('proof').name,
-              mime_type: options.body.get('proof').type, size_bytes: options.body.get('proof').size,
+              proof_id: `PROOF-${uploadCount}`, attempt_id: proofMatch[1],
+              method: methodName, file_name: file.name,
+              mime_type: file.type, size_bytes: file.size,
               uploaded_by: 'ADMIN-1', uploaded_at: '2026-07-29T02:10:00.000Z',
               url: `/api/manage/stores/STORE-1/payroll/proofs/PROOF-${uploadCount}`
             };
-            dossier.attempts[0].proofs.push(proof);
+            dossier.attempts.find((attempt) => attempt.attempt_id === proofMatch[1]).proofs.push(proof);
             return json({ ok: true, proof });
           }
           if (path.includes('/proofs/') && method === 'DELETE') {
@@ -754,8 +792,14 @@ function payrollFixture({
             dossier.attempts[0].proofs = dossier.attempts[0].proofs.filter((proof) => proof.proof_id !== proofId);
             return json({ ok: true });
           }
-          if (path.endsWith('/attempts/ATTEMPT-DRAFT/submit')) {
-            return json({ ok: true, attempt: { ...dossier.attempts[0], status: 'submitted' } });
+          const submitMatch = path.match(/\/attempts\/([^/]+)\/submit$/);
+          if (submitMatch) {
+            if (remainingSubmitFailures > 0) {
+              remainingSubmitFailures -= 1;
+              throw new TypeError('network_failed');
+            }
+            const draft = dossier.attempts.find((attempt) => attempt.attempt_id === submitMatch[1]);
+            return json({ ok: true, attempt: { ...draft, status: 'submitted' } });
           }
           return json({ ok: false, error: 'not_found' }, 404);
         }
@@ -797,8 +841,8 @@ test('payroll payment enables submit only for an exact evidenced integer-micros 
 
   const jpeg = new File([new Uint8Array([0xff, 0xd8, 0xff, 0xd9])], 'bank.jpg', { type: 'image/jpeg' });
   const png = new File([new Uint8Array([0x89, 0x50, 0x4e, 0x47])], 'usdt.png', { type: 'image/png' });
-  await browser.call('uploadProof', 'bank', [jpeg]);
-  await browser.call('uploadProof', 'usdt', [png]);
+  await browser.changeFiles('bank-camera', [jpeg]);
+  await browser.changeFiles('usdt-library', [png]);
 
   assert.equal(browser.document.getElementById('submit-payroll-payment').disabled, false);
   const split = app.requests.find((request) => request.path.endsWith('/split'));
@@ -840,7 +884,7 @@ test('multi-file upload isolates failures and retries only the failed proof', as
 
   const first = new File([new Uint8Array([1])], 'first.jpg', { type: 'image/jpeg' });
   const second = new File([new Uint8Array([2])], 'second.jpg', { type: 'image/jpeg' });
-  await browser.call('uploadProof', 'bank', [first, second]);
+  await browser.changeFiles('bank-library', [first, second]);
   assert.match(browser.document.app.textContent, /second.jpg.*上传失败/s);
   assert.match(browser.document.app.textContent, /first.jpg.*已上传/s);
   await browser.clickButton('重试 second.jpg');
@@ -874,7 +918,7 @@ test('a draft proof is deleted only after confirmation and submitted proof stays
   await baseBrowser.input('bank-amount', '100');
   await baseBrowser.call('savePaymentDraft');
   const proof = new File([new Uint8Array([1])], 'proof.jpg', { type: 'image/jpeg' });
-  await baseBrowser.call('uploadProof', 'bank', [proof]);
+  await baseBrowser.changeFiles('bank-camera', [proof]);
   assert.ok(baseBrowser.document.getElementById('delete-proof-PROOF-1'));
   assert.equal(baseBrowser.document.getElementById('delete-proof-PROOF-OLD'), null);
 
@@ -910,7 +954,7 @@ test('payroll submit uses the planned idempotent Task 11 route and cannot double
   await browser.input('bank-amount', '100');
   await browser.call('savePaymentDraft');
   const proof = new File([new Uint8Array([1])], 'proof.jpg', { type: 'image/jpeg' });
-  await browser.call('uploadProof', 'bank', [proof]);
+  await browser.changeFiles('bank-camera', [proof]);
 
   const submit = browser.document.getElementById('submit-payroll-payment');
   await Promise.all([submit.click(), submit.click()]);
@@ -943,7 +987,7 @@ test('a late proof upload cannot overwrite payroll state after navigation', asyn
   await browser.input('bank-amount', '100');
   await browser.call('savePaymentDraft');
   const proof = new File([new Uint8Array([1])], 'late.jpg', { type: 'image/jpeg' });
-  const upload = browser.call('uploadProof', 'bank', [proof]);
+  const upload = browser.changeFiles('bank-library', [proof]);
   await new Promise((resolve) => setImmediate(resolve));
   await browser.clickButton('工资');
   gate.resolve(json({ ok: true, proof: {
@@ -957,4 +1001,189 @@ test('a late proof upload cannot overwrite payroll state after navigation', asyn
   assert.equal(browser.document.getElementById('bank-amount'), null);
   assert.doesNotMatch(browser.document.app.textContent, /late.jpg/);
   assert.equal(browser.objectUrls.size, 0);
+});
+
+test('reconnecting a payroll page stays read-only until authoritative state is refreshed', async () => {
+  const app = payrollFixture();
+  const browser = await app.browser();
+  await browser.clickButton('工资');
+  await browser.clickButton('查看工资档案');
+  await browser.clickButton('领取并开始付款');
+  await browser.input('bank-amount', '100');
+  await browser.setOnline(false);
+
+  const gate = deferred();
+  const takeover = payrollDossier({
+    claim: {
+      claimed_by: 'ADMIN-2', claimed_at: '2026-07-29T02:05:00.000Z',
+      lease_expires_at: '2099-07-29T02:20:00.000Z', active: true
+    },
+    draft: true
+  });
+  app.setDossier(takeover);
+  app.gateNextDossier(gate);
+  await browser.setOnline(true);
+
+  assert.equal(browser.document.getElementById('save-payment-draft').disabled, true);
+  assert.match(browser.document.app.textContent, /正在刷新最新工资状态/);
+
+  gate.resolve(json(takeover));
+  await new Promise((resolve) => setImmediate(resolve));
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.match(browser.document.getElementById('claim-status').textContent, /ADMIN-2/);
+  assert.equal(browser.document.getElementById('bank-amount'), null);
+});
+
+test('failed reconnect refresh keeps the cached payroll dossier locked', async () => {
+  const app = payrollFixture();
+  const browser = await app.browser();
+  await browser.clickButton('工资');
+  await browser.clickButton('查看工资档案');
+  await browser.clickButton('领取并开始付款');
+  await browser.setOnline(false);
+  const gate = deferred();
+  app.gateNextDossier(gate);
+  await browser.setOnline(true);
+  gate.resolve(json({ error: 'unavailable' }, 503));
+  await new Promise((resolve) => setImmediate(resolve));
+  await new Promise((resolve) => setImmediate(resolve));
+
+  assert.equal(browser.document.getElementById('save-payment-draft').disabled, true);
+  assert.match(browser.document.app.textContent, /刷新失败.*只读/);
+});
+
+test('failed proof state from payment v1 is cleared when authority moves to v2', async () => {
+  const app = payrollFixture({ uploadFailureAt: 1 });
+  const browser = await app.browser();
+  await browser.clickButton('工资');
+  await browser.clickButton('查看工资档案');
+  await browser.clickButton('领取并开始付款');
+  await browser.input('bank-amount', '100');
+  const failed = new File([new Uint8Array([1])], 'v1-failed.jpg', { type: 'image/jpeg' });
+  await browser.changeFiles('bank-library', [failed]);
+  assert.match(browser.document.app.textContent, /v1-failed.jpg.*上传失败/s);
+
+  const v2 = payrollDossier({
+    claim: {
+      claimed_by: 'ADMIN-1', claimed_at: '2026-07-29T02:05:00.000Z',
+      lease_expires_at: '2099-07-29T02:20:00.000Z', active: true
+    },
+    draft: true,
+    draftId: 'ATTEMPT-DRAFT-2'
+  });
+  app.setDossier(v2);
+  await browser.setOnline(false);
+  await browser.setOnline(true);
+
+  assert.doesNotMatch(browser.document.app.textContent, /v1-failed.jpg/);
+  assert.equal(browser.document.buttons.some((button) => /重试 v1-failed/.test(button.textContent)), false);
+  assert.equal(browser.objectUrls.size, 0);
+});
+
+test('an unknown submit result reuses one key only for the same payment attempt', async () => {
+  const app = payrollFixture({ submitFailures: 2 });
+  const browser = await app.browser();
+  await browser.clickButton('工资');
+  await browser.clickButton('查看工资档案');
+  await browser.clickButton('领取并开始付款');
+  await browser.input('bank-amount', '100');
+  const proof = new File([new Uint8Array([1])], 'v1.jpg', { type: 'image/jpeg' });
+  await browser.changeFiles('bank-camera', [proof]);
+  await browser.clickButton('提交付款并通知员工');
+  const first = app.requests.filter((request) => request.path.endsWith('/submit')).at(-1);
+  assert.ok(browser.document.getElementById('submit-payroll-payment'));
+  await browser.clickButton('提交付款并通知员工');
+  const sameAttempt = app.requests.filter((request) => request.path.endsWith('/submit')).at(-1);
+  assert.equal(sameAttempt.headers['Idempotency-Key'], first.headers['Idempotency-Key']);
+
+  const owned = {
+    claimed_by: 'ADMIN-1', claimed_at: '2026-07-29T02:05:00.000Z',
+    lease_expires_at: '2099-07-29T02:20:00.000Z', active: true
+  };
+  const v2 = payrollDossier({ claim: owned, draft: true, draftId: 'ATTEMPT-DRAFT-2' });
+  Object.assign(v2.attempts[0], {
+    bank_micros: 100_000_000,
+    proofs: [{
+      proof_id: 'PROOF-V2', attempt_id: 'ATTEMPT-DRAFT-2', method: 'bank',
+      mime_type: 'image/jpeg', uploaded_at: '2026-07-29T03:00:00.000Z',
+      url: '/api/manage/stores/STORE-1/payroll/proofs/PROOF-V2'
+    }]
+  });
+  app.setDossier(v2);
+  await browser.setOnline(false);
+  await browser.setOnline(true);
+  await browser.clickButton('领取并开始付款');
+  await browser.clickButton('提交付款并通知员工');
+  const newAttempt = app.requests.filter((request) => request.path.endsWith('/submit')).at(-1);
+  assert.notEqual(newAttempt.headers['Idempotency-Key'], first.headers['Idempotency-Key']);
+});
+
+test('money display preserves every safe integer micro and negative difference exactly', async () => {
+  const exact = payrollDossier({ amountMicros: Number.MAX_SAFE_INTEGER });
+  const browser = await payrollFixture({ initialDossier: exact }).browser();
+  await browser.clickButton('工资');
+  assert.match(browser.document.app.textContent, /\$9,007,199,254\.740991/);
+  await browser.clickButton('查看工资档案');
+  assert.match(browser.document.app.textContent, /\$9,007,199,254\.740991/);
+
+  const normal = await payrollFixture().browser();
+  await normal.clickButton('工资');
+  await normal.clickButton('查看工资档案');
+  await normal.clickButton('领取并开始付款');
+  await normal.input('bank-amount', '100.000001');
+  assert.equal(normal.document.getElementById('payment-difference').textContent, '$-0.000001');
+});
+
+test('photo library starts every selected upload without waiting for an earlier file', async () => {
+  const firstGate = deferred();
+  const app = payrollFixture({ uploadGates: new Map([['first.jpg', firstGate]]) });
+  const browser = await app.browser();
+  await browser.clickButton('工资');
+  await browser.clickButton('查看工资档案');
+  await browser.clickButton('领取并开始付款');
+  await browser.input('bank-amount', '100');
+  const first = new File([new Uint8Array([1])], 'first.jpg', { type: 'image/jpeg' });
+  const second = new File([new Uint8Array([2])], 'second.jpg', { type: 'image/jpeg' });
+  const change = browser.changeFiles('bank-library', [first, second]);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(app.requests.filter((request) => request.path.endsWith('/proofs')).length, 2);
+  assert.match(browser.document.app.textContent, /first.jpg.*上传中/s);
+  assert.match(browser.document.app.textContent, /second.jpg.*已上传/s);
+  firstGate.resolve(json({ ok: true, proof: {
+    proof_id: 'PROOF-FIRST', attempt_id: 'ATTEMPT-DRAFT', method: 'bank',
+    file_name: 'first.jpg', mime_type: 'image/jpeg', size_bytes: 1,
+    uploaded_by: 'ADMIN-1', uploaded_at: '2026-07-29T02:10:00.000Z'
+  } }));
+  await change;
+});
+
+test('superseded and wrong-attempt proofs never satisfy the submit gate', async () => {
+  const owned = {
+    claimed_by: 'ADMIN-1', claimed_at: '2026-07-29T02:00:00.000Z',
+    lease_expires_at: '2099-07-29T02:15:00.000Z', active: true
+  };
+  const dossier = payrollDossier({
+    claim: owned,
+    draft: true,
+    draftProofs: [
+      { proof_id: 'SUPERSEDED', attempt_id: 'ATTEMPT-DRAFT', method: 'bank', superseded_at: '2026-07-29T02:01:00.000Z' },
+      { proof_id: 'WRONG', attempt_id: 'ATTEMPT-OTHER', method: 'bank', superseded_at: null }
+    ]
+  });
+  dossier.attempts[0].bank_micros = 100_000_000;
+  const browser = await payrollFixture({ initialDossier: dossier }).browser();
+  await browser.clickButton('工资');
+  await browser.clickButton('查看工资档案');
+  await browser.clickButton('领取并开始付款');
+  assert.equal(browser.document.getElementById('submit-payroll-payment').disabled, true);
+});
+
+test('payroll dossier resolves and escapes its authorized store name', async () => {
+  const attack = '<img src=x onerror=alert(1)>';
+  const browser = await payrollFixture({ storeName: attack }).browser();
+  await browser.clickButton('工资');
+  await browser.clickButton('查看工资档案');
+  assert.match(browser.document.app.textContent, /店铺：&lt;img src=x/);
+  assert.doesNotMatch(browser.document.app.innerHTML, /<img src=x/);
+  assert.match(browser.document.app.innerHTML, /&lt;img src=x onerror=alert\(1\)&gt;/);
 });

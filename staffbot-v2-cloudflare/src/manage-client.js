@@ -18,6 +18,7 @@ const state = {
   proofUploads: [],
   paymentBusy: false,
   submitKey: '',
+  submitAttemptId: '',
   claimTimer: 0,
   online: navigator.onLine,
   decisionMode: '',
@@ -271,16 +272,51 @@ function taskCard(task, index) {
 }
 
 function clearPayrollState() {
-  for (const upload of state.proofUploads || []) {
-    if (upload.previewUrl) URL.revokeObjectURL(upload.previewUrl);
-  }
+  clearAttemptTransientState();
   state.currentPayroll = null;
   state.payrollMode = 'dossier';
   state.paymentAmounts = { bank: '', usdt: '', cash: '' };
   state.paymentErrors = { bank: '', usdt: '', cash: '' };
-  state.proofUploads = [];
   state.paymentBusy = false;
+}
+
+function clearAttemptTransientState() {
+  clearProofUploadState();
   state.submitKey = '';
+  state.submitAttemptId = '';
+}
+
+function clearProofUploadState() {
+  for (const upload of state.proofUploads || []) {
+    if (upload.previewUrl) URL.revokeObjectURL(upload.previewUrl);
+  }
+  state.proofUploads = [];
+}
+
+function draftAttemptId(detail = state.currentPayroll) {
+  const draft = detail && detail.attempts.find((attempt) => attempt.status === 'draft');
+  return draft ? draft.attempt_id : '';
+}
+
+function adoptPayrollDossier(detail) {
+  const previousAttemptId = draftAttemptId();
+  for (const attempt of detail.attempts || []) {
+    for (const proof of attempt.proofs || []) {
+      if (!proof.attempt_id) proof.attempt_id = attempt.attempt_id;
+    }
+  }
+  const nextAttemptId = draftAttemptId(detail);
+  const transientAttemptIds = new Set([
+    ...state.proofUploads.map((upload) => upload.attemptId),
+    state.submitAttemptId
+  ].filter(Boolean));
+  if (
+    (previousAttemptId && previousAttemptId !== nextAttemptId)
+    || Array.from(transientAttemptIds).some((attemptId) => attemptId !== nextAttemptId)
+  ) {
+    clearAttemptTransientState();
+  }
+  state.currentPayroll = detail;
 }
 
 function payrollStoreOptions() {
@@ -378,7 +414,7 @@ async function openPayroll(payrollId) {
     const detail = await api(payrollPath(item.store_id, item.payroll_id));
     if (generation !== state.requestGeneration || !state.session) return;
     if (!detail.payroll || detail.payroll.store_id + ':' + detail.payroll.payroll_id !== key) return;
-    state.currentPayroll = detail;
+    adoptPayrollDossier(detail);
     state.message = '';
     renderPayrollDetail();
   } catch (error) {
@@ -398,6 +434,7 @@ function payrollPath(storeId, payrollId) {
 function renderPayrollDetail() {
   const detail = state.currentPayroll;
   const payroll = detail.payroll;
+  const store = state.stores.find((item) => item.store_id === payroll.store_id);
   const payment = state.payrollMode === 'payment' ? paymentForm(detail) : '';
   const handler = claimIsActive(payroll.claim)
     ? '当前处理人：' + escapeHtml(payroll.claim.claimed_by)
@@ -407,6 +444,7 @@ function renderPayrollDetail() {
     + '<span class="type-badge">工资档案</span><span>'
     + escapeHtml(statusLabels[payroll.status] || payroll.status) + '</span></div>'
     + '<h2>' + escapeHtml(payroll.employee_name) + '</h2>'
+    + '<p class="meta">店铺：' + escapeHtml(store ? store.name : payroll.store_id) + '</p>'
     + '<p id="claim-status" class="claim-status">' + handler + '</p>'
     + '<section><h3>固定工资事实</h3><dl class="facts">'
     + '<div><dt>工资总额</dt><dd>' + formatMoney(payroll.amount_snapshot_micros, payroll.currency) + '</dd></div>'
@@ -467,7 +505,7 @@ function payrollAttemptsSection(attempts) {
           + '" alt="' + escapeHtml(paymentMethodLabel(proof.method)) + '付款回执" loading="lazy">'
           + '<figcaption>' + escapeHtml(paymentMethodLabel(proof.method)) + ' · '
           + escapeHtml(formatDateTime(proof.uploaded_at)) + '</figcaption>'
-          + (attempt.status === 'draft' && state.payrollMode === 'payment'
+          + (attempt.status === 'draft' && state.payrollMode === 'payment' && proof.superseded_at == null
             ? '<button id="delete-proof-' + escapeHtml(proof.proof_id)
               + '" class="danger" type="button">删除回执</button>' : '')
           + '</figure>'
@@ -512,8 +550,12 @@ function paymentForm(detail) {
 }
 
 function paymentMethodControl(method, draft) {
-  const uploaded = (draft.proofs || []).filter((proof) => proof.method === method);
-  const pending = state.proofUploads.filter((upload) => upload.method === method);
+  const uploaded = (draft.proofs || []).filter((proof) => (
+    proof.method === method && proof.superseded_at == null
+  ));
+  const pending = state.proofUploads.filter((upload) => (
+    upload.attemptId === draft.attempt_id && upload.method === method
+  ));
   return '<div class="payment-method"><label for="' + method + '-amount">'
     + paymentMethodLabel(method) + '金额</label>'
     + '<input id="' + method + '-amount" inputmode="decimal" value="'
@@ -563,6 +605,7 @@ function bindPaymentControls() {
     if (remove) remove.onclick = () => deleteDraftProof(proof.proof_id);
   }
   for (const upload of state.proofUploads) {
+    if (!draft || upload.attemptId !== draft.attempt_id) continue;
     const retry = document.getElementById('retry-upload-' + upload.id);
     if (retry) retry.onclick = () => retryProofUpload(upload.id);
   }
@@ -613,8 +656,12 @@ function paymentSplit() {
 function paymentTotals() {
   const parsed = paymentSplit();
   const values = Object.values(parsed.split);
-  const allocated = parsed.valid ? values.reduce((sum, value) => sum + value, 0) : 0;
-  const total = state.currentPayroll ? state.currentPayroll.payroll.amount_snapshot_micros : 0;
+  const allocated = parsed.valid
+    ? values.reduce((sum, value) => sum + BigInt(value), 0n)
+    : 0n;
+  const total = state.currentPayroll
+    ? BigInt(state.currentPayroll.payroll.amount_snapshot_micros)
+    : 0n;
   return { allocated, difference: total - allocated, valid: parsed.valid, split: parsed.split };
 }
 
@@ -631,18 +678,22 @@ function canMutatePayment() {
 function canSubmitPayment() {
   if (!canMutatePayment()) return false;
   const totals = paymentTotals();
-  if (!totals.valid || totals.difference !== 0) return false;
+  if (!totals.valid || totals.difference !== 0n) return false;
   const draft = currentDraft();
   return ['bank', 'usdt', 'cash'].every((method) => {
     const amount = totals.split[method + '_micros'];
-    return amount === 0 || (draft.proofs || []).some((proof) => proof.method === method);
+    return amount === 0 || (draft.proofs || []).some((proof) => (
+      proof.method === method
+      && proof.attempt_id === draft.attempt_id
+      && proof.superseded_at == null
+    ));
   });
 }
 
 function canSavePaymentSplit() {
   if (!canMutatePayment()) return false;
   const totals = paymentTotals();
-  return totals.valid && totals.difference === 0;
+  return totals.valid && totals.difference === 0n;
 }
 
 async function startPayrollPayment() {
@@ -664,7 +715,7 @@ async function startPayrollPayment() {
     if (!payrollRequestIsCurrent(generation, key)) return;
     const dossier = await api(payrollPath(payroll.store_id, payroll.payroll_id));
     if (!payrollRequestIsCurrent(generation, key)) return;
-    state.currentPayroll = dossier;
+    adoptPayrollDossier(dossier);
     const draft = dossier.attempts.find((attempt) => attempt.attempt_id === result.attempt.attempt_id)
       || result.attempt;
     if (!dossier.attempts.some((attempt) => attempt.attempt_id === draft.attempt_id)) {
@@ -689,15 +740,15 @@ async function startPayrollPayment() {
 }
 
 function microsToInput(micros) {
-  const value = Number(micros || 0);
-  const whole = Math.trunc(value / 1000000);
-  const fraction = String(value % 1000000).padStart(6, '0').replace(/0+$/, '');
+  const value = BigInt(micros || 0);
+  const whole = value / 1000000n;
+  const fraction = (value % 1000000n).toString().padStart(6, '0').replace(/0+$/, '');
   return fraction ? whole + '.' + fraction : String(whole);
 }
 
 async function savePaymentDraft() {
   const totals = paymentTotals();
-  if (!totals.valid || totals.difference !== 0 || !canMutatePayment()) {
+  if (!totals.valid || totals.difference !== 0n || !canMutatePayment()) {
     updatePaymentValidation();
     return null;
   }
@@ -733,7 +784,7 @@ async function savePaymentDraft() {
 async function uploadProof(method, files) {
   if (!canMutatePayment()) return;
   const totals = paymentTotals();
-  if (!totals.valid || totals.difference !== 0) {
+  if (!totals.valid || totals.difference !== 0n) {
     updatePaymentValidation();
     return;
   }
@@ -743,15 +794,14 @@ async function uploadProof(method, files) {
   ));
   if (splitChanged && !await savePaymentDraft()) return;
   const accepted = Array.from(files || []);
-  for (const file of accepted) {
-    const upload = {
+  const attemptId = currentDraft().attempt_id;
+  const uploads = accepted.map((file) => ({
       id: Date.now() + '-' + Math.random().toString(36).slice(2),
-      method, file, status: 'uploading', previewUrl: URL.createObjectURL(file)
-    };
-    state.proofUploads.push(upload);
-    renderPayrollDetail();
-    await performProofUpload(upload);
-  }
+      attemptId, method, file, status: 'uploading', previewUrl: URL.createObjectURL(file)
+    }));
+  state.proofUploads.push(...uploads);
+  renderPayrollDetail();
+  await Promise.allSettled(uploads.map((upload) => performProofUpload(upload)));
 }
 
 async function performProofUpload(upload) {
@@ -759,6 +809,7 @@ async function performProofUpload(upload) {
   const key = payrollKey();
   const payroll = state.currentPayroll.payroll;
   const draft = currentDraft();
+  if (!draft || draft.attempt_id !== upload.attemptId) return;
   upload.status = 'uploading';
   renderPayrollDetail();
   const form = new FormData();
@@ -786,7 +837,8 @@ async function performProofUpload(upload) {
 
 async function retryProofUpload(uploadId) {
   const upload = state.proofUploads.find((item) => item.id === uploadId && item.status === 'error');
-  if (!upload || !canMutatePayment()) return;
+  const draft = currentDraft();
+  if (!upload || !draft || upload.attemptId !== draft.attempt_id || !canMutatePayment()) return;
   await performProofUpload(upload);
 }
 
@@ -824,6 +876,10 @@ async function submitPayrollPayment() {
   const payroll = state.currentPayroll.payroll;
   const draft = currentDraft();
   state.paymentBusy = true;
+  if (state.submitAttemptId !== draft.attempt_id) {
+    state.submitKey = '';
+    state.submitAttemptId = draft.attempt_id;
+  }
   state.submitKey = state.submitKey || payroll.payroll_id + ':' + draft.attempt_id + ':' + Date.now();
   renderPayrollDetail();
   try {
@@ -835,8 +891,11 @@ async function submitPayrollPayment() {
     await refreshPayrollDossier('付款已提交，员工通知处理中', generation, key);
     state.payrollMode = 'dossier';
     state.submitKey = '';
+    state.submitAttemptId = '';
   } catch (error) {
-    if (payrollRequestIsCurrent(generation, key)) await payrollFailureRefresh(error, generation, key);
+    if (payrollRequestIsCurrent(generation, key)) {
+      await payrollFailureRefresh(error, generation, key, { retryAttemptId: draft.attempt_id });
+    }
   } finally {
     if (payrollRequestIsCurrent(generation, key)) {
       state.paymentBusy = false;
@@ -852,11 +911,12 @@ async function refreshPayrollDossier(message, generation = state.requestGenerati
   if (!detail.payroll || detail.payroll.store_id + ':' + detail.payroll.payroll_id !== key) {
     throw new Error('invalid_payroll_detail');
   }
-  state.currentPayroll = detail;
+  adoptPayrollDossier(detail);
   state.message = message;
 }
 
-async function payrollFailureRefresh(error, generation, key) {
+async function payrollFailureRefresh(error, generation, key, { retryAttemptId = '' } = {}) {
+  const submitResultUnknown = Boolean(retryAttemptId && (!error.status || error.status >= 500));
   try {
     await refreshPayrollDossier(
       error.status === 409 ? '工资状态已更新，当前页面已切换为只读' : '网络操作失败，已刷新最新工资档案',
@@ -868,7 +928,23 @@ async function payrollFailureRefresh(error, generation, key) {
     state.authorityStale = true;
     state.message = '最新工资状态加载失败，当前页面已锁定，请返回工资列表刷新';
   }
-  if (payrollRequestIsCurrent(generation, key)) state.payrollMode = 'dossier';
+  if (!payrollRequestIsCurrent(generation, key)) return;
+  const sameUnknownAttempt = Boolean(
+    submitResultUnknown
+    && !state.authorityStale
+    && draftAttemptId() === retryAttemptId
+    && state.submitAttemptId === retryAttemptId
+  );
+  if (sameUnknownAttempt) {
+    state.payrollMode = 'payment';
+    state.message = '提交结果未知，已刷新当前草稿；重试会使用同一提交编号';
+  } else {
+    if (!submitResultUnknown && state.submitAttemptId === retryAttemptId) {
+      state.submitKey = '';
+      state.submitAttemptId = '';
+    }
+    state.payrollMode = 'dossier';
+  }
 }
 
 function startPayrollClaimTimer() {
@@ -911,8 +987,13 @@ function urgencyLabel(value) {
 }
 
 function formatMoney(micros, currency) {
-  const amount = Number(micros || 0) / 1000000;
-  return escapeHtml(currency || '') + amount.toLocaleString('zh-CN', { maximumFractionDigits: 6 });
+  const amount = BigInt(micros || 0);
+  const negative = amount < 0n;
+  const absolute = negative ? -amount : amount;
+  const whole = (absolute / 1000000n).toString().replace(/\B(?=(\d{3})+(?!\d))/g, ',');
+  const fraction = (absolute % 1000000n).toString().padStart(6, '0').replace(/0+$/, '');
+  return escapeHtml(currency || '') + (negative ? '-' : '') + whole
+    + (fraction ? '.' + fraction : '');
 }
 
 function formatDateTime(value) {
@@ -1403,6 +1484,78 @@ async function openReturnPath() {
   await openTask(type, id);
 }
 
+async function refreshPayrollAfterReconnect() {
+  if (!state.currentPayroll) return;
+  const payroll = state.currentPayroll.payroll;
+  const key = payrollKey();
+  const priorMode = state.payrollMode;
+  const priorAttemptId = draftAttemptId();
+  const generation = state.requestGeneration + 1;
+  state.requestGeneration = generation;
+  clearProofUploadState();
+  state.authorityStale = true;
+  state.paymentBusy = true;
+  state.message = '已恢复网络，正在刷新最新工资状态';
+  stopClaimTimer();
+  renderPayrollDetail();
+  try {
+    const [detail, tasks, payrollList] = await Promise.all([
+      api(payrollPath(payroll.store_id, payroll.payroll_id)),
+      api('/api/manage/tasks?store_id=' + encodeURIComponent(payroll.store_id) + '&type=payroll'),
+      api('/api/manage/stores/' + encodeURIComponent(payroll.store_id) + '/payroll')
+    ]);
+    if (!payrollRequestIsCurrent(generation, key)) return;
+    if (!detail.payroll || detail.payroll.store_id + ':' + detail.payroll.payroll_id !== key) {
+      throw new Error('invalid_payroll_detail');
+    }
+    const listItem = (payrollList.payroll || []).find((item) => item.payroll_id === payroll.payroll_id);
+    const taskItem = (tasks.tasks || []).find((item) => (
+      item.task_type === 'payroll' && item.task_id === payroll.payroll_id
+    ));
+    if (
+      !listItem
+      || listItem.status !== detail.payroll.status
+      || claimOwner(listItem.claim) !== claimOwner(detail.payroll.claim)
+    ) {
+      throw new Error('inconsistent_payroll_authority');
+    }
+    if (taskItem && (
+      taskItem.status !== detail.payroll.status
+      || claimOwner(taskItem.claim) !== claimOwner(detail.payroll.claim)
+    )) {
+      throw new Error('inconsistent_payroll_authority');
+    }
+    adoptPayrollDossier(detail);
+    state.tasks = state.tasks.filter((task) => task.task_type !== 'payroll')
+      .concat(tasks.tasks || []);
+    state.payroll = state.payroll.filter((item) => item.store_id !== payroll.store_id)
+      .concat(payrollList.payroll || []);
+    const sameEditableAttempt = Boolean(
+      priorMode === 'payment'
+      && priorAttemptId
+      && draftAttemptId() === priorAttemptId
+      && payrollCanStart(state.currentPayroll.payroll)
+      && ownsActiveClaim(state.currentPayroll.payroll)
+    );
+    state.payrollMode = sameEditableAttempt ? 'payment' : 'dossier';
+    state.authorityStale = false;
+    state.paymentBusy = false;
+    state.message = '最新工资状态已刷新';
+    renderPayrollDetail();
+  } catch {
+    if (!payrollRequestIsCurrent(generation, key)) return;
+    state.authorityStale = true;
+    state.paymentBusy = false;
+    state.message = '工资状态刷新失败，当前档案保持只读，请稍后重试';
+    stopClaimTimer();
+    renderPayrollDetail();
+  }
+}
+
+function claimOwner(claim) {
+  return claimIsActive(claim) ? String(claim.claimed_by) : '';
+}
+
 async function boot() {
   resetAuthenticatedState();
   try {
@@ -1425,9 +1578,11 @@ async function boot() {
   }
 }
 
-window.addEventListener('online', () => {
+window.addEventListener('online', async () => {
   state.online = true;
-  if (state.session) renderCurrent();
+  if (!state.session) return;
+  if (state.currentPayroll) await refreshPayrollAfterReconnect();
+  else renderCurrent();
 });
 window.addEventListener('offline', () => {
   state.online = false;
