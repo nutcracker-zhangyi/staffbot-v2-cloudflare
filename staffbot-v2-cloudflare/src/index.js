@@ -14,6 +14,8 @@ export * from './payroll-payments.js';
 export * from './payroll-proofs.js';
 export * from './payroll-settlement.js';
 export * from './security.js';
+export * from './task-claims.js';
+export { isStoreOwner } from './stores.js';
 export {
   attendanceEmployeeStats,
   normalizeAbsenceFineSetting,

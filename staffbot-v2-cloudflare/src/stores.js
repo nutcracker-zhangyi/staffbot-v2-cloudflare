@@ -104,3 +104,11 @@ export async function isStoreAdmin(env, telegramId, storeId) {
   `).bind(storeId, telegramId).first();
   return !!row;
 }
+
+export async function isStoreOwner(env, telegramId, storeId) {
+  const row = await env.DB.prepare(`
+    SELECT 1 FROM store_members
+    WHERE store_id = ? AND telegram_id = ? AND status = 'active' AND role = 'owner'
+  `).bind(storeId, telegramId).first();
+  return !!row;
+}
