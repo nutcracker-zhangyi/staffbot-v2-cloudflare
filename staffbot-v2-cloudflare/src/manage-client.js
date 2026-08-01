@@ -680,6 +680,9 @@ function canSubmitPayment() {
   const totals = paymentTotals();
   if (!totals.valid || totals.difference !== 0n) return false;
   const draft = currentDraft();
+  if (state.proofUploads.some((upload) => (
+    upload.attemptId === draft.attempt_id && upload.status === 'uploading'
+  ))) return false;
   return ['bank', 'usdt', 'cash'].every((method) => {
     const amount = totals.split[method + '_micros'];
     return amount === 0 || (draft.proofs || []).some((proof) => (
@@ -715,12 +718,34 @@ async function startPayrollPayment() {
     if (!payrollRequestIsCurrent(generation, key)) return;
     const dossier = await api(payrollPath(payroll.store_id, payroll.payroll_id));
     if (!payrollRequestIsCurrent(generation, key)) return;
-    adoptPayrollDossier(dossier);
-    const draft = dossier.attempts.find((attempt) => attempt.attempt_id === result.attempt.attempt_id)
-      || result.attempt;
-    if (!dossier.attempts.some((attempt) => attempt.attempt_id === draft.attempt_id)) {
-      dossier.attempts.unshift(draft);
+    const mergedDossier = {
+      ...dossier,
+      attempts: Array.from(dossier.attempts || [], (attempt) => ({
+        ...attempt,
+        proofs: Array.from(attempt.proofs || [])
+      }))
+    };
+    const returnedIndex = mergedDossier.attempts.findIndex(
+      (attempt) => attempt.attempt_id === result.attempt.attempt_id
+    );
+    mergedDossier.attempts = mergedDossier.attempts.map((attempt) => (
+      attempt.attempt_id !== result.attempt.attempt_id && attempt.status === 'draft'
+        ? { ...attempt, status: 'abandoned' }
+        : attempt
+    ));
+    if (returnedIndex >= 0) {
+      mergedDossier.attempts[returnedIndex] = {
+        ...mergedDossier.attempts[returnedIndex],
+        ...result.attempt,
+        proofs: mergedDossier.attempts[returnedIndex].proofs
+      };
+    } else {
+      mergedDossier.attempts.unshift({ ...result.attempt, proofs: result.attempt.proofs || [] });
     }
+    adoptPayrollDossier(mergedDossier);
+    const draft = state.currentPayroll.attempts.find(
+      (attempt) => attempt.attempt_id === result.attempt.attempt_id
+    );
     state.payrollMode = 'payment';
     state.paymentAmounts = {
       bank: microsToInput(draft.bank_micros),
@@ -1509,25 +1534,36 @@ async function refreshPayrollAfterReconnect() {
       throw new Error('invalid_payroll_detail');
     }
     const listItem = (payrollList.payroll || []).find((item) => item.payroll_id === payroll.payroll_id);
-    const taskItem = (tasks.tasks || []).find((item) => (
+    const taskRows = tasks.tasks || [];
+    if (taskRows.some((item) => (
+      item.task_type !== 'payroll' || item.store_id !== payroll.store_id
+    ))) {
+      throw new Error('inconsistent_payroll_task_scope');
+    }
+    const taskItem = taskRows.find((item) => (
       item.task_type === 'payroll' && item.task_id === payroll.payroll_id
     ));
+    const editable = payrollCanStart(detail.payroll);
     if (
       !listItem
+      || listItem.store_id !== detail.payroll.store_id
       || listItem.status !== detail.payroll.status
-      || claimOwner(listItem.claim) !== claimOwner(detail.payroll.claim)
+      || claimSignature(listItem.claim) !== claimSignature(detail.payroll.claim)
     ) {
       throw new Error('inconsistent_payroll_authority');
     }
+    if (editable && !taskItem) throw new Error('missing_editable_payroll_task');
     if (taskItem && (
-      taskItem.status !== detail.payroll.status
-      || claimOwner(taskItem.claim) !== claimOwner(detail.payroll.claim)
+      taskItem.store_id !== detail.payroll.store_id
+      || taskItem.status !== detail.payroll.status
+      || claimSignature(taskItem.claim) !== claimSignature(detail.payroll.claim)
     )) {
       throw new Error('inconsistent_payroll_authority');
     }
     adoptPayrollDossier(detail);
-    state.tasks = state.tasks.filter((task) => task.task_type !== 'payroll')
-      .concat(tasks.tasks || []);
+    state.tasks = state.tasks.filter((task) => !(
+      task.task_type === 'payroll' && task.store_id === payroll.store_id
+    )).concat(taskRows);
     state.payroll = state.payroll.filter((item) => item.store_id !== payroll.store_id)
       .concat(payrollList.payroll || []);
     const sameEditableAttempt = Boolean(
@@ -1552,8 +1588,14 @@ async function refreshPayrollAfterReconnect() {
   }
 }
 
-function claimOwner(claim) {
-  return claimIsActive(claim) ? String(claim.claimed_by) : '';
+function claimSignature(claim) {
+  if (!claim) return '';
+  return [
+    String(claim.claimed_by || ''),
+    String(claim.claimed_at || ''),
+    String(claim.lease_expires_at || ''),
+    claimIsActive(claim) ? 'active' : 'expired'
+  ].join('|');
 }
 
 async function boot() {
