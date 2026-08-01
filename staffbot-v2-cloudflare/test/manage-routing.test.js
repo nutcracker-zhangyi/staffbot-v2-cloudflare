@@ -189,6 +189,20 @@ test('manage client transitions through login, authenticated navigation, and log
           global_admin: true
         }));
       }
+      if (path === '/api/manage/session') {
+        return new Response(JSON.stringify({
+          ok: true,
+          telegram_id: 'ADMIN-1',
+          global_admin: true,
+          csrf_token: 'CSRF-1'
+        }));
+      }
+      if (path === '/api/manage/stores') {
+        return new Response(JSON.stringify({ ok: true, stores: [] }));
+      }
+      if (path === '/api/manage/tasks?') {
+        return new Response(JSON.stringify({ ok: true, tasks: [] }));
+      }
       if (path === '/api/admin/logout') {
         authenticated = false;
         return new Response(JSON.stringify({ ok: true }));
@@ -217,6 +231,7 @@ test('manage client transitions through login, authenticated navigation, and log
   );
 
   await browser.document.getElementById('verify-code').click();
+  await browser.clickButton('更多');
   assert.equal(
     browser.document.getElementById('session-admin').textContent,
     '已登录：ADMIN-1'
@@ -227,10 +242,10 @@ test('manage client transitions through login, authenticated navigation, and log
   assert.ok(navigation);
   assert.deepEqual(
     Array.from(navigation.children, (button) => button.textContent),
-    ['工作台', '待办', '员工', '更多']
+    ['待办', '审批', '工资', '更多']
   );
   assert.equal(
-    navigation.children[0].getAttribute('aria-current'),
+    navigation.children[3].getAttribute('aria-current'),
     'page'
   );
 
@@ -250,6 +265,9 @@ test('manage client transitions through login, authenticated navigation, and log
       body: { telegram_id: 'ADMIN-1', code: '123456' }
     },
     { path: '/api/admin/me', method: 'GET', body: null },
+    { path: '/api/manage/session', method: 'GET', body: null },
+    { path: '/api/manage/stores', method: 'GET', body: null },
+    { path: '/api/manage/tasks?', method: 'GET', body: null },
     { path: '/api/admin/logout', method: 'POST', body: null }
   ]);
 });

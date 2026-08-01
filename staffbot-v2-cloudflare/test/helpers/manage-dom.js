@@ -37,12 +37,17 @@ class BrowserElement {
 
   set innerHTML(value) {
     this._innerHTML = String(value);
+    this.textContent = visibleText(this._innerHTML);
     if (this.id === 'app') this.document.render(this._innerHTML);
   }
 
   async click() {
     if (this.disabled || typeof this.onclick !== 'function') return;
     return this.onclick({ currentTarget: this, target: this });
+  }
+
+  focus() {
+    this.document.activeElement = this;
   }
 }
 
@@ -55,6 +60,8 @@ class BrowserDocument {
     );
     this.elements = new Map([['app', this.app]]);
     this.navigation = null;
+    this.buttons = [];
+    this.activeElement = null;
   }
 
   getElementById(id) {
@@ -74,18 +81,19 @@ class BrowserDocument {
   render(html) {
     this.elements = new Map([['app', this.app]]);
     this.navigation = null;
+    this.buttons = [];
 
     const startTag = /<([a-z][\w-]*)\b([^>]*)>/gi;
     for (const match of html.matchAll(startTag)) {
       const attributes = attributesFrom(match[2]);
       const id = attributes.get('id');
-      if (!id) continue;
       const afterTag = html.slice(match.index + match[0].length);
-      const text = visibleText((afterTag.match(/^([^<]*)/) || ['', ''])[1]);
-      this.elements.set(
-        id,
-        new BrowserElement(this, match[1], attributes, text)
-      );
+      const closePattern = new RegExp('^([\\s\\S]*?)<\\/' + match[1] + '>', 'i');
+      const body = (afterTag.match(closePattern) || afterTag.match(/^([^<]*)/) || ['', ''])[1];
+      const text = visibleText(body);
+      const element = new BrowserElement(this, match[1], attributes, text);
+      if (id) this.elements.set(id, element);
+      if (match[1].toLowerCase() === 'button') this.buttons.push(element);
     }
 
     const navigation = html.match(/<nav\b([^>]*)>([\s\S]*?)<\/nav>/i);
@@ -113,10 +121,19 @@ async function settle() {
   }
 }
 
-export async function executeManageClient(source, { fetch }) {
+export async function executeManageClient(source, {
+  fetch,
+  pathname = '/manage',
+  online = true
+}) {
   const document = new BrowserDocument();
   const serviceWorkerRegistrations = [];
+  const listeners = new Map();
+  const timers = new Map();
+  let timerId = 0;
+  let now = 0;
   const navigator = {
+    onLine: online,
     serviceWorker: {
       async register(path) {
         serviceWorkerRegistrations.push(path);
@@ -124,11 +141,35 @@ export async function executeManageClient(source, { fetch }) {
       }
     }
   };
+  const location = { pathname };
+  const window = {
+    document,
+    navigator,
+    location,
+    addEventListener(type, listener) {
+      const group = listeners.get(type) || [];
+      group.push(listener);
+      listeners.set(type, group);
+    },
+    setInterval(callback, delay) {
+      timerId += 1;
+      timers.set(timerId, { callback, delay, next: now + delay });
+      return timerId;
+    },
+    clearInterval(id) {
+      timers.delete(id);
+    }
+  };
   const browser = vm.createContext({
     console,
     document,
     fetch,
-    navigator
+    location,
+    navigator,
+    window,
+    URLSearchParams,
+    setInterval: window.setInterval,
+    clearInterval: window.clearInterval
   });
 
   vm.runInContext(source, browser, { filename: '/manage/app.js' });
@@ -136,6 +177,45 @@ export async function executeManageClient(source, { fetch }) {
 
   return {
     document,
-    serviceWorkerRegistrations
+    serviceWorkerRegistrations,
+    async clickButton(label) {
+      const button = document.buttons.find((item) => item.textContent === label);
+      if (!button) throw new Error(`button_not_found:${label}`);
+      await button.click();
+      await settle();
+    },
+    navigationLabels() {
+      return document.navigation
+        ? Array.from(document.navigation.children, (button) => button.textContent)
+        : [];
+    },
+    async setOnline(value) {
+      navigator.onLine = value;
+      for (const listener of listeners.get(value ? 'online' : 'offline') || []) {
+        listener();
+      }
+      await settle();
+    },
+    async advanceTimers(milliseconds) {
+      const target = now + milliseconds;
+      while (true) {
+        const due = Array.from(timers.entries())
+          .filter(([, timer]) => timer.next <= target)
+          .sort((left, right) => left[1].next - right[1].next)[0];
+        if (!due) break;
+        const [id, timer] = due;
+        now = timer.next;
+        await timer.callback();
+        if (timers.has(id)) timer.next += timer.delay;
+        await settle();
+      }
+      now = target;
+    },
+    async call(name, ...args) {
+      if (typeof browser[name] !== 'function') throw new Error(`function_not_found:${name}`);
+      const result = await browser[name](...args);
+      await settle();
+      return result;
+    }
   };
 }
