@@ -1,8 +1,15 @@
 import { logEvent, makeId } from './audit.js';
 import { isStoreAdmin } from './stores.js';
+import { requireActiveTaskClaim } from './task-claims.js';
 import { downloadTelegramImage } from './telegram-images.js';
 
 const DEFAULT_MAX_PROOF_BYTES = 10 * 1024 * 1024;
+const MAX_PROOFS_PER_METHOD = 5;
+const PROOF_TYPES = {
+  'image/jpeg': { extension: 'jpg', signature: isJpeg },
+  'image/png': { extension: 'png', signature: isPng },
+  'image/webp': { extension: 'webp', signature: isWebp }
+};
 
 function safeKeyPart(value) {
   return encodeURIComponent(String(value || '').trim());
@@ -20,13 +27,59 @@ export function proofObjectKey(
   if (!/^[a-z0-9]+$/i.test(extension)) {
     throw new TypeError('invalid proof extension');
   }
+  if (!payroll || !payroll.current_payment_attempt_id) {
+    throw new TypeError('payment attempt is required for proof key');
+  }
   return [
     'payroll',
     safeKeyPart(payroll.store_id),
     safeKeyPart(payroll.payroll_id),
+    safeKeyPart(payroll.current_payment_attempt_id),
     method,
     `${safeKeyPart(proofId)}.${extension.toLowerCase()}`
   ].join('/');
+}
+
+function isJpeg(bytes) {
+  return bytes.length >= 3
+    && bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff;
+}
+
+function isPng(bytes) {
+  const signature = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a];
+  return bytes.length >= signature.length
+    && signature.every((value, index) => bytes[index] === value);
+}
+
+function isWebp(bytes) {
+  return bytes.length >= 12
+    && String.fromCharCode(...bytes.slice(0, 4)) === 'RIFF'
+    && String.fromCharCode(...bytes.slice(8, 12)) === 'WEBP';
+}
+
+async function browserImage(file) {
+  if (!file || typeof file.arrayBuffer !== 'function') {
+    throw new TypeError('payroll proof file is required');
+  }
+  const type = PROOF_TYPES[String(file.type || '').toLowerCase()];
+  if (!type) throw new TypeError('payroll proof must be JPEG, PNG, or WebP');
+  if (!Number.isSafeInteger(file.size) || file.size <= 0) {
+    throw new TypeError('payroll proof file is required');
+  }
+  if (file.size > DEFAULT_MAX_PROOF_BYTES) {
+    throw new RangeError('payroll proof is too large');
+  }
+  const bytes = new Uint8Array(await file.arrayBuffer());
+  if (bytes.byteLength !== file.size || !type.signature(bytes)) {
+    throw new TypeError('payroll proof bytes must match its image type');
+  }
+  return {
+    bytes,
+    extension: type.extension,
+    file_name: String(file.name || `proof.${type.extension}`).slice(0, 255),
+    mime_type: String(file.type).toLowerCase(),
+    size_bytes: bytes.byteLength
+  };
 }
 
 function maximumProofBytes(env) {
@@ -210,6 +263,397 @@ export async function storeTelegramProof(
     SELECT * FROM payroll_payment_proofs
     WHERE proof_id = ?
   `).bind(proofId).first();
+}
+
+async function browserAttemptContext(env, adminId, attemptId, now) {
+  const context = await env.DB.prepare(`
+    SELECT
+      a.*,
+      d.store_id,
+      d.telegram_id,
+      d.status AS payroll_status,
+      d.current_payment_attempt_id,
+      d.current_admin_id
+    FROM payroll_payment_attempts a
+    JOIN payroll_disbursements d ON d.payroll_id = a.payroll_id
+    WHERE a.attempt_id = ?
+  `).bind(String(attemptId || '')).first();
+  if (!context) throw new Error('payment attempt not found');
+  if (!await isStoreAdmin(env, adminId, context.store_id)) {
+    throw new Error('payroll proof permission denied');
+  }
+  if (context.status !== 'draft'
+    || !['awaiting_admin_payment', 'disputed'].includes(context.payroll_status)) {
+    throw new Error('payroll proof is not editable');
+  }
+  if (String(context.current_payment_attempt_id || '') !== String(context.attempt_id)
+    || String(context.current_admin_id || '') !== String(adminId)) {
+    throw new Error('payroll payment attempt owner conflict');
+  }
+  await requireActiveTaskClaim(env, adminId, {
+    task_type: 'payroll',
+    task_id: String(context.payroll_id),
+    store_id: String(context.store_id)
+  }, now);
+  return context;
+}
+
+export async function storeBrowserDraftProof(
+  env,
+  adminId,
+  attemptId,
+  method,
+  file,
+  now = new Date()
+) {
+  if (!env.PAYROLL_PROOFS) {
+    throw new Error('payroll proof storage is not configured');
+  }
+  const paymentMethod = String(method || '');
+  if (!['bank', 'usdt', 'cash'].includes(paymentMethod)) {
+    throw new TypeError('unsupported proof method');
+  }
+  const checkedAt = new Date(now);
+  const context = await browserAttemptContext(
+    env,
+    adminId,
+    attemptId,
+    checkedAt
+  );
+  if (Number(context[`${paymentMethod}_micros`]) <= 0) {
+    throw new Error('proof method has no payment');
+  }
+  const existing = await env.DB.prepare(`
+    SELECT COUNT(*) AS proof_count
+    FROM payroll_payment_proofs
+    WHERE attempt_id = ? AND method = ? AND superseded_at IS NULL
+  `).bind(context.attempt_id, paymentMethod).first();
+  if (Number(existing && existing.proof_count) >= MAX_PROOFS_PER_METHOD) {
+    throw new RangeError('payroll proof limit reached');
+  }
+  const image = await browserImage(file);
+  const proofId = makeId('PROOF');
+  const key = proofObjectKey(context, paymentMethod, proofId, image.extension);
+  const stored = await env.PAYROLL_PROOFS.put(key, image.bytes, {
+    onlyIf: { etagDoesNotMatch: '*' },
+    httpMetadata: { contentType: image.mime_type }
+  });
+  if (!stored) throw new Error('payroll proof object already exists');
+
+  const uploadedAt = checkedAt.toISOString();
+  try {
+    const results = await env.DB.batch([
+      env.DB.prepare(`
+        INSERT INTO payroll_payment_proofs (
+          proof_id, payroll_id, attempt_id, method, object_key,
+          telegram_file_id, telegram_delivered_at, file_name, mime_type,
+          size_bytes, sort_order, uploaded_by, uploaded_at
+        )
+        SELECT
+          ?, d.payroll_id, a.attempt_id, ?, ?, NULL, NULL, ?, ?, ?,
+          COALESCE((
+            SELECT MAX(sort_order) + 1
+            FROM payroll_payment_proofs
+            WHERE attempt_id = a.attempt_id AND method = ?
+          ), 1),
+          ?, ?
+        FROM payroll_payment_attempts a
+        JOIN payroll_disbursements d
+          ON d.payroll_id = a.payroll_id
+         AND d.current_payment_attempt_id = a.attempt_id
+        JOIN admin_task_claims c
+          ON c.task_type = 'payroll'
+         AND c.task_id = d.payroll_id
+         AND c.store_id = d.store_id
+        WHERE a.attempt_id = ?
+          AND d.payroll_id = ?
+          AND d.store_id = ?
+          AND a.status = 'draft'
+          AND d.status IN ('awaiting_admin_payment', 'disputed')
+          AND d.current_admin_id = ?
+          AND c.claimed_by = ?
+          AND c.lease_expires_at > ?
+          AND a.${paymentMethod}_micros > 0
+          AND (
+            SELECT COUNT(*) FROM payroll_payment_proofs existing
+            WHERE existing.attempt_id = a.attempt_id
+              AND existing.method = ?
+              AND existing.superseded_at IS NULL
+          ) < ?
+      `).bind(
+        proofId,
+        paymentMethod,
+        key,
+        image.file_name,
+        image.mime_type,
+        image.size_bytes,
+        paymentMethod,
+        String(adminId),
+        uploadedAt,
+        context.attempt_id,
+        context.payroll_id,
+        context.store_id,
+        String(adminId),
+        String(adminId),
+        uploadedAt,
+        paymentMethod,
+        MAX_PROOFS_PER_METHOD
+      ),
+      env.DB.prepare(`
+        INSERT INTO admin_audit_logs (
+          store_id, admin_id, action, target_id, details_json, created_at
+        )
+        SELECT ?, ?, 'upload_payroll_draft_proof', ?,
+          json_object(
+            'attempt_id', attempt_id,
+            'proof_id', proof_id,
+            'method', method,
+            'size_bytes', size_bytes
+          ), ?
+        FROM payroll_payment_proofs
+        WHERE proof_id = ?
+      `).bind(
+        context.store_id,
+        String(adminId),
+        context.payroll_id,
+        uploadedAt,
+        proofId
+      )
+    ]);
+    if (Number(results[0] && results[0].meta.changes) !== 1
+      || Number(results[1] && results[1].meta.changes) !== 1) {
+      throw new Error('payroll proof upload conflict');
+    }
+  } catch (error) {
+    try {
+      await env.PAYROLL_PROOFS.delete(key);
+    } catch (cleanupError) {
+      await reportProofCleanupFailure(env, {
+        store_id: context.store_id,
+        object_key: key,
+        proof_id: proofId,
+        payroll_id: context.payroll_id,
+        attempt_id: context.attempt_id
+      }, cleanupError);
+    }
+    throw error;
+  }
+  return env.DB.prepare(`
+    SELECT * FROM payroll_payment_proofs WHERE proof_id = ?
+  `).bind(proofId).first();
+}
+
+async function reportProofOrphan(env, context, error) {
+  const details = {
+    store_id: context.store_id,
+    object_key: context.object_key,
+    proof_id: context.proof_id,
+    payroll_id: context.payroll_id,
+    attempt_id: context.attempt_id,
+    cleanup_error: error && error.message ? error.message : String(error)
+  };
+  try {
+    await logEvent(env, 'error', 'payroll_proof_r2_orphaned', details);
+  } catch (loggingError) {
+    try {
+      await logEvent(env, 'error', 'payroll_proof_cleanup_failed', {
+        ...details,
+        logging_error: loggingError && loggingError.message
+          ? loggingError.message
+          : String(loggingError)
+      });
+    } catch (fallbackError) {
+      console.error('payroll proof orphan logging failed', {
+        ...details,
+        logging_error: loggingError && loggingError.message
+          ? loggingError.message
+          : String(loggingError),
+        fallback_error: fallbackError && fallbackError.message
+          ? fallbackError.message
+          : String(fallbackError)
+      });
+    }
+  }
+}
+
+export async function deleteBrowserDraftProof(
+  env,
+  adminId,
+  proofId,
+  now = new Date()
+) {
+  const proof = await env.DB.prepare(`
+    SELECT
+      p.*,
+      a.status AS attempt_status,
+      d.store_id,
+      d.status AS payroll_status,
+      d.current_payment_attempt_id,
+      d.current_admin_id
+    FROM payroll_payment_proofs p
+    JOIN payroll_payment_attempts a ON a.attempt_id = p.attempt_id
+    JOIN payroll_disbursements d ON d.payroll_id = a.payroll_id
+    WHERE p.proof_id = ?
+  `).bind(String(proofId || '')).first();
+  if (!proof) throw new Error('payroll proof not found');
+  if (!await isStoreAdmin(env, adminId, proof.store_id)) {
+    throw new Error('payroll proof permission denied');
+  }
+  if (proof.attempt_status !== 'draft') {
+    throw new Error('payroll proof is not editable');
+  }
+  if (!env.PAYROLL_PROOFS) {
+    throw new Error('payroll proof storage is not configured');
+  }
+  const checkedAt = new Date(now);
+  await requireActiveTaskClaim(env, adminId, {
+    task_type: 'payroll',
+    task_id: String(proof.payroll_id),
+    store_id: String(proof.store_id)
+  }, checkedAt);
+  const nowIso = checkedAt.toISOString();
+  const results = await env.DB.batch([
+    env.DB.prepare(`
+      DELETE FROM payroll_payment_proofs
+      WHERE proof_id = ? AND attempt_id = ?
+        AND EXISTS (
+          SELECT 1
+          FROM payroll_payment_attempts a
+          JOIN payroll_disbursements d
+            ON d.payroll_id = a.payroll_id
+           AND d.current_payment_attempt_id = a.attempt_id
+          JOIN admin_task_claims c
+            ON c.task_type = 'payroll'
+           AND c.task_id = d.payroll_id
+           AND c.store_id = d.store_id
+          WHERE a.attempt_id = payroll_payment_proofs.attempt_id
+            AND a.status = 'draft'
+            AND d.status IN ('awaiting_admin_payment', 'disputed')
+            AND d.current_admin_id = ?
+            AND c.claimed_by = ?
+            AND c.lease_expires_at > ?
+        )
+    `).bind(
+      proof.proof_id,
+      proof.attempt_id,
+      String(adminId),
+      String(adminId),
+      nowIso
+    ),
+    env.DB.prepare(`
+      INSERT INTO admin_audit_logs (
+        store_id, admin_id, action, target_id, details_json, created_at
+      )
+      SELECT ?, ?, 'delete_payroll_draft_proof', ?,
+        json_object(
+          'attempt_id', ?, 'proof_id', ?, 'method', ?,
+          'object_key', ?
+        ), ?
+      WHERE changes() = 1
+    `).bind(
+      proof.store_id,
+      String(adminId),
+      proof.payroll_id,
+      proof.attempt_id,
+      proof.proof_id,
+      proof.method,
+      proof.object_key,
+      nowIso
+    )
+  ]);
+  if (Number(results[0] && results[0].meta.changes) !== 1
+    || Number(results[1] && results[1].meta.changes) !== 1) {
+    throw new Error('task_claim_required');
+  }
+  try {
+    await env.PAYROLL_PROOFS.delete(proof.object_key);
+  } catch (error) {
+    await reportProofOrphan(env, proof, error);
+  }
+}
+
+export async function cleanupAbandonedDraftProofs(env, now = new Date()) {
+  const checkedAt = new Date(now);
+  const cutoff = new Date(checkedAt.getTime() - 7 * 24 * 60 * 60 * 1000)
+    .toISOString();
+  const rows = await env.DB.prepare(`
+    SELECT p.*, d.store_id
+    FROM payroll_payment_proofs p
+    JOIN payroll_payment_attempts a ON a.attempt_id = p.attempt_id
+    JOIN payroll_disbursements d ON d.payroll_id = a.payroll_id
+    WHERE a.status IN ('draft', 'abandoned')
+      AND a.updated_at <= ?
+    ORDER BY p.uploaded_at, p.proof_id
+  `).bind(cutoff).all();
+  let deleted = 0;
+  let failed = 0;
+  for (const proof of rows.results || []) {
+    if (!env.PAYROLL_PROOFS) {
+      failed += 1;
+      await logEvent(env, 'error', 'payroll_proof_cleanup_failed', {
+        store_id: proof.store_id,
+        proof_id: proof.proof_id,
+        payroll_id: proof.payroll_id,
+        attempt_id: proof.attempt_id,
+        cleanup_error: 'payroll proof storage is not configured'
+      });
+      continue;
+    }
+    try {
+      const results = await env.DB.batch([
+        env.DB.prepare(`
+          DELETE FROM payroll_payment_proofs
+          WHERE proof_id = ? AND attempt_id = ?
+            AND EXISTS (
+              SELECT 1 FROM payroll_payment_attempts a
+              WHERE a.attempt_id = payroll_payment_proofs.attempt_id
+                AND a.status IN ('draft', 'abandoned')
+                AND a.updated_at <= ?
+            )
+        `).bind(proof.proof_id, proof.attempt_id, cutoff),
+        env.DB.prepare(`
+          INSERT INTO admin_audit_logs (
+            store_id, admin_id, action, target_id, details_json, created_at
+          )
+          SELECT ?, 'system', 'cleanup_payroll_draft_proof', ?,
+            json_object(
+              'attempt_id', ?, 'proof_id', ?, 'method', ?,
+              'object_key', ?, 'reason', 'draft_older_than_7_days'
+            ), ?
+          WHERE changes() = 1
+        `).bind(
+          proof.store_id,
+          proof.payroll_id,
+          proof.attempt_id,
+          proof.proof_id,
+          proof.method,
+          proof.object_key,
+          checkedAt.toISOString()
+        )
+      ]);
+      if (Number(results[0] && results[0].meta.changes) !== 1
+        || Number(results[1] && results[1].meta.changes) !== 1) {
+        continue;
+      }
+      try {
+        await env.PAYROLL_PROOFS.delete(proof.object_key);
+        deleted += 1;
+      } catch (error) {
+        failed += 1;
+        await reportProofOrphan(env, proof, error);
+      }
+    } catch (error) {
+      failed += 1;
+      await logEvent(env, 'error', 'payroll_proof_cleanup_failed', {
+        store_id: proof.store_id,
+        proof_id: proof.proof_id,
+        payroll_id: proof.payroll_id,
+        attempt_id: proof.attempt_id,
+        cleanup_error: error && error.message ? error.message : String(error)
+      });
+    }
+  }
+  return { deleted, failed };
 }
 
 export async function proofCompletion(env, payrollId) {
@@ -442,9 +886,13 @@ export async function readPayrollProof(env, actor, proofId) {
   const proof = await env.DB.prepare(`
     SELECT p.*, d.store_id, d.telegram_id
     FROM payroll_payment_proofs p
+    LEFT JOIN payroll_payment_attempts a
+      ON a.attempt_id = p.attempt_id
+     AND a.payroll_id = p.payroll_id
     JOIN payroll_disbursements d
-      ON d.payroll_id = p.payroll_id
+      ON d.payroll_id = COALESCE(a.payroll_id, p.payroll_id)
     WHERE p.proof_id = ?
+      AND (p.attempt_id IS NULL OR a.attempt_id IS NOT NULL)
   `).bind(proofId).first();
   if (!proof) return new Response('not_found', { status: 404 });
   const telegramId = String(actor && actor.telegram_id || '');

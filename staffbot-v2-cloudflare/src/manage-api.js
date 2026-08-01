@@ -28,6 +28,11 @@ import {
   saveAttemptSplit
 } from './payroll-payment-attempts.js';
 import { readPayrollPaymentQr } from './payroll-payment-qr.js';
+import {
+  deleteBrowserDraftProof,
+  readPayrollProof,
+  storeBrowserDraftProof
+} from './payroll-proofs.js';
 import { isGlobalAdmin } from './security.js';
 import { isStoreAdmin } from './stores.js';
 import {
@@ -170,6 +175,18 @@ async function handleManagePayroll(request, env, session, parts) {
       payroll: await listManagePayroll(env, session.telegram_id, storeId)
     });
   }
+  if (
+    request.method === 'GET'
+    && parts.length === 7
+    && parts[5] === 'proofs'
+    && parts[6]
+  ) {
+    return readPayrollProof(
+      env,
+      { telegram_id: session.telegram_id, store_id: storeId },
+      parts[6]
+    );
+  }
 
   const payrollId = parts[5] || '';
   if (!payrollId) return json({ ok: false, error: 'not_found' }, 404);
@@ -242,11 +259,93 @@ async function handleManagePayroll(request, env, session, parts) {
       return managePayrollError(error);
     }
   }
+  if (
+    request.method === 'POST'
+    && parts.length === 9
+    && parts[6] === 'attempts'
+    && parts[8] === 'proofs'
+  ) {
+    const attemptId = parts[7];
+    if (!dossier.attempts.some((attempt) => attempt.attempt_id === attemptId)) {
+      return json({ ok: false, error: 'not_found' }, 404);
+    }
+    try {
+      const form = await request.formData();
+      const proof = await storeBrowserDraftProof(
+        env,
+        session.telegram_id,
+        attemptId,
+        form.get('method'),
+        form.get('proof'),
+        new Date()
+      );
+      return json({ ok: true, proof: manageProof(proof) });
+    } catch (error) {
+      return managePayrollError(error);
+    }
+  }
+  if (
+    request.method === 'DELETE'
+    && parts.length === 10
+    && parts[6] === 'attempts'
+    && parts[8] === 'proofs'
+    && parts[9]
+  ) {
+    const attemptId = parts[7];
+    const attempt = dossier.attempts.find(
+      (item) => item.attempt_id === attemptId
+    );
+    if (!attempt || !attempt.proofs.some(
+      (proof) => proof.proof_id === parts[9]
+    )) {
+      return json({ ok: false, error: 'not_found' }, 404);
+    }
+    try {
+      await deleteBrowserDraftProof(
+        env,
+        session.telegram_id,
+        parts[9],
+        new Date()
+      );
+      return json({ ok: true });
+    } catch (error) {
+      return managePayrollError(error);
+    }
+  }
   return json({ ok: false, error: 'not_found' }, 404);
+}
+
+function manageProof(proof) {
+  return {
+    proof_id: String(proof.proof_id),
+    attempt_id: String(proof.attempt_id),
+    method: String(proof.method),
+    file_name: proof.file_name ? String(proof.file_name) : null,
+    mime_type: String(proof.mime_type),
+    size_bytes: Number(proof.size_bytes),
+    sort_order: Number(proof.sort_order),
+    uploaded_by: String(proof.uploaded_by),
+    uploaded_at: String(proof.uploaded_at)
+  };
 }
 
 function managePayrollError(error) {
   const message = String(error && error.message || '');
+  if (message.includes('storage is not configured')) {
+    return json({ ok: false, error: 'storage_not_configured' }, 503);
+  }
+  if (message === 'proof method has no payment') {
+    return json({ ok: false, error: 'proof_method_not_payable' }, 409);
+  }
+  if (error instanceof RangeError && message.includes('too large')) {
+    return json({ ok: false, error: 'proof_too_large' }, 413);
+  }
+  if (error instanceof RangeError && message.includes('proof limit')) {
+    return json({ ok: false, error: 'proof_limit_reached' }, 409);
+  }
+  if (error instanceof TypeError && message.includes('proof')) {
+    return json({ ok: false, error: 'invalid_proof' }, 400);
+  }
   if (error instanceof RangeError || error instanceof TypeError) {
     return json({ ok: false, error: 'invalid_payroll_split' }, 400);
   }
@@ -256,7 +355,9 @@ function managePayrollError(error) {
   if (message.includes('permission') || message === 'forbidden') {
     return json({ ok: false, error: 'forbidden' }, 403);
   }
-  if (message === 'task_claim_required' || message.includes('conflict')) {
+  if (message === 'task_claim_required'
+    || message.includes('conflict')
+    || message.includes('not editable')) {
     return json({ ok: false, error: message }, 409);
   }
   if (message.includes('not accepting')) {

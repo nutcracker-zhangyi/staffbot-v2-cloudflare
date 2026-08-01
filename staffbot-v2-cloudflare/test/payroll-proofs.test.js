@@ -127,13 +127,14 @@ test('builds a private normalized proof object key', () => {
     proofObjectKey(
       {
         store_id: 'STORE-1',
-        payroll_id: 'PAYROLL-1'
+        payroll_id: 'PAYROLL-1',
+        current_payment_attempt_id: 'ATTEMPT-CURRENT'
       },
       'bank',
       'PROOF-1',
       'jpg'
     ),
-    'payroll/STORE-1/PAYROLL-1/bank/PROOF-1.jpg'
+    'payroll/STORE-1/PAYROLL-1/ATTEMPT-CURRENT/bank/PROOF-1.jpg'
   );
 });
 
@@ -813,7 +814,7 @@ test('Telegram upload persists exact cleanup context without replacing the datab
     assert.match(payload.proof_id, /^PROOF-/);
     assert.equal(
       payload.object_key,
-      `payroll/STORE-1/PAYROLL-1/bank/${payload.proof_id}.jpg`
+      `payroll/STORE-1/PAYROLL-1/ATTEMPT-CURRENT/bank/${payload.proof_id}.jpg`
     );
     assert.equal(payload.cleanup_error, 'R2 cleanup failed');
     assert.equal(fixture.database.prepare(`
@@ -885,7 +886,7 @@ test('Telegram upload logs structured cleanup context when persistence also fail
     assert.match(context.proof_id, /^PROOF-/);
     assert.equal(
       context.object_key,
-      `payroll/STORE-1/PAYROLL-1/bank/${context.proof_id}.jpg`
+      `payroll/STORE-1/PAYROLL-1/ATTEMPT-CURRENT/bank/${context.proof_id}.jpg`
     );
     assert.equal(context.cleanup_error, 'R2 cleanup failed');
     assert.equal(context.logging_error, 'bot log write failed');

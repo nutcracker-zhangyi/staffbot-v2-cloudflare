@@ -229,7 +229,7 @@ export async function loadPayrollDossier(env, adminId, storeId, payrollId) {
       id: Number(row.id),
       admin_id: String(row.admin_id),
       action: String(row.action),
-      details: parseDetails(row.details_json),
+      details: withoutPrivateStorageKeys(parseDetails(row.details_json)),
       created_at: String(row.created_at)
     }))
   };
@@ -430,6 +430,16 @@ function parseDetails(value) {
   } catch {
     return {};
   }
+}
+
+function withoutPrivateStorageKeys(value) {
+  if (Array.isArray(value)) return value.map(withoutPrivateStorageKeys);
+  if (!value || typeof value !== 'object') return value;
+  return Object.fromEntries(
+    Object.entries(value)
+      .filter(([key]) => !['object_key', 'r2_key'].includes(key))
+      .map(([key, item]) => [key, withoutPrivateStorageKeys(item)])
+  );
 }
 
 function taskStatement(env, taskType, placeholders) {
