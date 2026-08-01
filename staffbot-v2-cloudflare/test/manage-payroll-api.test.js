@@ -77,10 +77,24 @@ function setup() {
     );
     INSERT INTO admin_audit_logs (
       store_id, admin_id, action, target_id, details_json, created_at
-    ) VALUES (
-      'STORE-1', 'ADMIN-0', 'save_payroll_payment_split', 'PAYROLL-1',
-      '{"version":1}', '2026-07-16T03:55:00.000Z'
-    );
+    ) VALUES
+      (
+        'STORE-1', 'ADMIN-0', 'save_payroll_payment_split', 'PAYROLL-1',
+        '{"version":1,"lease_token":"raw-top","nested":{"lease_token_hash":"hash-nested","safe":"kept"}}',
+        '2026-07-16T03:55:00.000Z'
+      ),
+      (
+        'STORE-1', 'ADMIN-0',
+        'payroll_notification_delivery_claimed', 'PAYROLL-1',
+        '{"attempt_id":"ATTEMPT-HISTORY","lease_token_hash":"hash-claim"}',
+        '2026-07-16T03:56:00.000Z'
+      ),
+      (
+        'STORE-1', 'ADMIN-0',
+        'payroll_notification_delivery_renewed', 'PAYROLL-1',
+        '{"attempt_id":"ATTEMPT-HISTORY","lease_token_hash":"hash-renew"}',
+        '2026-07-16T03:57:00.000Z'
+      );
   `);
   return {
     database,
@@ -148,7 +162,12 @@ test('payroll list and dossier are store-scoped, masked, and include complete hi
     assert.deepEqual(dossier.history.map((row) => row.action), [
       'save_payroll_payment_split'
     ]);
+    assert.deepEqual(dossier.history[0].details, {
+      version: 1,
+      nested: { safe: 'kept' }
+    });
     assert.doesNotMatch(JSON.stringify(dossier), /secret-r2|12345678|ABCDEFGH/);
+    assert.doesNotMatch(JSON.stringify(dossier.history), /token|hash|raw-top|hash-nested/);
 
     const crossStore = await request(
       fixture.env,

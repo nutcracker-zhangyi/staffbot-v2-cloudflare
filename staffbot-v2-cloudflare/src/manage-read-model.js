@@ -155,6 +155,10 @@ export async function loadPayrollDossier(env, adminId, storeId, payrollId) {
       SELECT id, admin_id, action, details_json, created_at
       FROM admin_audit_logs
       WHERE store_id = ? AND target_id = ?
+        AND action NOT IN (
+          'payroll_notification_delivery_claimed',
+          'payroll_notification_delivery_renewed'
+        )
       ORDER BY id
     `).bind(expectedStoreId, payroll.payroll_id).all()
   ]);
@@ -437,7 +441,8 @@ function withoutPrivateStorageKeys(value) {
   if (!value || typeof value !== 'object') return value;
   return Object.fromEntries(
     Object.entries(value)
-      .filter(([key]) => !['object_key', 'r2_key'].includes(key))
+      .filter(([key]) => !['object_key', 'r2_key'].includes(key)
+        && !/(token|hash)/i.test(key))
       .map(([key, item]) => [key, withoutPrivateStorageKeys(item)])
   );
 }

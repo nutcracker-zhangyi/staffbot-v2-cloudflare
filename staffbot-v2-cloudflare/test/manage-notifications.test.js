@@ -478,6 +478,99 @@ test('a Telegram proof API error is checkpointed only as a safe retryable code',
   }
 });
 
+test('a concurrent payroll state change prevents both failure state and failure audit', async (context) => {
+  const cases = [
+    {
+      name: 'employee confirmation',
+      prepare() {},
+      mutate(database) {
+        database.prepare(`
+          UPDATE payroll_disbursements SET status = 'confirmed'
+          WHERE payroll_id = 'PAYROLL-1'
+        `).run();
+      }
+    },
+    {
+      name: 'current attempt replacement',
+      prepare(database) {
+        database.exec(`
+          INSERT INTO payroll_payment_attempts (
+            attempt_id, payroll_id, version, status,
+            bank_micros, usdt_micros, cash_micros, created_at, updated_at
+          ) VALUES (
+            'ATTEMPT-2', 'PAYROLL-1', 3, 'submitted',
+            100000000, 0, 0,
+            '2026-07-16T04:01:00.000Z', '2026-07-16T04:01:00.000Z'
+          );
+        `);
+      },
+      mutate(database) {
+        database.prepare(`
+          UPDATE payroll_disbursements
+          SET current_payment_attempt_id = 'ATTEMPT-2'
+          WHERE payroll_id = 'PAYROLL-1'
+        `).run();
+      }
+    },
+    {
+      name: 'payment sent by another worker',
+      prepare() {},
+      mutate(database) {
+        database.prepare(`
+          UPDATE payroll_disbursements
+          SET payment_sent_at = '2026-07-16T04:00:01.000Z'
+          WHERE payroll_id = 'PAYROLL-1'
+        `).run();
+      }
+    }
+  ];
+  for (const item of cases) {
+    await context.test(item.name, async () => {
+      const fixtureValue = fixture();
+      fixtureValue.objects.delete('usdt-key');
+      item.prepare(fixtureValue.database);
+      let changed = false;
+      fixtureValue.env.DB = createD1(fixtureValue.database, {
+        beforeBatchStatement(sql) {
+          if (!changed && sql.includes('SET employee_notification_error')) {
+            changed = true;
+            item.mutate(fixtureValue.database);
+          }
+        }
+      });
+      const telegram = installTelegram();
+      try {
+        await assert.rejects(
+          deliverPaymentAttempt(
+            fixtureValue.env,
+            'ADMIN-1',
+            'ATTEMPT-1',
+            new Date('2026-07-16T04:00:00.000Z')
+          ),
+          /delivery lease lost/
+        );
+        const payroll = fixtureValue.database.prepare(`
+          SELECT employee_notification_error FROM payroll_disbursements
+          WHERE payroll_id = 'PAYROLL-1'
+        `).get();
+        assert.equal(payroll.employee_notification_error, null);
+        assert.equal(fixtureValue.database.prepare(`
+          SELECT COUNT(*) AS count FROM admin_audit_logs
+          WHERE action = 'payroll_notification_failed'
+            AND json_extract(details_json, '$.attempt_id') = 'ATTEMPT-1'
+        `).get().count, 0);
+        assert.equal(fixtureValue.database.prepare(`
+          SELECT action FROM admin_audit_logs
+          WHERE target_id = 'PAYROLL-1' ORDER BY id DESC LIMIT 1
+        `).get().action, 'payroll_notification_delivery_claimed');
+      } finally {
+        telegram.restore();
+        fixtureValue.database.close();
+      }
+    });
+  }
+});
+
 test('a persistent delivery lease prevents concurrent proof and summary sends', async () => {
   const fixtureValue = fixture();
   let enteredResolve;
@@ -506,6 +599,69 @@ test('a persistent delivery lease prevents concurrent proof and summary sends', 
     assert.equal(telegram.calls.filter((call) => call.method === 'sendPhoto').length, 2);
     assert.equal(telegram.calls.filter((call) => call.method === 'sendMessage').length, 1);
   } finally {
+    telegram.restore();
+    fixtureValue.database.close();
+  }
+});
+
+test('a near-expiry renewal keeps the same hashed lease fenced', async () => {
+  const fixtureValue = fixture();
+  let enteredResolve;
+  let releaseResolve;
+  const entered = new Promise((resolve) => { enteredResolve = resolve; });
+  const release = new Promise((resolve) => { releaseResolve = resolve; });
+  const telegram = installTelegram({
+    async waitForFirstPhoto() {
+      enteredResolve();
+      await release;
+    }
+  });
+  let clockCalls = 0;
+  const deliveryClock = () => new Date(
+    clockCalls++ === 0
+      ? '2026-07-16T04:00:00.000Z'
+      : '2026-07-16T04:11:00.000Z'
+  );
+  try {
+    const first = deliverPaymentAttempt(
+      fixtureValue.env,
+      'ADMIN-1',
+      'ATTEMPT-1',
+      deliveryClock
+    );
+    await entered;
+    await assert.rejects(
+      deliverPaymentAttempt(
+        fixtureValue.env,
+        'ADMIN-1',
+        'ATTEMPT-1',
+        new Date('2026-07-16T04:16:00.000Z')
+      ),
+      /delivery in progress/
+    );
+    releaseResolve();
+    assert.equal((await first).status, 'sent');
+    const leaseRows = fixtureValue.database.prepare(`
+      SELECT action, details_json FROM admin_audit_logs
+      WHERE target_id = 'PAYROLL-1'
+        AND action IN (
+          'payroll_notification_delivery_claimed',
+          'payroll_notification_delivery_renewed',
+          'payroll_notification_sent'
+        )
+      ORDER BY id
+    `).all();
+    assert.deepEqual(leaseRows.map((row) => row.action), [
+      'payroll_notification_delivery_claimed',
+      'payroll_notification_delivery_renewed',
+      'payroll_notification_sent'
+    ]);
+    const details = leaseRows.map((row) => JSON.parse(row.details_json));
+    assert.equal(new Set(details.map((item) => item.lease_token_hash)).size, 1);
+    assert.equal(details[1].expires_at, '2026-07-16T04:26:00.000Z');
+    assert.ok(details.every((item) => !Object.hasOwn(item, 'lease_token')));
+  } finally {
+    releaseResolve();
     telegram.restore();
     fixtureValue.database.close();
   }
@@ -592,9 +748,12 @@ test('an expired worker is fenced after an in-flight photo while its successor c
     assert.equal(deliveryActions.at(-1), 'payroll_notification_sent');
     assert.equal(deliveryActions.includes('payroll_notification_failed'), false);
     assert.ok(fixtureValue.database.prepare(`
-      SELECT COUNT(DISTINCT json_extract(details_json, '$.lease_token')) AS tokens
+      SELECT COUNT(DISTINCT json_extract(details_json, '$.lease_token_hash')) AS tokens
       FROM admin_audit_logs
-      WHERE action = 'payroll_notification_delivery_claimed'
+      WHERE action IN (
+        'payroll_notification_delivery_claimed',
+        'payroll_notification_delivery_renewed'
+      )
     `).get().tokens === 2);
   } finally {
     globalThis.fetch = originalFetch;
@@ -674,6 +833,97 @@ test('a migrated non-current replay with no delivery state is safe and never ret
       status: 'not_recorded', retryable: false
     });
     assert.equal(telegram.calls.length, 0);
+  } finally {
+    telegram.restore();
+    fixtureValue.database.close();
+  }
+});
+
+test('fully checkpointed old proofs without a sent audit remain not recorded', async () => {
+  const key = 'checkpoint-only-old-key';
+  const fixtureValue = fixture({ idempotencyHash: await hashKey(key) });
+  const telegram = installTelegram();
+  try {
+    fixtureValue.database.exec(`
+      UPDATE payroll_payment_proofs
+      SET telegram_delivered_at = '2026-07-16T04:00:00.000Z';
+      INSERT INTO payroll_payment_attempts (
+        attempt_id, payroll_id, version, status,
+        bank_micros, usdt_micros, cash_micros, created_at, updated_at
+      ) VALUES (
+        'ATTEMPT-2', 'PAYROLL-1', 3, 'draft',
+        100000000, 0, 0,
+        '2026-07-16T05:00:00.000Z', '2026-07-16T05:00:00.000Z'
+      );
+      UPDATE payroll_disbursements
+      SET current_payment_attempt_id = 'ATTEMPT-2',
+          status = 'awaiting_admin_payment', payment_sent_at = NULL
+      WHERE payroll_id = 'PAYROLL-1';
+    `);
+    const response = await manageRequest(
+      fixtureValue.env,
+      '/api/manage/stores/STORE-1/payroll/PAYROLL-1/attempts/ATTEMPT-1/submit',
+      { idempotencyKey: key }
+    );
+    assert.equal(response.status, 200);
+    assert.deepEqual((await response.json()).notification, {
+      status: 'not_recorded', retryable: false
+    });
+    assert.equal(telegram.calls.length, 0);
+  } finally {
+    telegram.restore();
+    fixtureValue.database.close();
+  }
+});
+
+test('fifteen normal proofs use one hashed internal lease claim', async () => {
+  const fixtureValue = fixture();
+  fixtureValue.database.exec(`DELETE FROM payroll_payment_proofs;`);
+  const insert = fixtureValue.database.prepare(`
+    INSERT INTO payroll_payment_proofs (
+      proof_id, payroll_id, attempt_id, method, object_key,
+      telegram_file_id, mime_type, size_bytes, sort_order,
+      uploaded_by, uploaded_at
+    ) VALUES (?, 'PAYROLL-1', 'ATTEMPT-1', 'bank', ?, ?,
+      'image/jpeg', 4, ?, 'ADMIN-1', '2026-07-16T03:30:00.000Z')
+  `);
+  for (let index = 1; index <= 15; index += 1) {
+    insert.run(
+      `PROOF-${index}`,
+      `proof-key-${index}`,
+      `TG-${index}`,
+      index
+    );
+  }
+  const telegram = installTelegram();
+  try {
+    assert.equal((await deliverPaymentAttempt(
+      fixtureValue.env,
+      'ADMIN-1',
+      'ATTEMPT-1',
+      new Date('2026-07-16T04:00:00.000Z')
+    )).status, 'sent');
+    assert.equal(telegram.calls.filter((call) => call.method === 'sendPhoto').length, 15);
+    const deliveryAudits = fixtureValue.database.prepare(`
+      SELECT action, details_json FROM admin_audit_logs
+      WHERE target_id = 'PAYROLL-1'
+        AND action IN (
+          'payroll_notification_delivery_claimed',
+          'payroll_notification_delivery_renewed',
+          'payroll_notification_failed',
+          'payroll_notification_sent'
+        )
+      ORDER BY id
+    `).all();
+    assert.equal(deliveryAudits.length, 2);
+    assert.deepEqual(deliveryAudits.map((row) => row.action), [
+      'payroll_notification_delivery_claimed',
+      'payroll_notification_sent'
+    ]);
+    for (const row of deliveryAudits) {
+      assert.doesNotMatch(row.details_json, /"lease_token"\s*:/);
+      assert.match(JSON.parse(row.details_json).lease_token_hash, /^[a-f0-9]{64}$/);
+    }
   } finally {
     telegram.restore();
     fixtureValue.database.close();

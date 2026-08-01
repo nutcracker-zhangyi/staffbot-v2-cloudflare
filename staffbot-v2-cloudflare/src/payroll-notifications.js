@@ -372,9 +372,11 @@ export async function sendPayrollForEmployeeConfirmation(
 }
 
 const PAYMENT_DELIVERY_LEASE_MS = 15 * 60 * 1000;
+const PAYMENT_DELIVERY_RENEW_WINDOW_MS = 5 * 60 * 1000;
 const MAX_DELIVERY_PROOF_BYTES = 10 * 1024 * 1024;
 const DELIVERY_ACTION_SQL = `(
   'payroll_notification_delivery_claimed',
+  'payroll_notification_delivery_renewed',
   'payroll_notification_failed',
   'payroll_notification_sent'
 )`;
@@ -402,6 +404,16 @@ function deliveryLeaseExpiry(now) {
   return new Date(now.getTime() + PAYMENT_DELIVERY_LEASE_MS).toISOString();
 }
 
+async function deliveryLeaseTokenHash(token) {
+  const digest = await crypto.subtle.digest(
+    'SHA-256',
+    new TextEncoder().encode(token)
+  );
+  return Array.from(new Uint8Array(digest))
+    .map((byte) => byte.toString(16).padStart(2, '0'))
+    .join('');
+}
+
 function activeDeliveryLeaseSql() {
   return `EXISTS (
     SELECT 1 FROM admin_audit_logs lease
@@ -413,8 +425,11 @@ function activeDeliveryLeaseSql() {
       ORDER BY state.id DESC
       LIMIT 1
     )
-      AND lease.action = 'payroll_notification_delivery_claimed'
-      AND json_extract(lease.details_json, '$.lease_token') = ?
+      AND lease.action IN (
+        'payroll_notification_delivery_claimed',
+        'payroll_notification_delivery_renewed'
+      )
+      AND json_extract(lease.details_json, '$.lease_token_hash') = ?
       AND json_extract(lease.details_json, '$.expires_at') > ?
   )`;
 }
@@ -424,7 +439,7 @@ function activeDeliveryLeaseBinds(payroll, lease, checkedAt) {
     payroll.store_id,
     payroll.payroll_id,
     payroll.attempt_id,
-    lease.token,
+    lease.token_hash,
     checkedAt.toISOString()
   ];
 }
@@ -467,6 +482,7 @@ async function claimPaymentDelivery(env, adminId, payroll, now) {
     now.getTime() - PAYMENT_DELIVERY_LEASE_MS
   ).toISOString();
   const token = crypto.randomUUID();
+  const tokenHash = await deliveryLeaseTokenHash(token);
   const expiresAt = deliveryLeaseExpiry(now);
   const result = await env.DB.prepare(`
     INSERT INTO admin_audit_logs (
@@ -475,7 +491,7 @@ async function claimPaymentDelivery(env, adminId, payroll, now) {
     SELECT ?, ?, 'payroll_notification_delivery_claimed', ?,
       json_object(
         'attempt_id', ?, 'version', ?,
-        'lease_token', ?, 'expires_at', ?
+        'lease_token_hash', ?, 'expires_at', ?
       ), ?
     WHERE EXISTS (
       SELECT 1
@@ -488,7 +504,10 @@ async function claimPaymentDelivery(env, adminId, payroll, now) {
     )
       AND COALESCE((
         SELECT CASE
-          WHEN action = 'payroll_notification_delivery_claimed'
+          WHEN action IN (
+            'payroll_notification_delivery_claimed',
+            'payroll_notification_delivery_renewed'
+          )
             AND (
               (
                 json_extract(details_json, '$.expires_at') IS NOT NULL
@@ -516,7 +535,7 @@ async function claimPaymentDelivery(env, adminId, payroll, now) {
     payroll.payroll_id,
     payroll.attempt_id,
     Number(payroll.version),
-    token,
+    tokenHash,
     expiresAt,
     claimedAt,
     payroll.attempt_id,
@@ -527,7 +546,7 @@ async function claimPaymentDelivery(env, adminId, payroll, now) {
     payroll.attempt_id
   ).run();
   return Number(result && result.meta && result.meta.changes) === 1
-    ? { token, expires_at: expiresAt }
+    ? { token_hash: tokenHash, expires_at: expiresAt }
     : null;
 }
 
@@ -553,16 +572,18 @@ async function requirePaymentDeliveryLease(env, payroll, lease, now) {
 
 async function renewPaymentDelivery(env, adminId, payroll, lease, now) {
   await requirePaymentDeliveryLease(env, payroll, lease, now);
+  const remaining = new Date(lease.expires_at).getTime() - now.getTime();
+  if (remaining > PAYMENT_DELIVERY_RENEW_WINDOW_MS) return;
   const expiresAt = deliveryLeaseExpiry(now);
   const guard = activeDeliveryLeaseSql();
   const result = await env.DB.prepare(`
     INSERT INTO admin_audit_logs (
       store_id, admin_id, action, target_id, details_json, created_at
     )
-    SELECT ?, ?, 'payroll_notification_delivery_claimed', ?,
+    SELECT ?, ?, 'payroll_notification_delivery_renewed', ?,
       json_object(
         'attempt_id', ?, 'version', ?,
-        'lease_token', ?, 'expires_at', ?
+        'lease_token_hash', ?, 'expires_at', ?
       ), ?
     WHERE ${guard}
       AND EXISTS (
@@ -579,7 +600,7 @@ async function renewPaymentDelivery(env, adminId, payroll, lease, now) {
     payroll.payroll_id,
     payroll.attempt_id,
     Number(payroll.version),
-    lease.token,
+    lease.token_hash,
     expiresAt,
     now.toISOString(),
     ...activeDeliveryLeaseBinds(payroll, lease, now),
@@ -741,6 +762,10 @@ async function recordPaymentDeliveryFailure(
   const safeCode = String(code || 'delivery_failed').slice(0, 80);
   const safeProofId = proofId ? String(proofId).slice(0, 100) : null;
   const nowIso = now.toISOString();
+  const safeError = JSON.stringify({
+    code: safeCode,
+    proof_id: safeProofId
+  });
   const guard = activeDeliveryLeaseSql();
   const results = await env.DB.batch([
     env.DB.prepare(`
@@ -751,7 +776,7 @@ async function recordPaymentDeliveryFailure(
         AND payment_sent_at IS NULL
         AND ${guard}
     `).bind(
-      JSON.stringify({ code: safeCode, proof_id: safeProofId }),
+      safeError,
       nowIso,
       payroll.payroll_id,
       payroll.attempt_id,
@@ -764,20 +789,50 @@ async function recordPaymentDeliveryFailure(
       SELECT ?, ?, 'payroll_notification_failed', ?,
         json_object(
           'attempt_id', ?, 'version', ?,
-          'lease_token', ?, 'code', ?, 'proof_id', ?
+          'lease_token_hash', ?, 'code', ?, 'proof_id', ?
         ), ?
       WHERE ${guard}
+        AND EXISTS (
+          SELECT 1
+          FROM payroll_disbursements d
+          JOIN payroll_payment_attempts a
+            ON a.attempt_id = d.current_payment_attempt_id
+           AND a.payroll_id = d.payroll_id
+          WHERE d.payroll_id = ? AND d.store_id = ?
+            AND d.current_payment_attempt_id = ?
+            AND d.status = 'awaiting_employee_confirmation'
+            AND d.payment_sent_at IS NULL
+            AND d.employee_notification_error = ?
+            AND d.updated_at = ?
+            AND a.status = 'submitted'
+        )
+        AND NOT EXISTS (
+          SELECT 1 FROM admin_audit_logs existing
+          WHERE existing.store_id = ? AND existing.target_id = ?
+            AND existing.action = 'payroll_notification_failed'
+            AND json_extract(existing.details_json, '$.attempt_id') = ?
+            AND json_extract(existing.details_json, '$.lease_token_hash') = ?
+        )
     `).bind(
       payroll.store_id,
       String(adminId),
       payroll.payroll_id,
       payroll.attempt_id,
       Number(payroll.version),
-      lease.token,
+      lease.token_hash,
       safeCode,
       safeProofId,
       nowIso,
-      ...activeDeliveryLeaseBinds(payroll, lease, now)
+      ...activeDeliveryLeaseBinds(payroll, lease, now),
+      payroll.payroll_id,
+      payroll.store_id,
+      payroll.attempt_id,
+      safeError,
+      nowIso,
+      payroll.store_id,
+      payroll.payroll_id,
+      payroll.attempt_id,
+      lease.token_hash
     )
   ]);
   return Number(results[0] && results[0].meta.changes) === 1
@@ -818,28 +873,11 @@ export async function paymentAttemptDeliveryResult(env, adminId, attemptId) {
     context.payroll_id,
     context.attempt_id
   ).first();
-  let status = state && state.action === 'payroll_notification_sent'
+  const status = state && state.action === 'payroll_notification_sent'
     ? 'sent'
     : state && state.action === 'payroll_notification_failed'
       ? 'failed'
-      : '';
-  if (!status) {
-    const proofs = await env.DB.prepare(`
-      SELECT
-        COUNT(*) AS total,
-        SUM(CASE WHEN telegram_delivered_at IS NOT NULL THEN 1 ELSE 0 END)
-          AS delivered
-      FROM payroll_payment_proofs
-      WHERE attempt_id = ? AND superseded_at IS NULL
-    `).bind(context.attempt_id).first();
-    const total = Number(proofs && proofs.total || 0);
-    const delivered = Number(proofs && proofs.delivered || 0);
-    status = total > 0 && delivered === total
-      ? 'sent'
-      : delivered > 0
-        ? 'failed'
-        : 'not_recorded';
-  }
+      : 'not_recorded';
   return { current, status, retryable: current && status === 'failed' };
 }
 
@@ -1065,7 +1103,7 @@ export async function deliverPaymentAttempt(
         )
         SELECT ?, ?, 'payroll_notification_sent', ?,
           json_object(
-            'attempt_id', ?, 'version', ?, 'lease_token', ?
+            'attempt_id', ?, 'version', ?, 'lease_token_hash', ?
           ), ?
         WHERE ${guard}
           AND EXISTS (
@@ -1079,7 +1117,7 @@ export async function deliverPaymentAttempt(
         payroll.payroll_id,
         payroll.attempt_id,
         Number(payroll.version),
-        lease.token,
+        lease.token_hash,
         sentAtIso,
         ...activeDeliveryLeaseBinds(payroll, lease, sentAt),
         payroll.payroll_id,
