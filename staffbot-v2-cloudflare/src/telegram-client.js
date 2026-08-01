@@ -14,6 +14,53 @@ export async function sendPhoto(env, chatId, photo, caption) {
   return telegram(env, 'sendPhoto', payload);
 }
 
+export async function sendPhotoBytes(
+  env,
+  chatId,
+  bytes,
+  filename,
+  mimeType,
+  caption
+) {
+  const recipient = { chat_id: chatId };
+  if (!isTelegramRecipientAllowed(env, recipient)) {
+    await logEvent(env, 'warn', 'staging_telegram_recipient_blocked', {
+      telegram_id: String(chatId),
+      method: 'sendPhoto'
+    });
+    return {
+      ok: false,
+      error_code: 403,
+      description: 'staging_recipient_blocked'
+    };
+  }
+
+  const body = bytes instanceof Uint8Array
+    ? bytes
+    : new Uint8Array(bytes);
+  const form = new FormData();
+  form.set('chat_id', String(chatId));
+  if (caption) form.set('caption', String(caption));
+  form.set(
+    'photo',
+    new File([body], String(filename || 'proof'), {
+      type: String(mimeType || 'application/octet-stream')
+    })
+  );
+  const response = await fetch(
+    `https://api.telegram.org/bot${env.BOT_TOKEN}/sendPhoto`,
+    { method: 'POST', body: form }
+  );
+  const result = await response.json();
+  if (!result.ok) {
+    await logEvent(env, 'error', 'telegram_api_error', {
+      method: 'sendPhoto',
+      error_code: Number(result.error_code) || 0
+    });
+  }
+  return result;
+}
+
 export async function answerCallback(env, callbackQueryId, text = '', showAlert = false) {
   return telegram(env, 'answerCallbackQuery', {
     callback_query_id: callbackQueryId,

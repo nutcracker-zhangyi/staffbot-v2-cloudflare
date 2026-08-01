@@ -726,8 +726,11 @@ export async function saveAttemptSplit(
 }
 
 async function idempotencyHash(value) {
-  const key = String(value || '').trim();
-  if (!key) throw new TypeError('idempotency key is required');
+  const rawKey = String(value || '');
+  const key = rawKey.trim();
+  if (!key || rawKey.length > 256) {
+    throw new TypeError('idempotency key is invalid');
+  }
   const bytes = new TextEncoder().encode(key);
   const digest = await crypto.subtle.digest('SHA-256', bytes);
   return Array.from(new Uint8Array(digest))

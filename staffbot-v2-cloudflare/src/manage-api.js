@@ -25,8 +25,10 @@ import {
 } from './manage-read-model.js';
 import {
   createOrResumeDraftAttempt,
-  saveAttemptSplit
+  saveAttemptSplit,
+  submitPaymentAttempt
 } from './payroll-payment-attempts.js';
+import { deliverPaymentAttempt } from './payroll-notifications.js';
 import { readPayrollPaymentQr } from './payroll-payment-qr.js';
 import {
   deleteBrowserDraftProof,
@@ -336,6 +338,94 @@ async function handleManagePayroll(request, env, session, parts) {
     request.method === 'POST'
     && parts.length === 9
     && parts[6] === 'attempts'
+    && parts[8] === 'submit'
+  ) {
+    const attemptId = parts[7];
+    if (!dossier.attempts.some((attempt) => attempt.attempt_id === attemptId)) {
+      return json({ ok: false, error: 'not_found' }, 404);
+    }
+    const idempotencyKey = request.headers.get('idempotency-key');
+    if (!idempotencyKey || !idempotencyKey.trim()
+      || idempotencyKey.length > 256) {
+      return json({ ok: false, error: 'invalid_idempotency_key' }, 400);
+    }
+    let attempt;
+    try {
+      attempt = await submitPaymentAttempt(
+        env,
+        session.telegram_id,
+        attemptId,
+        idempotencyKey,
+        new Date()
+      );
+    } catch (error) {
+      return managePayrollError(error);
+    }
+    if (attempt.status !== 'submitted') {
+      return json({
+        ok: true,
+        attempt,
+        notification: { status: 'sent', retryable: false }
+      });
+    }
+    try {
+      await deliverPaymentAttempt(
+        env,
+        session.telegram_id,
+        attemptId,
+        new Date()
+      );
+      return json({
+        ok: true,
+        attempt,
+        notification: { status: 'sent', retryable: false }
+      });
+    } catch {
+      return json({
+        ok: true,
+        attempt,
+        notification: { status: 'failed', retryable: true }
+      });
+    }
+  }
+  if (
+    request.method === 'POST'
+    && parts.length === 10
+    && parts[6] === 'attempts'
+    && parts[8] === 'notify'
+    && parts[9] === 'retry'
+  ) {
+    const attemptId = parts[7];
+    if (!dossier.attempts.some((attempt) => attempt.attempt_id === attemptId)) {
+      return json({ ok: false, error: 'not_found' }, 404);
+    }
+    try {
+      await deliverPaymentAttempt(
+        env,
+        session.telegram_id,
+        attemptId,
+        new Date()
+      );
+      return json({
+        ok: true,
+        notification: { status: 'sent', retryable: false }
+      });
+    } catch (error) {
+      const message = String(error && error.message || '');
+      if (message.includes('conflict')
+        || message.includes('delivery in progress')) {
+        return managePayrollError(error);
+      }
+      return json({
+        ok: false,
+        notification: { status: 'failed', retryable: true }
+      }, 502);
+    }
+  }
+  if (
+    request.method === 'POST'
+    && parts.length === 9
+    && parts[6] === 'attempts'
     && parts[8] === 'proofs'
   ) {
     const attemptId = parts[7];
@@ -437,6 +527,7 @@ function managePayrollError(error) {
   }
   if (message === 'task_claim_required'
     || message.includes('conflict')
+    || message.includes('delivery in progress')
     || message.includes('not editable')) {
     return json({ ok: false, error: message }, 409);
   }

@@ -7,8 +7,10 @@ import { formatMoney } from './money.js';
 import {
   sendMessage,
   sendPhoto,
+  sendPhotoBytes,
   telegramErrorSummary
 } from './telegram-client.js';
+import { audit } from './audit.js';
 import { isStoreAdmin } from './stores.js';
 
 const REMINDER_INTERVAL_MS = 24 * 60 * 60 * 1000;
@@ -367,4 +369,403 @@ export async function sendPayrollForEmployeeConfirmation(
     SELECT * FROM payroll_disbursements
     WHERE payroll_id = ?
   `).bind(payroll.payroll_id).first();
+}
+
+const PAYMENT_DELIVERY_LEASE_MS = 15 * 60 * 1000;
+const PAYMENT_DELIVERY_ACTIONS = [
+  'payroll_notification_delivery_claimed',
+  'payroll_notification_failed',
+  'payroll_notification_sent'
+];
+
+function paymentDeliveryError(code, proofId = null) {
+  const error = new Error('payroll notification failed');
+  error.notification_code = code;
+  if (proofId) error.proof_id = String(proofId);
+  return error;
+}
+
+async function paymentAttemptForDelivery(env, adminId, attemptId) {
+  const payroll = await env.DB.prepare(`
+    SELECT
+      a.*,
+      d.store_id, d.telegram_id, d.period_start, d.cutoff_at,
+      d.amount_snapshot_micros, d.currency,
+      d.payment_sent_at, d.current_payment_attempt_id,
+      d.status AS payroll_status,
+      s.name AS store_name, s.timezone,
+      COALESCE(p.language, 'zh') AS language,
+      m.display_name AS employee_name
+    FROM payroll_payment_attempts a
+    JOIN payroll_disbursements d ON d.payroll_id = a.payroll_id
+    JOIN stores s ON s.store_id = d.store_id
+    LEFT JOIN user_preferences p ON p.telegram_id = d.telegram_id
+    LEFT JOIN store_members m
+      ON m.store_id = d.store_id AND m.telegram_id = d.telegram_id
+    WHERE a.attempt_id = ?
+  `).bind(attemptId).first();
+  if (!payroll) throw new Error('payment attempt not found');
+  if (!await isStoreAdmin(env, adminId, payroll.store_id)) {
+    throw new Error('payroll admin permission denied');
+  }
+  if (String(payroll.current_payment_attempt_id || '') !== String(attemptId)) {
+    throw new Error('payment attempt conflict');
+  }
+  if (payroll.status !== 'submitted') {
+    throw new Error('payment attempt conflict');
+  }
+  return payroll;
+}
+
+async function claimPaymentDelivery(env, adminId, payroll, now) {
+  const claimedAt = now.toISOString();
+  const staleBefore = new Date(
+    now.getTime() - PAYMENT_DELIVERY_LEASE_MS
+  ).toISOString();
+  const placeholders = PAYMENT_DELIVERY_ACTIONS.map(() => '?').join(', ');
+  const result = await env.DB.prepare(`
+    INSERT INTO admin_audit_logs (
+      store_id, admin_id, action, target_id, details_json, created_at
+    )
+    SELECT ?, ?, 'payroll_notification_delivery_claimed', ?,
+      json_object('attempt_id', ?, 'version', ?), ?
+    WHERE EXISTS (
+      SELECT 1
+      FROM payroll_payment_attempts a
+      JOIN payroll_disbursements d ON d.payroll_id = a.payroll_id
+      WHERE a.attempt_id = ? AND a.status = 'submitted'
+        AND d.current_payment_attempt_id = a.attempt_id
+        AND d.status = 'awaiting_employee_confirmation'
+        AND d.payment_sent_at IS NULL
+    )
+      AND COALESCE((
+        SELECT CASE
+          WHEN action = 'payroll_notification_delivery_claimed'
+            AND created_at > ? THEN 0
+          WHEN action = 'payroll_notification_sent' THEN 0
+          ELSE 1
+        END
+        FROM admin_audit_logs
+        WHERE store_id = ? AND target_id = ?
+          AND json_extract(details_json, '$.attempt_id') = ?
+          AND action IN (${placeholders})
+        ORDER BY id DESC
+        LIMIT 1
+      ), 1) = 1
+  `).bind(
+    payroll.store_id,
+    String(adminId),
+    payroll.payroll_id,
+    payroll.attempt_id,
+    Number(payroll.version),
+    claimedAt,
+    payroll.attempt_id,
+    staleBefore,
+    payroll.store_id,
+    payroll.payroll_id,
+    payroll.attempt_id,
+    ...PAYMENT_DELIVERY_ACTIONS
+  ).run();
+  return Number(result && result.meta && result.meta.changes) === 1;
+}
+
+async function proofBytes(env, proof) {
+  if (!env.PAYROLL_PROOFS || typeof env.PAYROLL_PROOFS.get !== 'function') {
+    throw paymentDeliveryError('storage_not_configured', proof.proof_id);
+  }
+  let object;
+  try {
+    object = await env.PAYROLL_PROOFS.get(proof.object_key);
+  } catch {
+    throw paymentDeliveryError('proof_storage_unavailable', proof.proof_id);
+  }
+  if (!object) throw paymentDeliveryError('proof_missing', proof.proof_id);
+  try {
+    if (typeof object.arrayBuffer === 'function') {
+      return new Uint8Array(await object.arrayBuffer());
+    }
+    if (object.body instanceof Uint8Array) return object.body;
+    if (object.body instanceof ArrayBuffer) return new Uint8Array(object.body);
+    return new Uint8Array(await new Response(object.body).arrayBuffer());
+  } catch {
+    throw paymentDeliveryError('proof_unreadable', proof.proof_id);
+  }
+}
+
+function largestTelegramPhotoFileId(result) {
+  const photos = result && result.result && Array.isArray(result.result.photo)
+    ? result.result.photo
+    : [];
+  let largest = null;
+  let score = -1;
+  for (const photo of photos) {
+    if (!photo || !photo.file_id) continue;
+    const nextScore = Number(photo.file_size)
+      || (Number(photo.width) * Number(photo.height))
+      || 0;
+    if (nextScore >= score) {
+      largest = String(photo.file_id);
+      score = nextScore;
+    }
+  }
+  if (!largest) throw paymentDeliveryError('telegram_photo_id_missing');
+  return largest;
+}
+
+function traceablePaymentMessage(payroll) {
+  const language = payroll.language || 'zh';
+  const timezone = payroll.timezone || 'Asia/Tokyo';
+  const traceLabels = {
+    zh: ['工资周期', '付款版本', '工资 ID'],
+    en: ['Payroll period', 'Payment version', 'Payroll ID'],
+    vi: ['Kỳ lương', 'Phiên bản thanh toán', 'Mã lương'],
+    ru: ['Расчетный период', 'Версия платежа', 'ID зарплаты']
+  }[language] || ['Payroll period', 'Payment version', 'Payroll ID'];
+  return [
+    render(language, 'payroll_payment_summary', {
+      store: payroll.store_name,
+      amount: formatMoney(
+        { currency: payroll.currency },
+        Number(payroll.amount_snapshot_micros) / 1_000_000
+      )
+    }),
+    `${traceLabels[0]}：${formatLocalDateTime(
+      payroll.period_start,
+      timezone
+    )} - ${formatLocalDateTime(payroll.cutoff_at, timezone)}`,
+    `${traceLabels[1]}：${payroll.version}`,
+    `${traceLabels[2]}：${payroll.payroll_id}`,
+    ...paymentMethodLines(language, payroll)
+  ].join('\n');
+}
+
+async function recordPaymentDeliveryFailure(
+  env,
+  adminId,
+  payroll,
+  code,
+  proofId,
+  now
+) {
+  const safeCode = String(code || 'delivery_failed').slice(0, 80);
+  const safeProofId = proofId ? String(proofId).slice(0, 100) : null;
+  const nowIso = now.toISOString();
+  await env.DB.batch([
+    env.DB.prepare(`
+      UPDATE payroll_disbursements
+      SET employee_notification_error = ?, updated_at = ?
+      WHERE payroll_id = ? AND current_payment_attempt_id = ?
+        AND status = 'awaiting_employee_confirmation'
+        AND payment_sent_at IS NULL
+    `).bind(
+      JSON.stringify({ code: safeCode, proof_id: safeProofId }),
+      nowIso,
+      payroll.payroll_id,
+      payroll.attempt_id
+    ),
+    env.DB.prepare(`
+      INSERT INTO admin_audit_logs (
+        store_id, admin_id, action, target_id, details_json, created_at
+      ) VALUES (?, ?, 'payroll_notification_failed', ?,
+        json_object(
+          'attempt_id', ?, 'version', ?, 'code', ?, 'proof_id', ?
+        ), ?)
+    `).bind(
+      payroll.store_id,
+      String(adminId),
+      payroll.payroll_id,
+      payroll.attempt_id,
+      Number(payroll.version),
+      safeCode,
+      safeProofId,
+      nowIso
+    )
+  ]);
+}
+
+export async function deliverPaymentAttempt(
+  env,
+  adminId,
+  attemptId,
+  now = new Date()
+) {
+  const deliveredAt = new Date(now);
+  const payroll = await paymentAttemptForDelivery(
+    env,
+    adminId,
+    attemptId
+  );
+  if (payroll.payment_sent_at) {
+    return { status: 'sent', attempt_id: payroll.attempt_id };
+  }
+  if (!await claimPaymentDelivery(env, adminId, payroll, deliveredAt)) {
+    const current = await env.DB.prepare(`
+      SELECT payment_sent_at FROM payroll_disbursements
+      WHERE payroll_id = ? AND current_payment_attempt_id = ?
+    `).bind(payroll.payroll_id, payroll.attempt_id).first();
+    if (current && current.payment_sent_at) {
+      return { status: 'sent', attempt_id: payroll.attempt_id };
+    }
+    throw new Error('payment notification delivery in progress');
+  }
+
+  try {
+    const proofRows = await env.DB.prepare(`
+      SELECT * FROM payroll_payment_proofs
+      WHERE attempt_id = ? AND superseded_at IS NULL
+        AND telegram_delivered_at IS NULL
+      ORDER BY method, sort_order, proof_id
+    `).bind(payroll.attempt_id).all();
+    const language = payroll.language || 'zh';
+    for (const proof of proofRows.results || []) {
+      const caption = render(language, 'payroll_proof_caption', {
+        method: t(language, `payroll_profile_${proof.method}`),
+        number: proof.sort_order
+      });
+      let result;
+      let fileId = proof.telegram_file_id
+        ? String(proof.telegram_file_id)
+        : null;
+      if (fileId) {
+        result = await sendPhoto(
+          env,
+          payroll.telegram_id,
+          fileId,
+          caption
+        );
+      } else {
+        const bytes = await proofBytes(env, proof);
+        result = await sendPhotoBytes(
+          env,
+          payroll.telegram_id,
+          bytes,
+          proof.file_name || `${proof.proof_id}`,
+          proof.mime_type,
+          caption
+        );
+        if (result && result.ok) {
+          try {
+            fileId = largestTelegramPhotoFileId(result);
+          } catch (error) {
+            error.proof_id = String(proof.proof_id);
+            throw error;
+          }
+        }
+      }
+      if (!result || !result.ok) {
+        const summary = telegramErrorSummary(result);
+        throw paymentDeliveryError(
+          summary.description === 'staging_recipient_blocked'
+            ? 'staging_recipient_blocked'
+            : 'proof_telegram_failed',
+          proof.proof_id
+        );
+      }
+      const checkpoint = await env.DB.prepare(`
+        UPDATE payroll_payment_proofs
+        SET telegram_file_id = ?, telegram_delivered_at = ?
+        WHERE proof_id = ? AND attempt_id = ?
+          AND telegram_delivered_at IS NULL
+          AND EXISTS (
+            SELECT 1 FROM payroll_disbursements d
+            JOIN payroll_payment_attempts a
+              ON a.attempt_id = d.current_payment_attempt_id
+             AND a.payroll_id = d.payroll_id
+            WHERE a.attempt_id = ? AND a.status = 'submitted'
+              AND d.status = 'awaiting_employee_confirmation'
+              AND d.payment_sent_at IS NULL
+          )
+      `).bind(
+        fileId,
+        deliveredAt.toISOString(),
+        proof.proof_id,
+        payroll.attempt_id,
+        payroll.attempt_id
+      ).run();
+      if (Number(checkpoint && checkpoint.meta && checkpoint.meta.changes) !== 1) {
+        throw paymentDeliveryError(
+          'proof_checkpoint_conflict',
+          proof.proof_id
+        );
+      }
+    }
+
+    const result = await sendMessage(
+      env,
+      payroll.telegram_id,
+      traceablePaymentMessage(payroll),
+      {
+        inline_keyboard: [[
+          {
+            text: t(language, 'btn_confirm_receipt'),
+            callback_data: `pay:ok:${payroll.payroll_id}`
+          },
+          {
+            text: t(language, 'btn_dispute_payment'),
+            callback_data: `pay:x:${payroll.payroll_id}`
+          }
+        ]]
+      }
+    );
+    if (!result || !result.ok) {
+      const summary = telegramErrorSummary(result);
+      throw paymentDeliveryError(
+        summary.description === 'staging_recipient_blocked'
+          ? 'staging_recipient_blocked'
+          : 'summary_telegram_failed'
+      );
+    }
+
+    const sentAt = deliveredAt.toISOString();
+    const updated = await env.DB.prepare(`
+      UPDATE payroll_disbursements
+      SET payment_sent_at = ?, employee_notification_error = NULL,
+          updated_at = ?
+      WHERE payroll_id = ? AND current_payment_attempt_id = ?
+        AND status = 'awaiting_employee_confirmation'
+        AND payment_sent_at IS NULL
+        AND EXISTS (
+          SELECT 1 FROM payroll_payment_attempts
+          WHERE attempt_id = ? AND status = 'submitted'
+        )
+        AND NOT EXISTS (
+          SELECT 1 FROM payroll_payment_proofs
+          WHERE attempt_id = ? AND superseded_at IS NULL
+            AND telegram_delivered_at IS NULL
+        )
+    `).bind(
+      sentAt,
+      sentAt,
+      payroll.payroll_id,
+      payroll.attempt_id,
+      payroll.attempt_id,
+      payroll.attempt_id
+    ).run();
+    if (Number(updated && updated.meta && updated.meta.changes) !== 1) {
+      throw paymentDeliveryError('summary_checkpoint_conflict');
+    }
+    await audit(
+      env,
+      payroll.store_id,
+      adminId,
+      'payroll_notification_sent',
+      payroll.payroll_id,
+      { attempt_id: payroll.attempt_id, version: Number(payroll.version) }
+    );
+    return { status: 'sent', attempt_id: payroll.attempt_id };
+  } catch (error) {
+    const code = error && error.notification_code
+      ? error.notification_code
+      : 'delivery_failed';
+    await recordPaymentDeliveryFailure(
+      env,
+      adminId,
+      payroll,
+      code,
+      error && error.proof_id ? error.proof_id : null,
+      deliveredAt
+    );
+    if (error && error.message === 'payroll notification failed') throw error;
+    throw paymentDeliveryError(code);
+  }
 }
