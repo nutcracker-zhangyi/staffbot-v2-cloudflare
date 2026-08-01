@@ -320,6 +320,23 @@ CREATE TABLE IF NOT EXISTS payroll_payment_attempts (
   employee_responded_at TEXT,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL,
+  CHECK (
+    (
+      status IN ('draft', 'submitted', 'abandoned')
+      AND employee_response IS NULL
+      AND employee_responded_at IS NULL
+    )
+    OR (
+      status = 'employee_confirmed'
+      AND employee_response = 'confirmed'
+      AND employee_responded_at IS NOT NULL
+    )
+    OR (
+      status = 'employee_disputed'
+      AND employee_response = 'disputed'
+      AND employee_responded_at IS NOT NULL
+    )
+  ),
   UNIQUE (payroll_id, version)
 );
 
@@ -333,18 +350,59 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_payroll_payment_attempts_idempotency
   ON payroll_payment_attempts (payroll_id, idempotency_key_hash)
   WHERE idempotency_key_hash IS NOT NULL;
 
-CREATE TRIGGER IF NOT EXISTS trg_payroll_payment_attempt_amounts_immutable
-BEFORE UPDATE OF payroll_id, version, bank_micros, usdt_micros, cash_micros
+CREATE TRIGGER IF NOT EXISTS trg_payroll_payment_attempt_identity_immutable
+BEFORE UPDATE OF attempt_id, payroll_id, version, created_at
+ON payroll_payment_attempts
+WHEN
+  NEW.attempt_id IS NOT OLD.attempt_id
+  OR NEW.payroll_id IS NOT OLD.payroll_id
+  OR NEW.version IS NOT OLD.version
+  OR NEW.created_at IS NOT OLD.created_at
+BEGIN
+  SELECT RAISE(ABORT, 'payment attempt evidence is immutable');
+END;
+
+CREATE TRIGGER IF NOT EXISTS trg_payroll_payment_attempt_evidence_immutable
+BEFORE UPDATE OF
+  bank_micros, usdt_micros, cash_micros,
+  submitted_by, submitted_at, idempotency_key_hash
 ON payroll_payment_attempts
 WHEN OLD.status <> 'draft' AND (
-  NEW.payroll_id IS NOT OLD.payroll_id
-  OR NEW.version IS NOT OLD.version
-  OR NEW.bank_micros IS NOT OLD.bank_micros
+  NEW.bank_micros IS NOT OLD.bank_micros
   OR NEW.usdt_micros IS NOT OLD.usdt_micros
   OR NEW.cash_micros IS NOT OLD.cash_micros
+  OR NEW.submitted_by IS NOT OLD.submitted_by
+  OR NEW.submitted_at IS NOT OLD.submitted_at
+  OR NEW.idempotency_key_hash IS NOT OLD.idempotency_key_hash
 )
 BEGIN
-  SELECT RAISE(ABORT, 'payment attempt amounts are immutable');
+  SELECT RAISE(ABORT, 'payment attempt evidence is immutable');
+END;
+
+CREATE TRIGGER IF NOT EXISTS trg_payroll_payment_attempt_status_transition
+BEFORE UPDATE OF status ON payroll_payment_attempts
+WHEN NOT (
+  NEW.status = OLD.status
+  OR (OLD.status = 'draft' AND NEW.status IN ('submitted', 'abandoned'))
+  OR (OLD.status = 'abandoned' AND NEW.status = 'draft')
+  OR (
+    OLD.status = 'submitted'
+    AND NEW.status IN ('employee_confirmed', 'employee_disputed')
+  )
+)
+BEGIN
+  SELECT RAISE(ABORT, 'invalid payment attempt status transition');
+END;
+
+CREATE TRIGGER IF NOT EXISTS trg_payroll_payment_attempt_response_immutable
+BEFORE UPDATE OF employee_response, employee_responded_at
+ON payroll_payment_attempts
+WHEN OLD.status IN ('employee_confirmed', 'employee_disputed') AND (
+  NEW.employee_response IS NOT OLD.employee_response
+  OR NEW.employee_responded_at IS NOT OLD.employee_responded_at
+)
+BEGIN
+  SELECT RAISE(ABORT, 'payment attempt response is immutable');
 END;
 
 CREATE TRIGGER IF NOT EXISTS trg_payroll_payment_attempt_delete_immutable
@@ -384,6 +442,97 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_payroll_proofs_attempt_order
 CREATE UNIQUE INDEX IF NOT EXISTS idx_payroll_proofs_legacy_order
   ON payroll_payment_proofs (payroll_id, method, sort_order)
   WHERE attempt_id IS NULL;
+
+-- Migration 024 compatibility companions retain columns that do not exist in
+-- the pre-024 tables if the raw migration SQL is replayed for verification.
+CREATE TABLE IF NOT EXISTS migration_024_payroll_current_attempt_snapshot (
+  payroll_id TEXT PRIMARY KEY,
+  current_payment_attempt_id TEXT
+);
+
+CREATE TABLE IF NOT EXISTS migration_024_payroll_proof_snapshot (
+  proof_id TEXT PRIMARY KEY,
+  attempt_id TEXT,
+  telegram_file_id TEXT,
+  telegram_delivered_at TEXT
+);
+
+CREATE TRIGGER IF NOT EXISTS trg_migration_024_payroll_current_insert
+AFTER INSERT ON payroll_disbursements
+BEGIN
+  INSERT INTO migration_024_payroll_current_attempt_snapshot (
+    payroll_id, current_payment_attempt_id
+  ) VALUES (NEW.payroll_id, NEW.current_payment_attempt_id)
+  ON CONFLICT (payroll_id) DO UPDATE SET
+    current_payment_attempt_id = excluded.current_payment_attempt_id;
+END;
+
+CREATE TRIGGER IF NOT EXISTS trg_migration_024_payroll_current_update
+AFTER UPDATE OF payroll_id, current_payment_attempt_id
+ON payroll_disbursements
+BEGIN
+  DELETE FROM migration_024_payroll_current_attempt_snapshot
+  WHERE payroll_id = OLD.payroll_id
+    AND OLD.payroll_id <> NEW.payroll_id;
+  INSERT INTO migration_024_payroll_current_attempt_snapshot (
+    payroll_id, current_payment_attempt_id
+  ) VALUES (NEW.payroll_id, NEW.current_payment_attempt_id)
+  ON CONFLICT (payroll_id) DO UPDATE SET
+    current_payment_attempt_id = excluded.current_payment_attempt_id;
+END;
+
+CREATE TRIGGER IF NOT EXISTS trg_migration_024_payroll_current_delete
+AFTER DELETE ON payroll_disbursements
+BEGIN
+  DELETE FROM migration_024_payroll_current_attempt_snapshot
+  WHERE payroll_id = OLD.payroll_id;
+END;
+
+CREATE TRIGGER IF NOT EXISTS trg_migration_024_payroll_proof_insert
+AFTER INSERT ON payroll_payment_proofs
+BEGIN
+  INSERT INTO migration_024_payroll_proof_snapshot (
+    proof_id, attempt_id, telegram_file_id, telegram_delivered_at
+  ) VALUES (
+    NEW.proof_id,
+    NEW.attempt_id,
+    NEW.telegram_file_id,
+    NEW.telegram_delivered_at
+  )
+  ON CONFLICT (proof_id) DO UPDATE SET
+    attempt_id = excluded.attempt_id,
+    telegram_file_id = excluded.telegram_file_id,
+    telegram_delivered_at = excluded.telegram_delivered_at;
+END;
+
+CREATE TRIGGER IF NOT EXISTS trg_migration_024_payroll_proof_update
+AFTER UPDATE OF
+  proof_id, attempt_id, telegram_file_id, telegram_delivered_at
+ON payroll_payment_proofs
+BEGIN
+  DELETE FROM migration_024_payroll_proof_snapshot
+  WHERE proof_id = OLD.proof_id
+    AND OLD.proof_id <> NEW.proof_id;
+  INSERT INTO migration_024_payroll_proof_snapshot (
+    proof_id, attempt_id, telegram_file_id, telegram_delivered_at
+  ) VALUES (
+    NEW.proof_id,
+    NEW.attempt_id,
+    NEW.telegram_file_id,
+    NEW.telegram_delivered_at
+  )
+  ON CONFLICT (proof_id) DO UPDATE SET
+    attempt_id = excluded.attempt_id,
+    telegram_file_id = excluded.telegram_file_id,
+    telegram_delivered_at = excluded.telegram_delivered_at;
+END;
+
+CREATE TRIGGER IF NOT EXISTS trg_migration_024_payroll_proof_delete
+AFTER DELETE ON payroll_payment_proofs
+BEGIN
+  DELETE FROM migration_024_payroll_proof_snapshot
+  WHERE proof_id = OLD.proof_id;
+END;
 
 CREATE TABLE IF NOT EXISTS payroll_email_outbox (
   payroll_id TEXT PRIMARY KEY,

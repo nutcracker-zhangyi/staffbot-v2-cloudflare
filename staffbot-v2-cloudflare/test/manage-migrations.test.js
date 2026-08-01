@@ -106,6 +106,149 @@ test('canonical schema enforces payment attempt states and unique identities', (
   ), /CHECK constraint failed/);
 });
 
+test('submitted payment evidence cannot be reopened or mutated', () => {
+  const db = new DatabaseSync(':memory:');
+  db.exec(schema);
+  const timestamp = '2026-08-01T00:00:00.000Z';
+  db.prepare(`
+    INSERT INTO payroll_payment_attempts (
+      attempt_id, payroll_id, version, status,
+      bank_micros, usdt_micros, cash_micros,
+      submitted_by, submitted_at, idempotency_key_hash,
+      created_at, updated_at
+    ) VALUES (
+      'ATTEMPT-LOCKED', 'PAYROLL-LOCKED', 1, 'draft',
+      70, 20, 10, NULL, NULL, 'HASH-LOCKED', ?, ?
+    )
+  `).run(timestamp, timestamp);
+  db.prepare(`
+    UPDATE payroll_payment_attempts
+    SET status = 'submitted',
+        submitted_by = 'ADMIN-1',
+        submitted_at = '2026-08-01T00:01:00.000Z',
+        updated_at = '2026-08-01T00:01:00.000Z'
+    WHERE attempt_id = 'ATTEMPT-LOCKED'
+  `).run();
+
+  for (const mutation of [
+    `attempt_id = 'ATTEMPT-REWRITTEN'`,
+    `payroll_id = 'PAYROLL-REWRITTEN'`,
+    `version = 2`,
+    `bank_micros = 69`,
+    `usdt_micros = 21`,
+    `cash_micros = 11`,
+    `submitted_by = 'ADMIN-2'`,
+    `submitted_at = '2026-08-01T00:02:00.000Z'`,
+    `idempotency_key_hash = 'HASH-REWRITTEN'`
+  ]) {
+    assert.throws(() => db.exec(`
+      UPDATE payroll_payment_attempts
+      SET ${mutation}
+      WHERE attempt_id = 'ATTEMPT-LOCKED';
+    `), /payment attempt evidence is immutable/);
+  }
+  for (const status of ['draft', 'abandoned']) {
+    assert.throws(() => db.prepare(`
+      UPDATE payroll_payment_attempts
+      SET status = ?, updated_at = ?
+      WHERE attempt_id = 'ATTEMPT-LOCKED'
+    `).run(status, '2026-08-01T00:03:00.000Z'),
+    /invalid payment attempt status transition/);
+  }
+
+  db.prepare(`
+    UPDATE payroll_payment_attempts
+    SET status = 'employee_confirmed',
+        employee_response = 'confirmed',
+        employee_responded_at = '2026-08-01T00:04:00.000Z',
+        updated_at = '2026-08-01T00:04:00.000Z'
+    WHERE attempt_id = 'ATTEMPT-LOCKED'
+  `).run();
+  assert.throws(() => db.prepare(`
+    UPDATE payroll_payment_attempts
+    SET employee_responded_at = '2026-08-01T00:05:00.000Z'
+    WHERE attempt_id = 'ATTEMPT-LOCKED'
+  `).run(), /payment attempt response is immutable/);
+});
+
+test('payment attempt responses match status and abandoned drafts can recover', () => {
+  const db = new DatabaseSync(':memory:');
+  db.exec(schema);
+  const timestamp = '2026-08-01T00:00:00.000Z';
+  assert.throws(() => db.prepare(`
+    INSERT INTO payroll_payment_attempts (
+      attempt_id, payroll_id, version, status,
+      employee_response, created_at, updated_at
+    ) VALUES (
+      'BAD-RESPONSE', 'PAYROLL-BAD', 1, 'employee_confirmed',
+      NULL, ?, ?
+    )
+  `).run(timestamp, timestamp), /CHECK constraint failed/);
+
+  db.prepare(`
+    INSERT INTO payroll_payment_attempts (
+      attempt_id, payroll_id, version, status,
+      bank_micros, created_at, updated_at
+    ) VALUES (
+      'RECOVERABLE', 'PAYROLL-RECOVERABLE', 1, 'draft',
+      10, ?, ?
+    )
+  `).run(timestamp, timestamp);
+  db.prepare(`
+    UPDATE payroll_payment_attempts
+    SET status = 'abandoned', updated_at = ?
+    WHERE attempt_id = 'RECOVERABLE'
+  `).run('2026-08-01T00:01:00.000Z');
+  assert.throws(() => db.prepare(`
+    UPDATE payroll_payment_attempts
+    SET bank_micros = 20
+    WHERE attempt_id = 'RECOVERABLE'
+  `).run(), /payment attempt evidence is immutable/);
+  db.prepare(`
+    UPDATE payroll_payment_attempts
+    SET status = 'draft', updated_at = ?
+    WHERE attempt_id = 'RECOVERABLE'
+  `).run('2026-08-01T00:02:00.000Z');
+  db.prepare(`
+    UPDATE payroll_payment_attempts
+    SET bank_micros = 20, updated_at = ?
+    WHERE attempt_id = 'RECOVERABLE'
+  `).run('2026-08-01T00:03:00.000Z');
+  assert.deepEqual(
+    { ...db.prepare(`
+      SELECT status, bank_micros
+      FROM payroll_payment_attempts
+      WHERE attempt_id = 'RECOVERABLE'
+    `).get() },
+    { status: 'draft', bank_micros: 20 }
+  );
+
+  db.prepare(`
+    INSERT INTO payroll_payment_attempts (
+      attempt_id, payroll_id, version, status,
+      created_at, updated_at
+    ) VALUES (
+      'DISPUTABLE', 'PAYROLL-DISPUTABLE', 1, 'submitted', ?, ?
+    )
+  `).run(timestamp, timestamp);
+  db.prepare(`
+    UPDATE payroll_payment_attempts
+    SET status = 'employee_disputed',
+        employee_response = 'disputed',
+        employee_responded_at = '2026-08-01T00:04:00.000Z',
+        updated_at = '2026-08-01T00:04:00.000Z'
+    WHERE attempt_id = 'DISPUTABLE'
+  `).run();
+  assert.equal(
+    db.prepare(`
+      SELECT status
+      FROM payroll_payment_attempts
+      WHERE attempt_id = 'DISPUTABLE'
+    `).get().status,
+    'employee_disputed'
+  );
+});
+
 test('migration preserves existing admin sessions', () => {
   const db = new DatabaseSync(':memory:');
   db.exec(`
@@ -234,7 +377,7 @@ test('migration 024 backfills one immutable version and preserves proof metadata
     UPDATE payroll_payment_attempts
     SET bank_micros = 1
     WHERE attempt_id = 'ATTEMPT:LEGACY:PAYROLL-1'
-  `).run(), /payment attempt amounts are immutable/);
+  `).run(), /payment attempt evidence is immutable/);
 });
 
 test('migration 024 maps legacy statuses and backfills only evidenced payrolls', () => {
@@ -394,5 +537,152 @@ test('migration 024 is repeatable without duplicating attempts or proofs', () =>
     database.prepare(`SELECT COUNT(*) AS total FROM payroll_payment_proofs`)
       .get().total,
     0
+  );
+});
+
+test('migration 024 raw replay preserves post-feature attempt references', () => {
+  const database = legacyPayrollDatabase();
+  database.exec(`
+    INSERT INTO payroll_disbursements (
+      payroll_id, store_id, telegram_id, payroll_start_date,
+      scheduled_date, cycle_day, period_start, cutoff_at,
+      amount_snapshot_micros, currency, status,
+      bank_micros, usdt_micros, cash_micros,
+      payment_sent_at, created_at, updated_at
+    ) VALUES (
+      'PAYROLL-1', 'STORE-1', 'EMP-1', '2026-07-01',
+      '2026-07-16', 16, '2026-07-01T03:00:00.000Z',
+      '2026-07-16T03:00:00.000Z', 100000000, '₫',
+      'awaiting_employee_confirmation', 70000000, 30000000, 0,
+      '2026-07-16T05:00:00.000Z',
+      '2026-07-16T03:00:00.000Z', '2026-07-16T05:00:00.000Z'
+    );
+    INSERT INTO payroll_payment_proofs (
+      proof_id, payroll_id, method, object_key, telegram_file_id,
+      mime_type, size_bytes, sort_order, uploaded_by, uploaded_at
+    ) VALUES (
+      'LEGACY-PROOF', 'PAYROLL-1', 'bank', 'legacy-proof', 'TG-LEGACY',
+      'image/jpeg', 10, 1, 'ADMIN-1', '2026-07-16T04:00:00.000Z'
+    );
+  `);
+  database.exec(migration024);
+  database.exec(`
+    UPDATE payroll_payment_proofs
+    SET telegram_file_id = 'TG-LEGACY-UPDATED',
+        telegram_delivered_at = '2026-07-16T07:00:00.000Z'
+    WHERE proof_id = 'LEGACY-PROOF';
+    INSERT INTO payroll_payment_attempts (
+      attempt_id, payroll_id, version, status,
+      bank_micros, usdt_micros, cash_micros,
+      idempotency_key_hash, created_at, updated_at
+    ) VALUES (
+      'ATTEMPT-V2', 'PAYROLL-1', 2, 'draft',
+      50000000, 50000000, 0, 'HASH-V2',
+      '2026-07-16T06:00:00.000Z', '2026-07-16T06:00:00.000Z'
+    );
+    UPDATE payroll_disbursements
+    SET current_payment_attempt_id = 'ATTEMPT-V2'
+    WHERE payroll_id = 'PAYROLL-1';
+    INSERT INTO payroll_payment_proofs (
+      proof_id, payroll_id, attempt_id, method, object_key,
+      telegram_file_id, telegram_delivered_at, file_name, mime_type,
+      size_bytes, sort_order, uploaded_by, uploaded_at
+    ) VALUES (
+      'V2-PROOF', 'PAYROLL-1', 'ATTEMPT-V2', 'bank', 'v2-proof',
+      NULL, NULL, 'v2-receipt.png', 'image/png', 20, 1, 'ADMIN-2',
+      '2026-07-16T06:30:00.000Z'
+    );
+  `);
+
+  database.exec(migration024);
+
+  assert.deepEqual(
+    database.prepare(`
+      SELECT
+        attempt_id, payroll_id, version, status,
+        bank_micros, usdt_micros, cash_micros,
+        idempotency_key_hash, created_at, updated_at
+      FROM payroll_payment_attempts
+      WHERE payroll_id = 'PAYROLL-1'
+      ORDER BY version
+    `).all().map((row) => ({ ...row })),
+    [
+      {
+        attempt_id: 'ATTEMPT:LEGACY:PAYROLL-1',
+        payroll_id: 'PAYROLL-1',
+        version: 1,
+        status: 'submitted',
+        bank_micros: 70_000_000,
+        usdt_micros: 30_000_000,
+        cash_micros: 0,
+        idempotency_key_hash: null,
+        created_at: '2026-07-16T05:00:00.000Z',
+        updated_at: '2026-07-16T05:00:00.000Z'
+      },
+      {
+        attempt_id: 'ATTEMPT-V2',
+        payroll_id: 'PAYROLL-1',
+        version: 2,
+        status: 'draft',
+        bank_micros: 50_000_000,
+        usdt_micros: 50_000_000,
+        cash_micros: 0,
+        idempotency_key_hash: 'HASH-V2',
+        created_at: '2026-07-16T06:00:00.000Z',
+        updated_at: '2026-07-16T06:00:00.000Z'
+      }
+    ]
+  );
+  assert.equal(
+    database.prepare(`
+      SELECT current_payment_attempt_id
+      FROM payroll_disbursements
+      WHERE payroll_id = 'PAYROLL-1'
+    `).get().current_payment_attempt_id,
+    'ATTEMPT-V2'
+  );
+  assert.deepEqual(
+    database.prepare(`
+      SELECT
+        proof_id, payroll_id, attempt_id, method, object_key,
+        telegram_file_id, telegram_delivered_at, file_name, mime_type,
+        size_bytes, sort_order, uploaded_by, superseded_at, uploaded_at
+      FROM payroll_payment_proofs
+      ORDER BY proof_id
+    `).all().map((row) => ({ ...row })),
+    [
+      {
+        proof_id: 'LEGACY-PROOF',
+        payroll_id: 'PAYROLL-1',
+        attempt_id: 'ATTEMPT:LEGACY:PAYROLL-1',
+        method: 'bank',
+        object_key: 'legacy-proof',
+        telegram_file_id: 'TG-LEGACY-UPDATED',
+        telegram_delivered_at: '2026-07-16T07:00:00.000Z',
+        file_name: null,
+        mime_type: 'image/jpeg',
+        size_bytes: 10,
+        sort_order: 1,
+        uploaded_by: 'ADMIN-1',
+        superseded_at: null,
+        uploaded_at: '2026-07-16T04:00:00.000Z'
+      },
+      {
+        proof_id: 'V2-PROOF',
+        payroll_id: 'PAYROLL-1',
+        attempt_id: 'ATTEMPT-V2',
+        method: 'bank',
+        object_key: 'v2-proof',
+        telegram_file_id: null,
+        telegram_delivered_at: null,
+        file_name: 'v2-receipt.png',
+        mime_type: 'image/png',
+        size_bytes: 20,
+        sort_order: 1,
+        uploaded_by: 'ADMIN-2',
+        superseded_at: null,
+        uploaded_at: '2026-07-16T06:30:00.000Z'
+      }
+    ]
   );
 });
