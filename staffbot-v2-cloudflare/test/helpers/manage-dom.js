@@ -34,6 +34,10 @@ class BrowserElement {
     return this.attributes.has(name) ? this.attributes.get(name) : null;
   }
 
+  setAttribute(name, value) {
+    this.attributes.set(String(name), String(value));
+  }
+
   get innerHTML() {
     return this._innerHTML;
   }

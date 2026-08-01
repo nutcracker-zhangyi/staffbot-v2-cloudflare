@@ -1907,6 +1907,59 @@ test('payroll payment enables submit only for an exact evidenced integer-micros 
   assert.equal(browser.objectUrls.size, 0);
 });
 
+test('dynamic payment validation keeps native and aria disabled states in sync', async () => {
+  const owned = {
+    claimed_by: 'ADMIN-1',
+    claimed_at: '2026-07-29T02:00:00.000Z',
+    lease_expires_at: '2099-07-29T02:15:00.000Z',
+    active: true
+  };
+  const dossier = payrollDossier({
+    claim: owned,
+    draft: true,
+    amountMicros: 8_000_000_000,
+    draftProofs: [
+      {
+        proof_id: 'PROOF-BANK', attempt_id: 'ATTEMPT-DRAFT', method: 'bank',
+        superseded_at: null
+      },
+      {
+        proof_id: 'PROOF-USDT', attempt_id: 'ATTEMPT-DRAFT', method: 'usdt',
+        superseded_at: null
+      }
+    ]
+  });
+  const browser = await payrollFixture({ initialDossier: dossier }).browser();
+  await browser.clickButton('工资');
+  await browser.clickButton('查看工资档案');
+  await browser.clickButton('领取并开始付款');
+
+  let save = browser.document.getElementById('save-payment-draft');
+  let submit = browser.document.getElementById('submit-payroll-payment');
+  assert.equal(save.disabled, true);
+  assert.equal(save.getAttribute('aria-disabled'), 'true');
+  assert.equal(submit.disabled, true);
+  assert.equal(submit.getAttribute('aria-disabled'), 'true');
+
+  await browser.input('bank-amount', '5000');
+  await browser.input('usdt-amount', '3000');
+  await browser.input('cash-amount', '0');
+  save = browser.document.getElementById('save-payment-draft');
+  submit = browser.document.getElementById('submit-payroll-payment');
+  assert.equal(save.disabled, false);
+  assert.equal(save.getAttribute('aria-disabled'), 'false');
+  assert.equal(submit.disabled, false);
+  assert.equal(submit.getAttribute('aria-disabled'), 'false');
+
+  await browser.setOnline(false);
+  save = browser.document.getElementById('save-payment-draft');
+  submit = browser.document.getElementById('submit-payroll-payment');
+  assert.equal(save.disabled, true);
+  assert.equal(save.getAttribute('aria-disabled'), 'true');
+  assert.equal(submit.disabled, true);
+  assert.equal(submit.getAttribute('aria-disabled'), 'true');
+});
+
 test('payroll rejects negative, excessive-precision, and float-like amount input', async () => {
   const app = payrollFixture();
   const browser = await app.browser();

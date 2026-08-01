@@ -711,10 +711,20 @@ function updatePaymentValidation() {
   if (allocated) allocated.textContent = formatMoney(totals.allocated, payroll.currency);
   const difference = document.getElementById('payment-difference');
   if (difference) difference.textContent = formatMoney(totals.difference, payroll.currency);
-  const save = document.getElementById('save-payment-draft');
-  if (save) save.disabled = !canSavePaymentSplit();
-  const submit = document.getElementById('submit-payroll-payment');
-  if (submit) submit.disabled = !canSubmitPayment();
+  setControlDisabled(
+    document.getElementById('save-payment-draft'),
+    !canSavePaymentSplit()
+  );
+  setControlDisabled(
+    document.getElementById('submit-payroll-payment'),
+    !canSubmitPayment()
+  );
+}
+
+function setControlDisabled(control, isDisabled) {
+  if (!control) return;
+  control.disabled = isDisabled;
+  control.setAttribute('aria-disabled', String(isDisabled));
 }
 
 function decimalToMicros(value) {
