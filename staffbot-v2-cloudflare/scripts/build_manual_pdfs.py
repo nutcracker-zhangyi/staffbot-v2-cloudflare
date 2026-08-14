@@ -4,6 +4,7 @@ import html
 import re
 from pathlib import Path
 
+from PIL import Image as PILImage
 from reportlab.lib import colors
 from reportlab.lib.enums import TA_CENTER, TA_LEFT
 from reportlab.lib.pagesizes import A4
@@ -15,6 +16,7 @@ from reportlab.platypus import (
     BaseDocTemplate,
     Flowable,
     Frame,
+    Image as RLImage,
     KeepTogether,
     ListFlowable,
     ListItem,
@@ -40,6 +42,7 @@ LIGHT = colors.HexColor("#E2E8F0")
 VERY_LIGHT = colors.HexColor("#F8FAFC")
 WARNING_BG = colors.HexColor("#FFF7ED")
 WARNING_BORDER = colors.HexColor("#F97316")
+SCREENSHOT_DIR = ROOT / "docs" / "manuals" / "screenshots" / "processed"
 
 
 def register_fonts() -> None:
@@ -191,6 +194,17 @@ def build_styles():
             spaceAfter=14,
             **common,
         ),
+        "caption": ParagraphStyle(
+            "Caption",
+            alignment=TA_CENTER,
+            fontSize=8.5,
+            leading=13,
+            textColor=SLATE,
+            fontName="StaffBotUnicode",
+            wordWrap="CJK",
+            spaceBefore=4,
+            spaceAfter=8,
+        ),
     }
 
 
@@ -310,6 +324,28 @@ def paragraph(text: str, style) -> Paragraph:
     return Paragraph(inline_markup(text), style)
 
 
+def figure_flow(
+    filename: str,
+    caption: str,
+    styles,
+    max_width: float,
+    max_height: float = 155 * mm,
+) -> list:
+    path = SCREENSHOT_DIR / filename
+    if not path.exists():
+        raise FileNotFoundError(f"Processed screenshot is missing: {path}")
+    with PILImage.open(path) as source:
+        pixel_width, pixel_height = source.size
+    scale = min(max_width / pixel_width, max_height / pixel_height)
+    image = RLImage(str(path), width=pixel_width * scale, height=pixel_height * scale)
+    image.hAlign = "CENTER"
+    return [
+        image,
+        Paragraph(inline_markup(caption), styles["caption"]),
+        Spacer(1, 2 * mm),
+    ]
+
+
 def list_flow(items: list[str], ordered: bool, styles):
     return ListFlowable(
         [ListItem(paragraph(item, styles["list"]), leftIndent=4) for item in items],
@@ -345,7 +381,12 @@ def table_flow(rows: list[list[str]], styles, available_width: float):
     return table
 
 
-def markdown_story(markdown: str, styles, available_width: float) -> list:
+def markdown_story(
+    markdown: str,
+    styles,
+    available_width: float,
+    figures: dict[str, tuple[str, str, float]] | None = None,
+) -> list:
     lines = markdown.splitlines()
     story: list = []
     index = 0
@@ -381,6 +422,9 @@ def markdown_story(markdown: str, styles, available_width: float) -> list:
             if level == 1 and story and not isinstance(story[-1], PageBreak):
                 story.append(PageBreak())
             story.append(paragraph(text, styles[f"h{level}"]))
+            if figures and text in figures:
+                filename, caption, max_height = figures[text]
+                story.extend(figure_flow(filename, caption, styles, available_width, max_height))
             index += 1
             continue
 
@@ -473,7 +517,54 @@ def build_manual(source_name: str, output_name: str, title: str, subtitle: str, 
     )
     story = cover_story(title, subtitle, audience, styles)
     story.extend(toc_story(styles))
-    story.extend(markdown_story(source_path.read_text(encoding="utf-8"), styles, doc.width))
+    figures = None
+    if source_name == "STAGING_ADMIN_GUIDE_ZH.md":
+        figures = {
+            "7. 手机管理端界面": (
+                "admin-navigation.png",
+                "图 1：真实 staging 手机管理端。底部依次为待办、审批、工资和更多；测试姓名与金额已隐藏。",
+                178 * mm,
+            ),
+            "8.3 批准": (
+                "admin-approval-actions.png",
+                "图 2：领取任务并检查资料后，页面底部显示“批准”和“拒绝”。",
+                115 * mm,
+            ),
+            "10.1 打开工资档案": (
+                "admin-payroll-list.png",
+                "图 3：在工资列表中选择正确周期，然后点击“查看工资档案”。",
+                145 * mm,
+            ),
+            "10.4 上传付款回执": (
+                "admin-payroll-detail.png",
+                "图 4：工资档案保留工资周期、收款方式、二维码、付款版本和回执；敏感数据已隐藏。",
+                150 * mm,
+            ),
+        }
+    if source_name == "STAGING_EMPLOYEE_GUIDE_ZH_VI_RU.md":
+        story.append(paragraph("真实界面 / Giao diện thật / Реальный интерфейс", styles["h1"]))
+        story.append(paragraph(
+            "以下截图来自真实 staging Telegram 测试机器人。隐私、金额和收款资料已隐藏；按钮位置和页面结构保持不变。",
+            styles["body"],
+        ))
+        story.extend(figure_flow(
+            "employee-main-menu.png",
+            "图 1 / Hình 1 / Рис. 1：主菜单包含切换店铺、提交收入、总收入、预支薪资、打卡和请假。",
+            styles,
+            doc.width,
+            55 * mm,
+        ))
+        story.extend(figure_flow(
+            "employee-payroll-confirmation.png",
+            "图 2 / Hình 2 / Рис. 2：工资确认记录显示员工、店铺、工资周期、金额拆分、确认时间、付款版本和工资 ID。",
+            styles,
+            doc.width,
+            112 * mm,
+        ))
+        story.append(PageBreak())
+    story.extend(markdown_story(
+        source_path.read_text(encoding="utf-8"), styles, doc.width, figures
+    ))
     doc.multiBuild(story)
     return output_path
 
