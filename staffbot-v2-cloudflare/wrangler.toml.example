@@ -15,5 +15,9 @@ CHECKIN_TIME = "18:30"
 CHECKOUT_TIME = "01:30"
 LATE_FINE = "0.5"
 EARLY_LEAVE_FINE = "1.5"
+MANAGE_BASE_URL = "https://staffbot-v2.staffbot-v2.workers.dev"
 # Put non-secret local defaults here only.
 # Use `wrangler secret put BOT_TOKEN`, `WEBHOOK_SECRET`, and `ADMIN_IDS`.
+
+[env.staging.vars]
+MANAGE_BASE_URL = "https://staffbot-v2-staging.staffbot-v2.workers.dev"

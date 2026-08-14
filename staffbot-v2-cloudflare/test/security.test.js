@@ -1,14 +1,200 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import {
+import worker, {
   csvCell,
+  isTelegramRecipientAllowed,
   isWebhookConfigReady,
+  manageBaseUrl,
   nextLoginFailureState,
+  parseTelegramAllowlist,
   sanitizeLogPayload,
+  scheduledTasksEnabled,
   securityHeaders,
+  serviceEnvironment,
   webhookSecretMatches
 } from '../src/index.js';
+import { telegram } from '../src/telegram-client.js';
+
+test('requires an explicit service environment', () => {
+  assert.equal(serviceEnvironment({}), 'unknown');
+  assert.equal(serviceEnvironment({ ENVIRONMENT: 'production' }), 'production');
+  assert.equal(serviceEnvironment({ ENVIRONMENT: 'staging' }), 'staging');
+  assert.equal(serviceEnvironment({ ENVIRONMENT: 'typo' }), 'unknown');
+});
+
+test('parses a normalized Telegram recipient allowlist', () => {
+  assert.deepEqual(
+    [...parseTelegramAllowlist(' 1001,1002,1001 ,, ')],
+    ['1001', '1002']
+  );
+  assert.deepEqual([...parseTelegramAllowlist('')], []);
+});
+
+test('blocks non-allowlisted staging Telegram chat recipients', () => {
+  const env = {
+    ENVIRONMENT: 'staging',
+    TELEGRAM_RECIPIENT_MODE: 'allowlist',
+    STAGING_ALLOWED_TELEGRAM_IDS: '1001,1002'
+  };
+  assert.equal(isTelegramRecipientAllowed(env, { chat_id: '1001' }), true);
+  assert.equal(isTelegramRecipientAllowed(env, { chat_id: 1002 }), true);
+  assert.equal(isTelegramRecipientAllowed(env, { chat_id: '9999' }), false);
+  assert.equal(
+    isTelegramRecipientAllowed(
+      {
+        ENVIRONMENT: 'staging',
+        STAGING_ALLOWED_TELEGRAM_IDS: '1001'
+      },
+      { chat_id: '1001' }
+    ),
+    false
+  );
+});
+
+test('keeps production and callback-only Telegram calls available', () => {
+  assert.equal(
+    isTelegramRecipientAllowed(
+      { ENVIRONMENT: 'production' },
+      { chat_id: '9999' }
+    ),
+    true
+  );
+  assert.equal(
+    isTelegramRecipientAllowed(
+      {
+        ENVIRONMENT: 'staging',
+        TELEGRAM_RECIPIENT_MODE: 'allowlist',
+        STAGING_ALLOWED_TELEGRAM_IDS: '1001'
+      },
+      { callback_query_id: 'callback-1' }
+    ),
+    true
+  );
+  assert.equal(
+    isTelegramRecipientAllowed(
+      { ENVIRONMENT: 'unknown' },
+      { callback_query_id: 'callback-2' }
+    ),
+    false
+  );
+});
+
+test('does not call Telegram API for a blocked staging recipient', async () => {
+  const originalFetch = globalThis.fetch;
+  let fetchCalls = 0;
+  globalThis.fetch = async () => {
+    fetchCalls += 1;
+    return { json: async () => ({ ok: true }) };
+  };
+
+  const logged = [];
+  const env = {
+    ENVIRONMENT: 'staging',
+    TELEGRAM_RECIPIENT_MODE: 'allowlist',
+    STAGING_ALLOWED_TELEGRAM_IDS: '1001',
+    BOT_TOKEN: 'test-token',
+    DB: {
+      prepare() {
+        return {
+          bind(...params) {
+            return {
+              async run() {
+                logged.push(params);
+                return { success: true };
+              }
+            };
+          }
+        };
+      }
+    }
+  };
+
+  try {
+    const result = await telegram(env, 'sendMessage', {
+      chat_id: '9999',
+      text: 'must not leave staging'
+    });
+    assert.equal(fetchCalls, 0);
+    assert.deepEqual(result, {
+      ok: false,
+      error_code: 403,
+      description: 'staging_recipient_blocked'
+    });
+    assert.equal(logged.length, 1);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('only runs scheduled tasks when explicitly enabled', () => {
+  assert.equal(scheduledTasksEnabled(undefined), false);
+  assert.equal(scheduledTasksEnabled({}), false);
+  assert.equal(scheduledTasksEnabled({ SCHEDULED_TASKS_ENABLED: 'false' }), false);
+  assert.equal(scheduledTasksEnabled({ SCHEDULED_TASKS_ENABLED: 'true' }), true);
+  assert.equal(scheduledTasksEnabled({ SCHEDULED_TASKS_ENABLED: true }), true);
+});
+
+test('keeps the manage origin separate from secrets and rejects URL authority tricks', () => {
+  assert.equal(
+    manageBaseUrl({
+      MANAGE_BASE_URL: 'https://staffbot-v2.staffbot-v2.workers.dev',
+      BOT_TOKEN: 'PRIVATE-BOT-TOKEN'
+    }),
+    'https://staffbot-v2.staffbot-v2.workers.dev'
+  );
+  assert.throws(
+    () => manageBaseUrl({
+      MANAGE_BASE_URL: 'https://PRIVATE-BOT-TOKEN@staffbot.example'
+    }),
+    /valid HTTPS origin/
+  );
+});
+
+test('does not queue scheduled work when automation is disabled', async () => {
+  let waitUntilCalls = 0;
+  await worker.scheduled(
+    { scheduledTime: Date.parse('2026-07-28T03:10:00.000Z') },
+    { SCHEDULED_TASKS_ENABLED: 'false' },
+    {
+      waitUntil(promise) {
+        waitUntilCalls += 1;
+        Promise.resolve(promise).catch(() => {});
+      }
+    }
+  );
+  assert.equal(waitUntilCalls, 0);
+});
+
+test('identifies staging in health and admin responses', async () => {
+  const context = { waitUntil() {} };
+  const stagingEnv = { ENVIRONMENT: 'staging' };
+  const health = await worker.fetch(
+    new Request('https://staffbot.example/'),
+    stagingEnv,
+    context
+  );
+  assert.deepEqual(await health.json(), {
+    ok: true,
+    service: 'staffbot-v2',
+    environment: 'staging',
+    admin: '/admin'
+  });
+
+  const stagingAdmin = await worker.fetch(
+    new Request('https://staffbot.example/admin'),
+    stagingEnv,
+    context
+  );
+  assert.match(await stagingAdmin.text(), /STAGING 测试环境/);
+
+  const productionAdmin = await worker.fetch(
+    new Request('https://staffbot.example/admin'),
+    { ENVIRONMENT: 'production' },
+    context
+  );
+  assert.doesNotMatch(await productionAdmin.text(), /STAGING 测试环境/);
+});
 
 test('prefixes CSV cells that spreadsheet apps would treat as formulas', () => {
   assert.equal(csvCell('=IMPORTXML("https://example.com")'), '"\'=IMPORTXML(""https://example.com"")"');

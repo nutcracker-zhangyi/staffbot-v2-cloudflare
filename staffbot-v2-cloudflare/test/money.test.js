@@ -14,9 +14,9 @@ import {
   compactCallbackData,
   formatMoney,
   incomeAdminNotificationText,
-  parseStoreAmount,
-  render
+  parseStoreAmount
 } from '../src/index.js';
+import { render } from '../src/i18n.js';
 
 test('creates one editable income fine from an approved absence', () => {
   assert.deepEqual(absenceFineRecordDraft({
@@ -120,7 +120,7 @@ test('totals salary advance rows as payroll deductions', () => {
   ]), 1300000);
 });
 
-test('income employee messages do not mention fines', () => {
+test('income employee messages do not mention fines in any language', () => {
   const params = {
     store: '店铺A',
     income: '₫3,000,000',
@@ -129,8 +129,11 @@ test('income employee messages do not mention fines', () => {
     fine: '₫500,000'
   };
 
-  assert.equal(render('zh', 'income_submitted', params).includes('罚款'), false);
-  assert.equal(render('zh', 'income_approved', params).includes('罚款'), false);
+  const fineWords = { zh: '罚款', en: 'fine', vi: 'phạt', ru: 'штраф' };
+  for (const [lang, fineWord] of Object.entries(fineWords)) {
+    assert.equal(render(lang, 'income_submitted', params).toLowerCase().includes(fineWord), false);
+    assert.equal(render(lang, 'income_approved', params).toLowerCase().includes(fineWord), false);
+  }
 });
 
 test('income admin approval notification does not mention fines', () => {

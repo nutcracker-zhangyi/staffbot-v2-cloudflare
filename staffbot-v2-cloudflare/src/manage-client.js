@@ -1,0 +1,2329 @@
+export const MANAGE_CLIENT = String.raw`const app = document.getElementById('app');
+
+const state = {
+  session: null,
+  csrfToken: '',
+  stores: [],
+  storeId: '',
+  taskType: '',
+  tasks: [],
+  payroll: [],
+  payrollListGeneration: 0,
+  activeNav: 'tasks',
+  currentTask: null,
+  currentPayroll: null,
+  payrollMode: 'dossier',
+  paymentAmounts: { bank: '', usdt: '', cash: '' },
+  paymentErrors: { bank: '', usdt: '', cash: '' },
+  proofUploads: [],
+  paymentBusy: false,
+  submitKey: '',
+  submitAttemptId: '',
+  claimTimer: 0,
+  online: navigator.onLine,
+  decisionMode: '',
+  takeoverMode: '',
+  message: '',
+  requestGeneration: 0,
+  taskListGeneration: 0,
+  mutationBusy: false,
+  authorityStale: false,
+  renewRetry: null
+};
+
+const approvalTypes = new Set(['income', 'leave', 'absence', 'advance']);
+const taskLabels = {
+  income: '收入',
+  leave: '请假',
+  absence: '缺勤罚款',
+  advance: '预支工资',
+  payroll: '工资付款'
+};
+const statusLabels = {
+  pending: '待处理',
+  approved: '已通过',
+  rejected: '已拒绝',
+  disputed: '员工反馈问题',
+  awaiting_admin_payment: '等待付款'
+};
+
+function payrollStatusLabel(status, context = 'list') {
+  if (status === 'confirmed') {
+    return context === 'detail' ? '工资已完成' : '员工已确认';
+  }
+  return statusLabels[status] || status;
+}
+
+function payrollClaimLabel(payroll) {
+  if (payroll.status === 'confirmed') return '已完成';
+  return claimIsActive(payroll.claim)
+    ? '处理人：' + payroll.claim.claimed_by
+    : '未领取';
+}
+
+const paymentAttemptStatusLabels = {
+  draft: '付款草稿',
+  submitted: '等待员工确认',
+  employee_confirmed: '员工已确认',
+  employee_disputed: '员工反馈付款问题',
+  abandoned: '已作废'
+};
+
+const employeeResponseLabels = {
+  confirmed: '已确认收到工资',
+  disputed: '付款有问题'
+};
+
+const payrollHistoryActionLabels = {
+  prepare_admin_pwa_acceptance_payroll: '准备移动端工资测试',
+  create_payroll_payment_attempt: '创建付款版本',
+  resume_payroll_payment_attempt: '恢复付款版本',
+  transfer_payroll_payment_attempt: '转交付款负责人',
+  save_payroll_payment_attempt_split: '保存付款拆分',
+  upload_payroll_draft_proof: '上传付款回执',
+  delete_payroll_draft_proof: '删除付款回执',
+  submit_payroll_payment: '提交付款并通知员工',
+  submit_payroll_payment_attempt: '提交付款并通知员工',
+  payroll_notification_delivery_claimed: '开始发送员工通知',
+  payroll_notification_delivery_renewed: '继续发送员工通知',
+  payroll_notification_failed: '员工通知发送失败',
+  payroll_notification_sent: '员工通知发送成功',
+  confirm_payroll_receipt: '员工确认收到工资'
+};
+
+function paymentAttemptStatusLabel(status) {
+  return paymentAttemptStatusLabels[status] || status;
+}
+
+function employeeResponseLabel(response) {
+  return employeeResponseLabels[response] || response;
+}
+
+function historyActionLabel(action) {
+  return payrollHistoryActionLabels[action] || action || '处理';
+}
+
+function escapeHtml(value) {
+  return String(value == null ? '' : value)
+    .replaceAll('&', '&amp;')
+    .replaceAll('<', '&lt;')
+    .replaceAll('>', '&gt;')
+    .replaceAll('"', '&quot;')
+    .replaceAll("'", '&#39;');
+}
+
+async function api(path, options = {}) {
+  const method = options.method || 'GET';
+  const multipart = typeof FormData !== 'undefined' && options.body instanceof FormData;
+  const headers = { ...(multipart ? {} : { 'content-type': 'application/json' }), ...(options.headers || {}) };
+  if (method !== 'GET' && state.csrfToken && path.startsWith('/api/manage/')) {
+    headers['x-csrf-token'] = state.csrfToken;
+  }
+  const response = await fetch(path, { ...options, method, headers });
+  const result = await response.json();
+  if (!response.ok) {
+    const error = new Error(result.error || 'request_failed');
+    error.status = response.status;
+    error.result = result;
+    throw error;
+  }
+  return result;
+}
+
+function loginView() {
+  stopClaimTimer();
+  app.innerHTML = '<div id="offline-banner" class="offline" role="status"'
+    + (state.online ? ' hidden' : '')
+    + '>当前离线，只能查看已加载内容</div>'
+    + '<section class="auth-card">'
+    + '<p class="eyebrow">StaffBot</p>'
+    + '<h1>管理端登录</h1>'
+    + '<p>验证码将发送到管理员的 Telegram。</p>'
+    + '<label for="telegram-id">Telegram 管理员 ID</label>'
+    + '<input id="telegram-id" autocomplete="username" inputmode="numeric">'
+    + '<button id="send-code" type="button"' + disabled(!state.online) + '>发送验证码</button>'
+    + '<label for="login-code">验证码</label>'
+    + '<input id="login-code" autocomplete="one-time-code" inputmode="numeric">'
+    + '<button id="verify-code" type="button"' + disabled(!state.online) + '>登录</button>'
+    + '<p id="login-status" role="status"></p>'
+    + '</section>';
+
+  document.getElementById('send-code').onclick = async () => {
+    if (!state.online) return;
+    const telegramId = document.getElementById('telegram-id').value;
+    try {
+      await api('/api/admin/login/start', {
+        method: 'POST',
+        body: JSON.stringify({ telegram_id: telegramId })
+      });
+      document.getElementById('login-status').textContent = '验证码已发送';
+    } catch (error) {
+      document.getElementById('login-status').textContent = error.message;
+    }
+  };
+
+  document.getElementById('verify-code').onclick = async () => {
+    if (!state.online) return;
+    const telegramId = document.getElementById('telegram-id').value;
+    const code = document.getElementById('login-code').value;
+    try {
+      await api('/api/admin/login/verify', {
+        method: 'POST',
+        body: JSON.stringify({ telegram_id: telegramId, code })
+      });
+      await boot();
+    } catch (error) {
+      document.getElementById('login-status').textContent = error.message;
+    }
+  };
+}
+
+function resetAuthenticatedState() {
+  stopClaimTimer();
+  state.requestGeneration += 1;
+  state.session = null;
+  state.csrfToken = '';
+  state.stores = [];
+  state.storeId = '';
+  state.taskType = '';
+  state.tasks = [];
+  state.payroll = [];
+  state.payrollListGeneration = 0;
+  state.activeNav = 'tasks';
+  state.currentTask = null;
+  clearPayrollState();
+  state.online = navigator.onLine;
+  state.decisionMode = '';
+  state.takeoverMode = '';
+  state.message = '';
+  state.taskListGeneration = 0;
+  state.mutationBusy = false;
+  state.authorityStale = false;
+  state.renewRetry = null;
+}
+
+function shell(content) {
+  app.innerHTML = '<header class="app-header">'
+    + '<div><p class="eyebrow">StaffBot</p><h1>移动管理端</h1></div>'
+    + '<span class="account">' + escapeHtml(state.session.telegram_id) + '</span>'
+    + '</header>'
+    + '<div id="offline-banner" class="offline" role="status"'
+    + (state.online ? ' hidden' : '')
+    + '>当前离线，只能查看已加载内容</div>'
+    + '<p id="app-message" class="app-message" role="status">'
+    + escapeHtml(state.message) + '</p>'
+    + '<section class="content">' + content + '</section>'
+    + '<nav class="bottom-nav" aria-label="Bottom navigation">'
+    + navButton('tasks', '待办')
+    + navButton('approvals', '审批')
+    + navButton('payroll', '工资')
+    + navButton('more', '更多')
+    + '</nav>';
+
+  for (const [name, id] of [['tasks', 'nav-tasks'], ['approvals', 'nav-approvals'], ['payroll', 'nav-payroll'], ['more', 'nav-more']]) {
+    document.getElementById(id).onclick = () => {
+      state.requestGeneration += 1;
+      state.activeNav = name;
+      state.currentTask = null;
+      clearPayrollState();
+      state.decisionMode = '';
+      state.takeoverMode = '';
+      state.message = '';
+      state.authorityStale = false;
+      state.renewRetry = null;
+      stopClaimTimer();
+      if (name === 'payroll') loadPayroll();
+      else renderCurrent();
+    };
+  }
+}
+
+function navButton(name, label) {
+  return '<button id="nav-' + name + '" type="button"'
+    + (state.activeNav === name ? ' aria-current="page"' : '')
+    + '>' + label + '</button>';
+}
+
+function renderCurrent() {
+  if (state.currentTask) return renderTaskDetail();
+  if (state.currentPayroll) return renderPayrollDetail();
+  if (state.activeNav === 'tasks' || state.activeNav === 'approvals') {
+    return renderTaskList();
+  }
+  if (state.activeNav === 'payroll') {
+    return renderPayrollList();
+  }
+  shell('<div class="more-panel"><h2>更多</h2>'
+    + '<p id="session-admin">已登录：' + escapeHtml(state.session.telegram_id) + '</p>'
+    + '<button id="logout" class="secondary" type="button"'
+    + disabled(!state.online || state.authorityStale) + '>退出登录</button></div>');
+  document.getElementById('logout').onclick = async () => {
+    if (!state.online || state.authorityStale) return;
+    try {
+      await api('/api/admin/logout', { method: 'POST' });
+    } finally {
+      resetAuthenticatedState();
+      loginView();
+    }
+  };
+}
+
+function taskListFilters() {
+  const stores = ['<option value="">全部店铺</option>'].concat(state.stores.map((store) => (
+    '<option value="' + escapeHtml(store.store_id) + '"'
+      + (state.storeId === store.store_id ? ' selected' : '')
+      + '>' + escapeHtml(store.name) + '</option>'
+  ))).join('');
+  return '<div class="filters">'
+    + '<label for="store-filter">店铺</label><select id="store-filter">' + stores + '</select>'
+    + '<label for="type-filter">类型</label><select id="type-filter">'
+    + '<option value="">全部类型</option>'
+    + '<option value="income">收入</option><option value="leave">请假</option>'
+    + '<option value="absence">缺勤罚款</option><option value="advance">预支工资</option>'
+    + '</select></div>';
+}
+
+function renderTaskList() {
+  stopClaimTimer();
+  const approvalOnly = state.activeNav === 'approvals';
+  const tasks = approvalOnly
+    ? state.tasks.filter((task) => approvalTypes.has(task.task_type))
+    : state.tasks;
+  const cards = tasks.length ? tasks.map(taskCard).join('')
+    : '<div class="empty-state"><h3>暂无待办</h3><p>新的任务会显示在这里。</p></div>';
+  shell('<div class="section-heading"><div><p class="eyebrow">'
+    + (approvalOnly ? '审批中心' : '任务中心') + '</p><h2>'
+    + (approvalOnly ? '审批' : '待办任务') + '</h2></div><span>' + tasks.length + ' 项</span></div>'
+    + taskListFilters()
+    + '<div id="task-list" class="task-list">' + cards + '</div>');
+
+  const storeFilter = document.getElementById('store-filter');
+  const typeFilter = document.getElementById('type-filter');
+  storeFilter.onchange = async () => {
+    state.storeId = storeFilter.value;
+    await loadTasks();
+  };
+  typeFilter.value = state.taskType;
+  typeFilter.onchange = async () => {
+    state.taskType = typeFilter.value;
+    await loadTasks();
+  };
+  tasks.forEach((task, index) => {
+    const button = document.getElementById('open-task-' + index);
+    if (button) button.onclick = () => openTask(task.task_type, task.task_id);
+  });
+}
+
+function taskCard(task, index) {
+  const amount = task.amount_micros !== null && task.amount_micros !== undefined
+    ? formatMoney(task.amount_micros, task.currency)
+    : escapeHtml(task.business_date || '无金额');
+  const handler = claimIsActive(task.claim)
+    ? '处理人：' + escapeHtml(task.claim.claimed_by)
+    : '未领取';
+  const action = approvalTypes.has(task.task_type)
+    ? '<button id="open-task-' + index + '" class="secondary" type="button">查看详情</button>'
+    : '<span class="muted">请到工资页处理</span>';
+  return '<article class="task-card">'
+    + '<div class="task-card-top"><span class="type-badge">'
+    + escapeHtml(taskLabels[task.task_type] || task.task_type)
+    + '</span><span class="urgency">' + urgencyLabel(task.urgency) + '</span></div>'
+    + '<h3>' + escapeHtml(task.employee_name) + '</h3>'
+    + '<p>' + escapeHtml(task.store_name) + ' · ' + amount + '</p>'
+    + '<p class="meta">' + escapeHtml(statusLabels[task.status] || task.status)
+    + ' · ' + handler + '</p>'
+    + '<p class="meta">业务日期：' + escapeHtml(task.business_date || '—') + '</p>'
+    + '<p class="meta">提交：' + escapeHtml(formatDateTime(task.submitted_at)) + '</p>'
+    + action + '</article>';
+}
+
+function clearPayrollState() {
+  clearAttemptTransientState();
+  state.currentPayroll = null;
+  state.payrollMode = 'dossier';
+  state.paymentAmounts = { bank: '', usdt: '', cash: '' };
+  state.paymentErrors = { bank: '', usdt: '', cash: '' };
+  state.paymentBusy = false;
+  state.takeoverMode = '';
+}
+
+function clearAttemptTransientState() {
+  clearProofUploadState();
+  state.submitKey = '';
+  state.submitAttemptId = '';
+}
+
+function clearProofUploadState() {
+  for (const upload of state.proofUploads || []) {
+    if (upload.previewUrl) URL.revokeObjectURL(upload.previewUrl);
+  }
+  state.proofUploads = [];
+}
+
+function draftAttemptId(detail = state.currentPayroll) {
+  const draft = detail && detail.attempts.find((attempt) => attempt.status === 'draft');
+  return draft ? draft.attempt_id : '';
+}
+
+function adoptPayrollDossier(detail) {
+  const previousAttemptId = draftAttemptId();
+  for (const attempt of detail.attempts || []) {
+    for (const proof of attempt.proofs || []) {
+      if (!proof.attempt_id) proof.attempt_id = attempt.attempt_id;
+    }
+  }
+  const nextAttemptId = draftAttemptId(detail);
+  const transientAttemptIds = new Set([
+    ...state.proofUploads.map((upload) => upload.attemptId),
+    state.submitAttemptId
+  ].filter(Boolean));
+  if (
+    (previousAttemptId && previousAttemptId !== nextAttemptId)
+    || Array.from(transientAttemptIds).some((attemptId) => attemptId !== nextAttemptId)
+  ) {
+    clearAttemptTransientState();
+  }
+  state.currentPayroll = detail;
+}
+
+function payrollStoreOptions() {
+  return ['<option value="">全部店铺</option>'].concat(state.stores.map((store) => (
+    '<option value="' + escapeHtml(store.store_id) + '"'
+      + (state.storeId === store.store_id ? ' selected' : '')
+      + '>' + escapeHtml(store.name) + '</option>'
+  ))).join('');
+}
+
+function renderPayrollList() {
+  stopClaimTimer();
+  const cards = state.payroll.length ? state.payroll.map((item, index) => {
+    const store = state.stores.find((entry) => entry.store_id === item.store_id);
+    const handler = payrollClaimLabel(item);
+    return '<article class="task-card"><div class="task-card-top">'
+      + '<span class="type-badge">工资付款</span><span class="meta">版本 '
+      + escapeHtml(item.current_attempt ? item.current_attempt.version : '—') + '</span></div>'
+      + '<h3>' + escapeHtml(item.employee_name) + '</h3>'
+      + '<p>' + escapeHtml(store ? store.name : item.store_id) + ' · '
+      + formatMoney(item.amount_snapshot_micros, item.currency) + '</p>'
+      + '<p class="meta">' + escapeHtml(payrollStatusLabel(item.status))
+      + ' · ' + escapeHtml(handler) + '</p>'
+      + '<p class="meta">截止：' + escapeHtml(formatPayrollDateTime(item.cutoff_at, item.store_id)) + '</p>'
+      + '<button id="open-payroll-' + index + '" class="secondary" type="button">查看工资档案</button>'
+      + '</article>';
+  }).join('') : '<div class="empty-state"><h3>暂无工资记录</h3><p>工资记录会显示在这里。</p></div>';
+  shell('<div class="section-heading"><div><p class="eyebrow">工资中心</p><h2>工资</h2></div>'
+    + '<span>' + state.payroll.length + ' 项</span></div>'
+    + '<div class="filters payroll-filter"><label for="payroll-store-filter">店铺</label>'
+    + '<select id="payroll-store-filter">' + payrollStoreOptions() + '</select></div>'
+    + '<div class="task-list">' + cards + '</div>');
+  const filter = document.getElementById('payroll-store-filter');
+  filter.onchange = async () => {
+    state.storeId = filter.value;
+    await loadPayroll();
+  };
+  state.payroll.forEach((item, index) => {
+    document.getElementById('open-payroll-' + index).onclick = () => openPayroll(item.payroll_id);
+  });
+}
+
+async function loadPayroll({ render = true, generation = state.requestGeneration } = {}) {
+  const listGeneration = state.payrollListGeneration + 1;
+  state.payrollListGeneration = listGeneration;
+  const storeIds = state.storeId
+    ? [state.storeId]
+    : state.stores.map((store) => store.store_id);
+  try {
+    const results = await Promise.all(storeIds.map((storeId) => api('/api/manage/stores/'
+      + encodeURIComponent(storeId) + '/payroll')));
+    if (
+      !requestIsCurrent(generation)
+      || listGeneration !== state.payrollListGeneration
+      || state.activeNav !== 'payroll'
+    ) return state.payroll;
+    state.payroll = results.flatMap((result) => result.payroll || []);
+    state.message = '';
+  } catch {
+    if (!requestIsCurrent(generation) || state.activeNav !== 'payroll') return state.payroll;
+    state.payroll = [];
+    state.message = '暂时无法加载工资记录';
+  }
+  if (render) renderCurrent();
+  return state.payroll;
+}
+
+function payrollIdentity(value) {
+  const payroll = value && value.payroll ? value.payroll : value;
+  return {
+    storeId: String(payroll && payroll.store_id != null ? payroll.store_id : ''),
+    payrollId: String(payroll && payroll.payroll_id != null ? payroll.payroll_id : '')
+  };
+}
+
+function payrollIdentityMatches(value, expected) {
+  const actual = payrollIdentity(value);
+  return actual.storeId === expected.storeId
+    && actual.payrollId === expected.payrollId;
+}
+
+function payrollKey(detail = state.currentPayroll) {
+  return payrollIdentity(detail);
+}
+
+function payrollRequestIsCurrent(generation, key) {
+  return Boolean(
+    state.session
+    && generation === state.requestGeneration
+    && payrollIdentityMatches(state.currentPayroll, key)
+  );
+}
+
+async function openPayroll(payrollId) {
+  const item = state.payroll.find((row) => row.payroll_id === payrollId);
+  if (!item) {
+    state.message = '工资记录不存在或无权查看';
+    renderCurrent();
+    return;
+  }
+  return openPayrollItem(item);
+}
+
+async function openPayrollItem(item) {
+  const generation = state.requestGeneration + 1;
+  state.requestGeneration = generation;
+  clearPayrollState();
+  const key = payrollIdentity(item);
+  try {
+    const detail = await api(payrollPath(item.store_id, item.payroll_id));
+    if (generation !== state.requestGeneration || !state.session) return;
+    if (!detail.payroll || !payrollIdentityMatches(detail, key)) {
+      state.message = '工资记录不存在或无权查看';
+      renderCurrent();
+      return;
+    }
+    adoptPayrollDossier(detail);
+    state.message = '';
+    renderPayrollDetail();
+  } catch (error) {
+    if (generation !== state.requestGeneration || !state.session) return;
+    state.message = error.status === 403 || error.status === 404
+      ? '工资记录不存在或无权查看'
+      : '暂时无法加载工资档案';
+    renderCurrent();
+  }
+}
+
+function payrollPath(storeId, payrollId) {
+  return '/api/manage/stores/' + encodeURIComponent(storeId)
+    + '/payroll/' + encodeURIComponent(payrollId);
+}
+
+function renderPayrollDetail() {
+  const detail = state.currentPayroll;
+  const payroll = detail.payroll;
+  const store = state.stores.find((item) => item.store_id === payroll.store_id);
+  const payment = state.payrollMode === 'payment' ? paymentForm(detail) : '';
+  const completed = payroll.status === 'confirmed';
+  const handler = claimIsActive(payroll.claim)
+    ? '当前处理人：' + escapeHtml(payroll.claim.claimed_by)
+    : '当前未领取';
+  const occupiedByOther = claimOwnedByOther(payroll.claim);
+  const payrollAction = state.payrollMode === 'dossier' && payrollCanStart(payroll)
+    ? occupiedByOther
+      ? '<button id="takeover" class="danger" type="button"'
+        + disabled(!state.online || state.paymentBusy || state.authorityStale)
+        + '>负责人接管</button>'
+      : '<button id="start-payroll-payment" type="button"'
+        + disabled(!state.online || state.paymentBusy || state.authorityStale)
+        + '>领取并开始付款</button>'
+    : '';
+  shell('<button id="back-to-payroll" class="text-button" type="button">← 返回工资</button>'
+    + '<article class="detail-card payroll-dossier"><div class="task-card-top">'
+    + '<span class="type-badge">工资档案</span><span>'
+    + escapeHtml(payrollStatusLabel(payroll.status, 'detail')) + '</span></div>'
+    + '<h2>' + escapeHtml(payroll.employee_name) + '</h2>'
+    + '<p class="meta">店铺：' + escapeHtml(store ? store.name : payroll.store_id) + '</p>'
+    + (completed ? '' : '<p id="claim-status" class="claim-status">' + handler + '</p>')
+    + '<section><h3>固定工资事实</h3><dl class="facts">'
+    + '<div><dt>工资总额</dt><dd>' + formatMoney(payroll.amount_snapshot_micros, payroll.currency) + '</dd></div>'
+    + '<div><dt>工资周期</dt><dd>' + escapeHtml(formatPayrollDateTime(payroll.period_start, payroll.store_id))
+    + ' — ' + escapeHtml(formatPayrollDateTime(payroll.cutoff_at, payroll.store_id)) + '</dd></div>'
+    + '<div><dt>工资 ID</dt><dd>' + escapeHtml(payroll.payroll_id) + '</dd></div>'
+    + (completed
+      ? '<div><dt>确认账号</dt><dd>' + escapeHtml(payroll.employee_id || '—') + '</dd></div>'
+        + '<div><dt>确认时间</dt><dd>'
+        + escapeHtml(formatPayrollDateTime(payroll.confirmed_at, payroll.store_id))
+        + '（店铺时区）</dd></div>'
+      : '')
+    + '<div><dt>银行卡</dt><dd>' + escapeHtml(payroll.payment_profile.bank || '未提供') + '</dd></div>'
+    + '<div><dt>USDT</dt><dd>' + escapeHtml(payroll.payment_profile.usdt || '未提供') + '</dd></div>'
+    + '</dl>' + (payroll.payment_profile.has_usdt_qr
+      ? '<figure class="proof-card payment-qr"><img src="'
+        + escapeHtml(payroll.payment_profile.usdt_qr_url)
+        + '" alt="员工 USDT 收款二维码" loading="lazy"><figcaption>USDT 收款二维码</figcaption></figure>'
+      : '') + '</section>'
+    + payrollAttemptsSection(detail.attempts, payroll.store_id)
+    + historySection(detail.history, payroll.store_id)
+    + payrollAction
+    + takeoverPanel('payroll', state.paymentBusy)
+    + payment + '</article>');
+  document.getElementById('back-to-payroll').onclick = () => {
+    state.requestGeneration += 1;
+    clearPayrollState();
+    state.message = '';
+    stopClaimTimer();
+    renderCurrent();
+  };
+  const start = document.getElementById('start-payroll-payment');
+  if (start) start.onclick = startPayrollPayment;
+  const takeoverButton = document.getElementById('takeover');
+  if (takeoverButton) takeoverButton.onclick = () => {
+    if (!state.online || state.paymentBusy || state.authorityStale) return;
+    state.takeoverMode = 'payroll';
+    renderPayrollDetail();
+  };
+  const takeoverConfirm = document.getElementById('takeover-confirm');
+  if (takeoverConfirm) takeoverConfirm.onclick = takeoverCurrentPayroll;
+  const takeoverCancel = document.getElementById('takeover-cancel');
+  if (takeoverCancel) takeoverCancel.onclick = () => {
+    state.takeoverMode = '';
+    renderPayrollDetail();
+  };
+  for (const attempt of detail.attempts || []) {
+    const retry = document.getElementById(
+      'retry-payroll-notification-' + attempt.attempt_id
+    );
+    if (retry) retry.onclick = () => retryPayrollNotification(attempt.attempt_id);
+  }
+  bindPaymentControls();
+  if (payrollCanStart(payroll)) startPayrollClaimTimer();
+  else stopClaimTimer();
+}
+
+function payrollCanStart(payroll) {
+  return ['awaiting_admin_payment', 'disputed'].includes(payroll.status);
+}
+
+function claimOwnedByOther(claim) {
+  return claimIsActive(claim) && claim.claimed_by !== state.session.telegram_id;
+}
+
+function payrollAttemptsSection(attempts, storeId) {
+  const rows = Array.isArray(attempts) ? attempts : [];
+  if (!rows.length) return '<section><h3>付款版本</h3><p class="empty-copy">暂无付款版本</p></section>';
+  return '<section><h3>全部付款版本</h3><div class="attempt-history">'
+    + rows.map((attempt) => '<article class="attempt-card"><div class="task-card-top"><strong>版本 '
+      + escapeHtml(attempt.version) + '</strong><span>'
+      + escapeHtml(paymentAttemptStatusLabel(attempt.status)) + '</span></div>'
+      + '<p>银行卡 ' + formatMoney(attempt.bank_micros, state.currentPayroll.payroll.currency)
+      + ' · USDT ' + formatMoney(attempt.usdt_micros, state.currentPayroll.payroll.currency)
+      + ' · 现金 ' + formatMoney(attempt.cash_micros, state.currentPayroll.payroll.currency) + '</p>'
+      + (attempt.submitted_at
+        ? '<p class="meta">提交：' + escapeHtml(attempt.submitted_by || '—') + ' · '
+          + escapeHtml(formatPayrollDateTime(attempt.submitted_at, storeId)) + '</p>' : '')
+      + (attempt.employee_response
+        ? '<p class="meta">员工反馈：' + escapeHtml(employeeResponseLabel(attempt.employee_response)) + ' · '
+          + escapeHtml(formatPayrollDateTime(attempt.employee_responded_at, storeId)) + '</p>' : '')
+      + (payrollNotificationRetryable(attempt.attempt_id)
+        ? '<button id="retry-payroll-notification-' + escapeHtml(attempt.attempt_id)
+          + '" class="secondary" type="button"'
+          + disabled(!state.online || state.paymentBusy || state.authorityStale)
+          + '>重试 Telegram 通知</button>' : '')
+      + '<div class="proof-grid">' + (attempt.proofs || []).map((proof) => (
+        '<figure class="proof-card"><img src="' + escapeHtml(proof.url || privateProofUrl(proof.proof_id))
+          + '" alt="' + escapeHtml(paymentMethodLabel(proof.method)) + '付款回执" loading="lazy">'
+          + '<figcaption>' + escapeHtml(paymentMethodLabel(proof.method)) + ' · '
+          + escapeHtml(formatPayrollDateTime(proof.uploaded_at, storeId)) + '</figcaption>'
+          + (attempt.status === 'draft' && state.payrollMode === 'payment' && proof.superseded_at == null
+            ? '<button id="delete-proof-' + escapeHtml(proof.proof_id)
+              + '" class="danger" type="button"' + disabled(!canMutatePayment())
+              + '>删除回执</button>' : '')
+          + '</figure>'
+      )).join('') + '</div></article>').join('')
+    + '</div></section>';
+}
+
+function payrollNotificationRetryable(attemptId) {
+  const detail = state.currentPayroll;
+  const attempt = detail && detail.attempts.find(
+    (item) => String(item.attempt_id) === String(attemptId)
+  );
+  if (
+    !detail
+    || detail.payroll.status !== 'awaiting_employee_confirmation'
+    || !attempt
+    || attempt.status !== 'submitted'
+  ) return false;
+  return latestNotificationAction(
+    detail.history,
+    new Set(['payroll_notification_failed', 'payroll_notification_sent']),
+    String(attemptId)
+  ) === 'payroll_notification_failed';
+}
+
+function privateProofUrl(proofId) {
+  const payroll = state.currentPayroll.payroll;
+  return '/api/manage/stores/' + encodeURIComponent(payroll.store_id)
+    + '/payroll/proofs/' + encodeURIComponent(proofId);
+}
+
+function paymentMethodLabel(method) {
+  return { bank: '银行卡', usdt: 'USDT', cash: '现金' }[method] || method;
+}
+
+function currentDraft() {
+  return state.currentPayroll && state.currentPayroll.attempts.find((attempt) => attempt.status === 'draft');
+}
+
+function paymentForm(detail) {
+  const payroll = detail.payroll;
+  const draft = currentDraft();
+  if (!draft) return '<section class="payment-form"><p class="error">付款草稿不可用，当前页面只读。</p></section>';
+  const totals = paymentTotals();
+  const methods = ['bank', 'usdt', 'cash'].filter((method) => (
+    payroll.payment_profile['accepts_' + method]
+  ));
+  return '<section class="payment-form"><h3>本次付款</h3>'
+    + '<p class="meta">草稿版本 ' + escapeHtml(draft.version) + '</p>'
+    + methods.map((method) => paymentMethodControl(method, draft)).join('')
+    + '<dl class="payment-summary facts">'
+    + '<div><dt>已分配</dt><dd id="payment-allocated">' + formatMoney(totals.allocated, payroll.currency) + '</dd></div>'
+    + '<div><dt>工资总额</dt><dd id="payment-total">' + formatMoney(payroll.amount_snapshot_micros, payroll.currency) + '</dd></div>'
+    + '<div><dt>差额</dt><dd id="payment-difference">' + formatMoney(totals.difference, payroll.currency) + '</dd></div>'
+    + '</dl><p id="payment-error" class="error" role="alert"></p>'
+    + '<button id="save-payment-draft" class="secondary" type="button"'
+    + disabled(!canSavePaymentSplit()) + '>保存付款拆分</button>'
+    + '<button id="submit-payroll-payment" type="button"'
+    + disabled(!canSubmitPayment()) + '>提交付款并通知员工</button></section>';
+}
+
+function paymentMethodControl(method, draft) {
+  const locked = !canMutatePayment();
+  const uploaded = (draft.proofs || []).filter((proof) => (
+    proof.method === method && proof.superseded_at == null
+  ));
+  const pending = state.proofUploads.filter((upload) => (
+    upload.attemptId === draft.attempt_id && upload.method === method
+  ));
+  return '<div class="payment-method"><label for="' + method + '-amount">'
+    + paymentMethodLabel(method) + '金额</label>'
+    + '<input id="' + method + '-amount" inputmode="decimal" value="'
+    + escapeHtml(state.paymentAmounts[method]) + '" aria-describedby="' + method + '-amount-error"'
+    + disabled(locked) + '>'
+    + '<p id="' + method + '-amount-error" class="error">'
+    + escapeHtml(state.paymentErrors[method]) + '</p>'
+    + '<div class="upload-actions"><label class="file-action">拍照上传'
+    + '<input id="' + method + '-camera" class="file-input" type="file"'
+    + ' accept="image/jpeg,image/png,image/webp" capture="environment"'
+    + disabled(locked) + '></label>'
+    + '<label class="file-action">从相册选择'
+    + '<input id="' + method + '-library" class="file-input" type="file"'
+    + ' accept="image/jpeg,image/png,image/webp" multiple'
+    + disabled(locked) + '></label></div>'
+    + '<p class="meta">已保存 ' + uploaded.length + ' 张回执</p>'
+    + '<div class="upload-list">' + pending.map(uploadStatus).join('') + '</div></div>';
+}
+
+function uploadStatus(upload) {
+  const status = upload.status === 'uploading' ? '上传中'
+    : upload.status === 'uploaded' ? '已上传' : '上传失败';
+  return '<div class="upload-item"><span>' + escapeHtml(upload.file.name) + ' · ' + status + '</span>'
+    + (upload.status === 'error'
+      ? '<button id="retry-upload-' + upload.id + '" class="secondary" type="button"'
+        + disabled(!canMutatePayment()) + '>重试 '
+        + escapeHtml(upload.file.name) + '</button>' : '') + '</div>';
+}
+
+function bindPaymentControls() {
+  if (state.payrollMode !== 'payment') return;
+  for (const method of ['bank', 'usdt', 'cash']) {
+    const amount = document.getElementById(method + '-amount');
+    if (amount) amount.oninput = () => {
+      state.paymentAmounts[method] = amount.value;
+      state.paymentErrors[method] = decimalToMicros(amount.value).error;
+      updatePaymentValidation();
+    };
+    for (const source of ['camera', 'library']) {
+      const input = document.getElementById(method + '-' + source);
+      if (input) input.onchange = () => uploadProof(method, input.files);
+    }
+  }
+  const save = document.getElementById('save-payment-draft');
+  if (save) save.onclick = savePaymentDraft;
+  const submit = document.getElementById('submit-payroll-payment');
+  if (submit) submit.onclick = submitPayrollPayment;
+  const draft = currentDraft();
+  for (const proof of draft ? draft.proofs || [] : []) {
+    const remove = document.getElementById('delete-proof-' + proof.proof_id);
+    if (remove) remove.onclick = () => deleteDraftProof(proof.proof_id);
+  }
+  for (const upload of state.proofUploads) {
+    if (!draft || upload.attemptId !== draft.attempt_id) continue;
+    const retry = document.getElementById('retry-upload-' + upload.id);
+    if (retry) retry.onclick = () => retryProofUpload(upload.id);
+  }
+}
+
+function updatePaymentValidation() {
+  const totals = paymentTotals();
+  const payroll = state.currentPayroll.payroll;
+  for (const method of ['bank', 'usdt', 'cash']) {
+    const error = document.getElementById(method + '-amount-error');
+    if (error) error.textContent = state.paymentErrors[method];
+  }
+  const allocated = document.getElementById('payment-allocated');
+  if (allocated) allocated.textContent = formatMoney(totals.allocated, payroll.currency);
+  const difference = document.getElementById('payment-difference');
+  if (difference) difference.textContent = formatMoney(totals.difference, payroll.currency);
+  setControlDisabled(
+    document.getElementById('save-payment-draft'),
+    !canSavePaymentSplit()
+  );
+  setControlDisabled(
+    document.getElementById('submit-payroll-payment'),
+    !canSubmitPayment()
+  );
+}
+
+function setControlDisabled(control, isDisabled) {
+  if (!control) return;
+  control.disabled = isDisabled;
+  control.setAttribute('aria-disabled', String(isDisabled));
+}
+
+function decimalToMicros(value) {
+  const normalized = String(value == null ? '' : value).trim();
+  if (normalized === '') return { micros: 0, error: '' };
+  const match = normalized.match(/^(0|[1-9]\d*)(?:\.(\d{1,6}))?$/);
+  if (!match) return { micros: null, error: '请输入非负、最多 6 位小数的有效金额' };
+  const micros = BigInt(match[1]) * 1000000n
+    + BigInt((match[2] || '').padEnd(6, '0'));
+  if (micros > BigInt(Number.MAX_SAFE_INTEGER)) {
+    return { micros: null, error: '请输入非负、最多 6 位小数的有效金额' };
+  }
+  return { micros: Number(micros), error: '' };
+}
+
+function paymentSplit() {
+  const split = {};
+  let valid = true;
+  for (const method of ['bank', 'usdt', 'cash']) {
+    const result = decimalToMicros(state.paymentAmounts[method]);
+    split[method + '_micros'] = result.micros;
+    state.paymentErrors[method] = result.error;
+    if (result.error) valid = false;
+  }
+  return { split, valid };
+}
+
+function paymentTotals() {
+  const parsed = paymentSplit();
+  const values = Object.values(parsed.split);
+  const allocated = parsed.valid
+    ? values.reduce((sum, value) => sum + BigInt(value), 0n)
+    : 0n;
+  const total = state.currentPayroll
+    ? BigInt(state.currentPayroll.payroll.amount_snapshot_micros)
+    : 0n;
+  return { allocated, difference: total - allocated, valid: parsed.valid, split: parsed.split };
+}
+
+function canMutatePayment() {
+  return Boolean(
+    state.online
+    && !state.paymentBusy
+    && !state.authorityStale
+    && currentDraft()
+    && ownsActiveClaim(state.currentPayroll.payroll)
+  );
+}
+
+function canSubmitPayment() {
+  if (!canMutatePayment()) return false;
+  const totals = paymentTotals();
+  if (!totals.valid || totals.difference !== 0n) return false;
+  const draft = currentDraft();
+  if (state.proofUploads.some((upload) => (
+    upload.attemptId === draft.attempt_id && upload.status === 'uploading'
+  ))) return false;
+  return ['bank', 'usdt', 'cash'].every((method) => {
+    const amount = totals.split[method + '_micros'];
+    return amount === 0 || (draft.proofs || []).some((proof) => (
+      proof.method === method
+      && proof.attempt_id === draft.attempt_id
+      && proof.superseded_at == null
+    ));
+  });
+}
+
+function canSavePaymentSplit() {
+  if (!canMutatePayment()) return false;
+  const totals = paymentTotals();
+  return totals.valid && totals.difference === 0n;
+}
+
+async function takeoverCurrentPayroll() {
+  if (
+    !state.currentPayroll
+    || !state.online
+    || state.paymentBusy
+    || state.authorityStale
+    || !payrollCanStart(state.currentPayroll.payroll)
+    || !claimOwnedByOther(state.currentPayroll.payroll.claim)
+  ) return;
+  const reasonField = document.getElementById('takeover-reason');
+  const reason = reasonField ? reasonField.value.trim() : '';
+  if (!reason) {
+    const error = document.getElementById('takeover-error');
+    if (error) error.textContent = '请填写接管原因';
+    return;
+  }
+  const payroll = state.currentPayroll.payroll;
+  const generation = state.requestGeneration;
+  const key = payrollKey();
+  state.paymentBusy = true;
+  renderPayrollDetail();
+  try {
+    await api('/api/manage/tasks/payroll/'
+      + encodeURIComponent(payroll.payroll_id) + '/takeover', {
+      method: 'POST', body: JSON.stringify({ reason })
+    });
+    if (!payrollRequestIsCurrent(generation, key)) return;
+    state.takeoverMode = '';
+    await refreshPayrollAfterReconnect('工资任务已接管');
+  } catch (error) {
+    if (!payrollRequestIsCurrent(generation, key)) return;
+    const message = error.status === 403
+      ? '当前账号无权接管，已刷新最新工资状态'
+      : error.status === 409
+        ? '工资任务接管冲突，已刷新最新状态'
+        : '工资任务接管失败，已刷新最新状态';
+    await refreshPayrollAfterReconnect(message);
+  } finally {
+    if (payrollRequestIsCurrent(generation, key)) {
+      state.paymentBusy = false;
+      renderPayrollDetail();
+    }
+  }
+}
+
+async function retryPayrollNotification(attemptId) {
+  const expectedAttemptId = String(attemptId);
+  if (
+    !state.currentPayroll
+    || !state.online
+    || state.paymentBusy
+    || state.authorityStale
+    || !payrollNotificationRetryable(expectedAttemptId)
+  ) return;
+  const payroll = state.currentPayroll.payroll;
+  const generation = state.requestGeneration;
+  const key = payrollKey();
+  state.paymentBusy = true;
+  renderPayrollDetail();
+  try {
+    await api(payrollPath(payroll.store_id, payroll.payroll_id)
+      + '/attempts/' + encodeURIComponent(expectedAttemptId)
+      + '/notify/retry', { method: 'POST' });
+    if (!payrollRequestIsCurrent(generation, key)) return;
+    await refreshPayrollAfterReconnect('Telegram 通知已发送');
+  } catch (error) {
+    if (!payrollRequestIsCurrent(generation, key)) return;
+    const message = error.status === 403
+      ? '当前账号无权重试通知，已刷新最新工资状态'
+      : error.status === 409
+        ? 'Telegram 通知发送冲突，已刷新最新工资状态'
+        : 'Telegram 通知发送失败，已刷新最新工资状态';
+    await refreshPayrollAfterReconnect(message);
+  } finally {
+    if (payrollRequestIsCurrent(generation, key)) {
+      state.paymentBusy = false;
+      renderPayrollDetail();
+    }
+  }
+}
+
+async function startPayrollPayment() {
+  if (!state.currentPayroll
+    || !payrollCanStart(state.currentPayroll.payroll)
+    || !state.online
+    || state.paymentBusy
+    || state.authorityStale) return;
+  const generation = state.requestGeneration;
+  const key = payrollKey();
+  const payroll = state.currentPayroll.payroll;
+  state.paymentBusy = true;
+  renderPayrollDetail();
+  try {
+    const claimed = await api('/api/manage/tasks/payroll/'
+      + encodeURIComponent(payroll.payroll_id) + '/claim', { method: 'POST' });
+    if (!payrollRequestIsCurrent(generation, key)) return;
+    payroll.claim = claimed.claim;
+    const result = await api(payrollPath(payroll.store_id, payroll.payroll_id)
+      + '/attempts/draft', { method: 'POST' });
+    if (!payrollRequestIsCurrent(generation, key)) return;
+    const dossier = await api(payrollPath(payroll.store_id, payroll.payroll_id));
+    if (!payrollRequestIsCurrent(generation, key)) return;
+    const mergedDossier = {
+      ...dossier,
+      attempts: Array.from(dossier.attempts || [], (attempt) => ({
+        ...attempt,
+        proofs: Array.from(attempt.proofs || [])
+      }))
+    };
+    const returnedIndex = mergedDossier.attempts.findIndex(
+      (attempt) => attempt.attempt_id === result.attempt.attempt_id
+    );
+    mergedDossier.attempts = mergedDossier.attempts.map((attempt) => (
+      attempt.attempt_id !== result.attempt.attempt_id && attempt.status === 'draft'
+        ? { ...attempt, status: 'abandoned' }
+        : attempt
+    ));
+    if (returnedIndex >= 0) {
+      mergedDossier.attempts[returnedIndex] = {
+        ...mergedDossier.attempts[returnedIndex],
+        ...result.attempt,
+        proofs: mergedDossier.attempts[returnedIndex].proofs
+      };
+    } else {
+      mergedDossier.attempts.unshift({ ...result.attempt, proofs: result.attempt.proofs || [] });
+    }
+    adoptPayrollDossier(mergedDossier);
+    const draft = state.currentPayroll.attempts.find(
+      (attempt) => attempt.attempt_id === result.attempt.attempt_id
+    );
+    state.payrollMode = 'payment';
+    state.paymentAmounts = {
+      bank: microsToInput(draft.bank_micros),
+      usdt: microsToInput(draft.usdt_micros),
+      cash: microsToInput(draft.cash_micros)
+    };
+    state.message = '付款草稿已准备';
+  } catch (error) {
+    if (!payrollRequestIsCurrent(generation, key)) return;
+    await payrollFailureRefresh(error, generation, key);
+  } finally {
+    if (payrollRequestIsCurrent(generation, key)) {
+      state.paymentBusy = false;
+      renderPayrollDetail();
+    }
+  }
+}
+
+function microsToInput(micros) {
+  const value = BigInt(micros || 0);
+  const whole = value / 1000000n;
+  const fraction = (value % 1000000n).toString().padStart(6, '0').replace(/0+$/, '');
+  return fraction ? whole + '.' + fraction : String(whole);
+}
+
+async function savePaymentDraft() {
+  const totals = paymentTotals();
+  if (!totals.valid || totals.difference !== 0n || !canMutatePayment()) {
+    updatePaymentValidation();
+    return null;
+  }
+  const generation = state.requestGeneration;
+  const key = payrollKey();
+  const payroll = state.currentPayroll.payroll;
+  const draft = currentDraft();
+  state.paymentBusy = true;
+  renderPayrollDetail();
+  try {
+    const result = await api(payrollPath(payroll.store_id, payroll.payroll_id)
+      + '/attempts/' + encodeURIComponent(draft.attempt_id) + '/split', {
+      method: 'PUT', body: JSON.stringify(totals.split)
+    });
+    if (!payrollRequestIsCurrent(generation, key)) return null;
+    Object.assign(draft, result.attempt);
+    state.message = '付款拆分已保存';
+    return result.attempt;
+  } catch (error) {
+    if (payrollRequestIsCurrent(generation, key)) {
+      if (error.status === 400) state.message = '付款拆分无效，请核对金额';
+      else await payrollFailureRefresh(error, generation, key);
+    }
+    return null;
+  } finally {
+    if (payrollRequestIsCurrent(generation, key)) {
+      state.paymentBusy = false;
+      renderPayrollDetail();
+    }
+  }
+}
+
+async function uploadProof(method, files) {
+  if (!canMutatePayment()) return;
+  const totals = paymentTotals();
+  if (!totals.valid || totals.difference !== 0n) {
+    updatePaymentValidation();
+    return;
+  }
+  const draft = currentDraft();
+  const splitChanged = ['bank', 'usdt', 'cash'].some((name) => (
+    Number(draft[name + '_micros']) !== totals.split[name + '_micros']
+  ));
+  if (splitChanged && !await savePaymentDraft()) return;
+  const accepted = Array.from(files || []);
+  const attemptId = currentDraft().attempt_id;
+  const uploads = accepted.map((file) => ({
+      id: Date.now() + '-' + Math.random().toString(36).slice(2),
+      attemptId, method, file, status: 'uploading', previewUrl: URL.createObjectURL(file)
+    }));
+  state.proofUploads.push(...uploads);
+  renderPayrollDetail();
+  await Promise.allSettled(uploads.map((upload) => performProofUpload(upload)));
+}
+
+async function performProofUpload(upload) {
+  const generation = state.requestGeneration;
+  const key = payrollKey();
+  const payroll = state.currentPayroll.payroll;
+  const draft = currentDraft();
+  if (!draft || draft.attempt_id !== upload.attemptId) return;
+  upload.status = 'uploading';
+  renderPayrollDetail();
+  const form = new FormData();
+  form.append('method', upload.method);
+  form.append('proof', upload.file);
+  try {
+    const result = await api(payrollPath(payroll.store_id, payroll.payroll_id)
+      + '/attempts/' + encodeURIComponent(draft.attempt_id) + '/proofs', {
+      method: 'POST', body: form
+    });
+    if (!payrollRequestIsCurrent(generation, key)) return;
+    const proof = { ...result.proof, url: privateProofUrl(result.proof.proof_id) };
+    draft.proofs = (draft.proofs || []).concat(proof);
+    upload.status = 'uploaded';
+    if (upload.previewUrl) URL.revokeObjectURL(upload.previewUrl);
+    upload.previewUrl = '';
+  } catch (error) {
+    if (!payrollRequestIsCurrent(generation, key)) return;
+    upload.status = 'error';
+    upload.error = error.message;
+    if (error.status === 409) await payrollFailureRefresh(error, generation, key);
+  }
+  if (payrollRequestIsCurrent(generation, key)) renderPayrollDetail();
+}
+
+async function retryProofUpload(uploadId) {
+  const upload = state.proofUploads.find((item) => item.id === uploadId && item.status === 'error');
+  const draft = currentDraft();
+  if (!upload || !draft || upload.attemptId !== draft.attempt_id || !canMutatePayment()) return;
+  await performProofUpload(upload);
+}
+
+async function deleteDraftProof(proofId) {
+  if (!canMutatePayment() || !window.confirm('确定删除这张草稿回执？')) return;
+  const generation = state.requestGeneration;
+  const key = payrollKey();
+  const payroll = state.currentPayroll.payroll;
+  const draft = currentDraft();
+  state.paymentBusy = true;
+  renderPayrollDetail();
+  try {
+    await api(payrollPath(payroll.store_id, payroll.payroll_id)
+      + '/attempts/' + encodeURIComponent(draft.attempt_id)
+      + '/proofs/' + encodeURIComponent(proofId), { method: 'DELETE' });
+    if (!payrollRequestIsCurrent(generation, key)) return;
+    draft.proofs = (draft.proofs || []).filter((proof) => proof.proof_id !== proofId);
+    state.message = '草稿回执已删除';
+  } catch (error) {
+    if (payrollRequestIsCurrent(generation, key)) await payrollFailureRefresh(error, generation, key);
+  } finally {
+    if (payrollRequestIsCurrent(generation, key)) {
+      state.paymentBusy = false;
+      renderPayrollDetail();
+    }
+  }
+}
+
+async function submitPayrollPayment() {
+  if (!canSubmitPayment()) return;
+  const saved = await savePaymentDraft();
+  if (!saved || !state.currentPayroll) return;
+  const generation = state.requestGeneration;
+  const key = payrollKey();
+  const payroll = state.currentPayroll.payroll;
+  const draft = currentDraft();
+  if (state.submitAttemptId !== draft.attempt_id) {
+    state.submitKey = '';
+    state.submitAttemptId = draft.attempt_id;
+  }
+  state.submitKey = state.submitKey || payroll.payroll_id + ':' + draft.attempt_id + ':' + Date.now();
+  try {
+    state.paymentBusy = true;
+    renderPayrollDetail();
+    await api(payrollPath(payroll.store_id, payroll.payroll_id)
+      + '/attempts/' + encodeURIComponent(draft.attempt_id) + '/submit', {
+      method: 'POST', headers: { 'Idempotency-Key': state.submitKey }
+    });
+    if (!payrollRequestIsCurrent(generation, key)) return;
+    await refreshPayrollDossier('付款已提交，员工通知处理中', generation, key);
+    state.payrollMode = 'dossier';
+    state.submitKey = '';
+    state.submitAttemptId = '';
+  } catch (error) {
+    if (payrollRequestIsCurrent(generation, key)) {
+      await payrollFailureRefresh(error, generation, key, { retryAttemptId: draft.attempt_id });
+    }
+  } finally {
+    if (payrollRequestIsCurrent(generation, key)) {
+      state.paymentBusy = false;
+      renderPayrollDetail();
+    }
+  }
+}
+
+async function refreshPayrollDossier(message, generation = state.requestGeneration, key = payrollKey()) {
+  const payroll = state.currentPayroll.payroll;
+  const detail = await api(payrollPath(payroll.store_id, payroll.payroll_id));
+  if (!payrollRequestIsCurrent(generation, key)) return;
+  if (!detail.payroll || !payrollIdentityMatches(detail, key)) {
+    throw new Error('invalid_payroll_detail');
+  }
+  adoptPayrollDossier(detail);
+  state.message = message;
+}
+
+function payrollMutationMessage(error, fallback) {
+  const code = String(error && error.result && error.result.error || error && error.message || '');
+  if (code === 'task_claim_required') return '付款任务认领已过期，请重新领取后再提交';
+  if (code === 'payment attempt owner conflict') return '付款任务负责人已变化，请重新领取后再提交';
+  if (code === 'payment attempt conflict') return '付款草稿状态冲突，请重新领取后再提交';
+  if (code === 'payroll_proofs_incomplete') return '付款回执不完整，请补齐后再提交';
+  if (code) return '付款操作失败（' + code + '），已刷新最新工资档案';
+  return fallback;
+}
+
+async function payrollFailureRefresh(error, generation, key, { retryAttemptId = '' } = {}) {
+  const submitResultUnknown = Boolean(retryAttemptId && (!error.status || error.status >= 500));
+  try {
+    await refreshPayrollDossier(
+      error.status === 409
+        ? payrollMutationMessage(error, '工资状态已更新，当前页面已切换为只读')
+        : '网络操作失败，已刷新最新工资档案',
+      generation,
+      key
+    );
+  } catch {
+    if (!payrollRequestIsCurrent(generation, key)) return;
+    state.authorityStale = true;
+    state.message = '最新工资状态加载失败，当前页面已锁定，请返回工资列表刷新';
+  }
+  if (!payrollRequestIsCurrent(generation, key)) return;
+  const sameUnknownAttempt = Boolean(
+    submitResultUnknown
+    && !state.authorityStale
+    && draftAttemptId() === retryAttemptId
+    && state.submitAttemptId === retryAttemptId
+  );
+  if (sameUnknownAttempt) {
+    state.payrollMode = 'payment';
+    state.message = '提交结果未知，已刷新当前草稿；重试会使用同一提交编号';
+  } else {
+    if (!submitResultUnknown && state.submitAttemptId === retryAttemptId) {
+      state.submitKey = '';
+      state.submitAttemptId = '';
+    }
+    state.payrollMode = 'dossier';
+  }
+}
+
+function startPayrollClaimTimer() {
+  stopClaimTimer();
+  if (!state.currentPayroll) return;
+  const payroll = state.currentPayroll.payroll;
+  if (!payrollCanStart(payroll)) return;
+  const claim = payroll.claim;
+  if (!claimIsActive(claim) || state.authorityStale) return;
+  const remaining = new Date(claim.lease_expires_at).getTime() - Date.now();
+  const generation = state.requestGeneration;
+  const key = payrollKey();
+  if (claim.claimed_by === state.session.telegram_id && state.online && !state.paymentBusy) {
+    const renewIn = Math.min(5 * 60 * 1000, Math.max(0, remaining - 30 * 1000));
+    state.claimTimer = setTimeout(async () => {
+      state.claimTimer = 0;
+      if (!payrollRequestIsCurrent(generation, key)
+        || !payrollCanStart(state.currentPayroll.payroll)) return;
+      try {
+        const result = await api('/api/manage/tasks/payroll/'
+          + encodeURIComponent(payroll.payroll_id) + '/renew', { method: 'POST' });
+        if (!payrollRequestIsCurrent(generation, key)) return;
+        payroll.claim = result.claim;
+      } catch (error) {
+        if (payrollRequestIsCurrent(generation, key)) await payrollFailureRefresh(error, generation, key);
+      }
+      if (payrollRequestIsCurrent(generation, key)) renderPayrollDetail();
+    }, renewIn);
+    return;
+  }
+  state.claimTimer = setTimeout(() => {
+    state.claimTimer = 0;
+    if (payrollRequestIsCurrent(generation, key)) renderPayrollDetail();
+  }, Math.max(0, remaining) + 1);
+}
+
+function urgencyLabel(value) {
+  const urgency = Number(value || 0);
+  if (urgency >= 500) return '紧急';
+  if (urgency >= 300) return '优先';
+  return '普通';
+}
+
+function compareManageTasks(left, right) {
+  const leftUrgency = Number(left && left.urgency);
+  const rightUrgency = Number(right && right.urgency);
+  const normalizedLeftUrgency = Number.isFinite(leftUrgency) ? leftUrgency : 0;
+  const normalizedRightUrgency = Number.isFinite(rightUrgency) ? rightUrgency : 0;
+  if (normalizedLeftUrgency !== normalizedRightUrgency) {
+    return normalizedRightUrgency - normalizedLeftUrgency;
+  }
+  const leftSubmittedAt = String(left && left.submitted_at);
+  const rightSubmittedAt = String(right && right.submitted_at);
+  if (leftSubmittedAt !== rightSubmittedAt) {
+    return leftSubmittedAt < rightSubmittedAt ? -1 : 1;
+  }
+  const leftTaskId = String(left && left.task_id);
+  const rightTaskId = String(right && right.task_id);
+  if (leftTaskId === rightTaskId) return 0;
+  return leftTaskId < rightTaskId ? -1 : 1;
+}
+
+function formatMoney(micros, currency) {
+  const amount = BigInt(micros || 0);
+  const negative = amount < 0n;
+  const absolute = negative ? -amount : amount;
+  const whole = (absolute / 1000000n).toString().replace(/\B(?=(\d{3})+(?!\d))/g, ',');
+  const fraction = (absolute % 1000000n).toString().padStart(6, '0').replace(/0+$/, '');
+  return escapeHtml(currency || '') + (negative ? '-' : '') + whole
+    + (fraction ? '.' + fraction : '');
+}
+
+function formatDateTime(value) {
+  return String(value || '').replace('T', ' ').slice(0, 16);
+}
+
+function formatPayrollDateTime(value, storeId) {
+  const store = state.stores.find((item) => item.store_id === storeId);
+  const timezone = store && store.timezone;
+  const date = new Date(value);
+  if (!timezone || Number.isNaN(date.getTime())) return formatDateTime(value);
+  try {
+    const parts = new Intl.DateTimeFormat('en-US', {
+      timeZone: timezone,
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit',
+      hourCycle: 'h23'
+    }).formatToParts(date);
+    const values = Object.fromEntries(parts.map((part) => [part.type, part.value]));
+    return values.year + '-' + values.month + '-' + values.day
+      + ' ' + values.hour + ':' + values.minute;
+  } catch {
+    return formatDateTime(value);
+  }
+}
+
+function ownsActiveClaim(task) {
+  const claim = task && task.claim;
+  return Boolean(
+    state.online
+    && claim
+    && claimIsActive(claim)
+    && claim.claimed_by === state.session.telegram_id
+  );
+}
+
+function ownsClaim(task) {
+  const claim = task && task.claim;
+  return Boolean(
+    claim
+    && claimIsActive(claim)
+    && claim.claimed_by === state.session.telegram_id
+  );
+}
+
+function claimIsActive(claim) {
+  return Boolean(
+    claim
+    && claim.active !== false
+    && new Date(claim.lease_expires_at).getTime() > Date.now()
+  );
+}
+
+function takeoverPanel(mode, busy) {
+  if (state.takeoverMode !== mode) return '';
+  return '<div class="confirm-panel"><label for="takeover-reason">接管原因（必填）</label>'
+    + '<textarea id="takeover-reason" rows="3"></textarea>'
+    + '<p id="takeover-error" class="error" role="alert"></p>'
+    + '<button id="takeover-confirm" type="button"'
+    + disabled(!state.online || busy || state.authorityStale) + '>确认接管</button>'
+    + '<button id="takeover-cancel" class="secondary" type="button">取消</button></div>';
+}
+
+function latestNotificationAction(history, actions, attemptId = '') {
+  const rows = Array.isArray(history) ? history : [];
+  for (let index = rows.length - 1; index >= 0; index -= 1) {
+    const item = rows[index];
+    if (!actions.has(item.action)) continue;
+    if (attemptId && String(item.details && item.details.attempt_id || '') !== attemptId) continue;
+    return item.action;
+  }
+  return '';
+}
+
+function approvalNotificationRetryable(detail = state.currentTask) {
+  const actions = new Set([
+    'approval_notification_failed',
+    'approval_notification_retry_claimed',
+    'approval_notification_retried',
+    'approval_notification_sent'
+  ]);
+  const type = String(detail && detail.task && detail.task.task_type || '');
+  const rows = Array.isArray(detail && detail.history) ? detail.history : [];
+  for (let index = rows.length - 1; index >= 0; index -= 1) {
+    const item = rows[index];
+    if (!actions.has(item.action)) continue;
+    if (String(item.details && item.details.task_type || '') !== type) continue;
+    return item.action === 'approval_notification_failed';
+  }
+  return false;
+}
+
+function renderTaskDetail() {
+  const detail = state.currentTask;
+  const task = detail.task;
+  const claim = task.claim;
+  const owned = ownsActiveClaim(task);
+  const pending = task.status === 'pending';
+  const canDecide = owned && pending && !state.mutationBusy && !state.authorityStale;
+  const handler = claimIsActive(claim)
+    ? '当前处理人：' + escapeHtml(claim.claimed_by)
+    : '当前未领取';
+  const result = statusLabels[task.status] || task.status;
+  let decision = '';
+  if (pending && state.decisionMode === 'approve') {
+    decision = '<div class="confirm-panel" role="alert"><p>确认批准这项申请？</p>'
+      + '<button id="approve-confirm" type="button"' + disabled(!canDecide) + '>确认批准</button>'
+      + '<button id="decision-cancel" class="secondary" type="button">取消</button></div>';
+  } else if (pending && state.decisionMode === 'reject') {
+    decision = '<div class="confirm-panel"><label for="reject-reason">拒绝原因（必填）</label>'
+      + '<textarea id="reject-reason" rows="3"></textarea>'
+      + '<p id="decision-error" class="error" role="alert"></p>'
+      + '<button id="reject-confirm" type="button"' + disabled(!canDecide) + '>确认拒绝</button>'
+      + '<button id="decision-cancel" class="secondary" type="button">取消</button></div>';
+  }
+  const occupiedByOther = pending && claimOwnedByOther(claim);
+  const claimAction = !pending ? '' : owned
+    ? '<button id="release" class="secondary" type="button"'
+      + disabled(!state.online || state.mutationBusy || state.authorityStale) + '>释放</button>'
+    : occupiedByOther
+      ? '<button id="takeover" class="danger" type="button"'
+        + disabled(!state.online || state.mutationBusy || state.authorityStale)
+        + '>负责人接管</button>'
+      : '<button id="claim" type="button"'
+      + disabled(
+        !state.online || state.mutationBusy || state.authorityStale || claimIsActive(claim)
+      ) + '>领取</button>';
+  const retryNotification = !pending && approvalNotificationRetryable(detail)
+    ? '<button id="retry-approval-notification" class="secondary" type="button"'
+      + disabled(!state.online || state.mutationBusy || state.authorityStale)
+      + '>重试 Telegram 通知</button>'
+    : '';
+  const requestFacts = Object.entries(detail.request || {}).map(([key, value]) => (
+    '<div><dt>' + escapeHtml(factLabel(key)) + '</dt><dd>' + escapeHtml(factValue(key, value)) + '</dd></div>'
+  )).join('');
+
+  shell('<button id="back-to-tasks" class="text-button" type="button">← 返回待办</button>'
+    + '<article class="detail-card"><div class="task-card-top"><span class="type-badge">'
+    + escapeHtml(taskLabels[task.task_type] || task.task_type)
+    + '</span><span class="urgency">' + urgencyLabel(task.urgency) + '</span></div>'
+    + '<h2>' + escapeHtml(task.employee_name) + '</h2>'
+    + '<p>' + escapeHtml(task.store_name)
+    + (task.amount_micros !== null && task.amount_micros !== undefined
+      ? ' · ' + formatMoney(task.amount_micros, task.currency) : '')
+    + '</p><p>业务日期：' + escapeHtml(task.business_date || '—') + '</p>'
+    + '<p>提交：' + escapeHtml(formatDateTime(task.submitted_at)) + '</p>'
+    + '<p id="claim-status" class="claim-status">' + handler + '</p>'
+    + '<p id="decision-status" class="decision-status">' + escapeHtml(result) + '</p>'
+    + '<div class="claim-actions">' + claimAction + '</div>'
+    + takeoverPanel('approval', state.mutationBusy)
+    + '<section><h3>申请信息</h3><dl class="facts">' + requestFacts + '</dl></section>'
+    + employeeSection(detail.employee)
+    + attachmentSection(detail.attachments)
+    + historySection(detail.history)
+    + '<div id="approval-actions" class="approval-actions" aria-disabled="' + (!canDecide) + '">'
+    + '<button id="approve" type="button"' + disabled(!canDecide) + '>批准</button>'
+    + '<button id="reject" class="danger" type="button"' + disabled(!canDecide) + '>拒绝</button></div>'
+    + decision + retryNotification + '</article>');
+
+  document.getElementById('back-to-tasks').onclick = () => {
+    state.requestGeneration += 1;
+    state.currentTask = null;
+    state.decisionMode = '';
+    state.takeoverMode = '';
+    state.message = '';
+    state.authorityStale = false;
+    state.renewRetry = null;
+    stopClaimTimer();
+    renderCurrent();
+  };
+  const claimButton = document.getElementById('claim');
+  if (claimButton) claimButton.onclick = claimCurrentTask;
+  const releaseButton = document.getElementById('release');
+  if (releaseButton) releaseButton.onclick = releaseCurrentTask;
+  const takeoverButton = document.getElementById('takeover');
+  if (takeoverButton) takeoverButton.onclick = () => {
+    if (!state.online || state.mutationBusy || state.authorityStale) return;
+    state.takeoverMode = 'approval';
+    renderTaskDetail();
+  };
+  const takeoverConfirm = document.getElementById('takeover-confirm');
+  if (takeoverConfirm) takeoverConfirm.onclick = takeoverCurrentTask;
+  const takeoverCancel = document.getElementById('takeover-cancel');
+  if (takeoverCancel) takeoverCancel.onclick = () => {
+    state.takeoverMode = '';
+    renderTaskDetail();
+  };
+  const retryNotificationButton = document.getElementById('retry-approval-notification');
+  if (retryNotificationButton) retryNotificationButton.onclick = retryApprovalNotification;
+  document.getElementById('approve').onclick = () => {
+    if (!canDecide) return;
+    state.decisionMode = 'approve';
+    renderTaskDetail();
+  };
+  document.getElementById('reject').onclick = () => {
+    if (!canDecide) return;
+    state.decisionMode = 'reject';
+    renderTaskDetail();
+    document.getElementById('reject-reason').focus();
+  };
+  const approveConfirm = document.getElementById('approve-confirm');
+  if (approveConfirm) approveConfirm.onclick = () => submitApproval('approve');
+  const rejectConfirm = document.getElementById('reject-confirm');
+  if (rejectConfirm) rejectConfirm.onclick = () => submitApproval('reject');
+  const cancel = document.getElementById('decision-cancel');
+  if (cancel) cancel.onclick = () => {
+    state.decisionMode = '';
+    renderTaskDetail();
+  };
+  if (pending) startClaimTimer();
+  else stopClaimTimer();
+}
+
+function disabled(value) {
+  return value ? ' disabled aria-disabled="true"' : '';
+}
+
+function factLabel(key) {
+  const labels = {
+    request_id: '申请编号', store_id: '店铺编号', telegram_id: '员工编号',
+    income: '收入', commission_income: '计薪金额', fine: '罚款',
+    commission_rate: '提成比例', original_fine: '原罚款',
+    leave_date: '请假日期', business_date: '业务日期', amount: '金额',
+    requested_at: '申请时间', submitted_at: '提交时间', status: '状态',
+    created_at: '创建时间', decided_at: '处理时间', admin_id: '处理人',
+    reject_reason: '拒绝原因', cancellation_reason: '取消原因'
+  };
+  return labels[key] || key;
+}
+
+function factValue(key, value) {
+  if (value == null || value === '') return '—';
+  if (key === 'status') return statusLabels[value] || value;
+  return value;
+}
+
+function employeeSection(employee = {}) {
+  return '<section><h3>员工信息</h3><dl class="facts">'
+    + '<div><dt>姓名</dt><dd>' + escapeHtml(employee.display_name || '—') + '</dd></div>'
+    + '<div><dt>Telegram ID</dt><dd>' + escapeHtml(employee.telegram_id || '—') + '</dd></div>'
+    + '<div><dt>语言</dt><dd>' + escapeHtml(employee.language || '—') + '</dd></div>'
+    + '</dl></section>';
+}
+
+function attachmentSection(attachments) {
+  const count = Array.isArray(attachments) ? attachments.length : 0;
+  return '<section><h3>附件</h3><p class="empty-copy">'
+    + (count ? '共有 ' + count + ' 个附件' : '暂无附件')
+    + '</p></section>';
+}
+
+function historySection(history, payrollStoreId = '') {
+  const rows = Array.isArray(history) ? history : [];
+  if (!rows.length) {
+    return '<section><h3>处理时间线</h3><p class="empty-copy">暂无处理记录</p></section>';
+  }
+  return '<section><h3>处理时间线</h3><ol class="timeline">'
+    + rows.map((item) => '<li><strong>' + escapeHtml(historyActionLabel(item.action)) + '</strong>'
+      + '<span>' + escapeHtml(item.admin_id || '—') + ' · '
+      + escapeHtml(payrollStoreId
+        ? formatPayrollDateTime(item.created_at, payrollStoreId)
+        : formatDateTime(item.created_at)) + '</span>'
+      + (item.details && item.details.reason
+        ? '<span>原因：' + escapeHtml(item.details.reason) + '</span>' : '')
+      + '</li>').join('')
+    + '</ol></section>';
+}
+
+function currentTaskKey() {
+  const task = state.currentTask && state.currentTask.task;
+  return task ? task.task_type + ':' + task.task_id : '';
+}
+
+function currentDirectPageIdentity() {
+  if (state.currentTask && state.currentTask.task) {
+    const task = state.currentTask.task;
+    return {
+      kind: 'approval',
+      storeId: String(task.store_id),
+      type: String(task.task_type),
+      id: String(task.task_id)
+    };
+  }
+  if (state.currentPayroll && state.currentPayroll.payroll) {
+    const payroll = payrollIdentity(state.currentPayroll);
+    return {
+      kind: 'payroll',
+      storeId: payroll.storeId,
+      type: 'payroll',
+      id: payroll.payrollId
+    };
+  }
+  return null;
+}
+
+function directPageIsCurrent(expected) {
+  const current = currentDirectPageIdentity();
+  return Boolean(
+    expected
+    && current
+    && current.kind === expected.kind
+    && current.storeId === expected.storeId
+    && current.type === expected.type
+    && current.id === expected.id
+  );
+}
+
+function requestIsCurrent(generation, key = '') {
+  return Boolean(
+    state.session
+    && generation === state.requestGeneration
+    && (!key || key === currentTaskKey())
+  );
+}
+
+function taskQueryPath() {
+  const query = new URLSearchParams();
+  if (state.storeId) query.set('store_id', state.storeId);
+  if (state.taskType) query.set('type', state.taskType);
+  return '/api/manage/tasks?' + query.toString();
+}
+
+async function loadTasks({ render = true, generation = state.requestGeneration } = {}) {
+  const queryPath = taskQueryPath();
+  const listGeneration = state.taskListGeneration + 1;
+  state.taskListGeneration = listGeneration;
+  const result = await api(queryPath);
+  if (
+    !requestIsCurrent(generation)
+    || listGeneration !== state.taskListGeneration
+    || queryPath !== taskQueryPath()
+  ) return state.tasks;
+  state.tasks = (result.tasks || []).slice().sort(compareManageTasks);
+  if (render) renderCurrent();
+  return state.tasks;
+}
+
+function storeIsAuthorized(storeId) {
+  return state.stores.some((store) => String(store.store_id) === storeId);
+}
+
+function rejectTaskDeepLink(type) {
+  state.message = type === 'payroll'
+    ? '工资记录不存在或无权查看'
+    : '任务不存在或无权查看';
+  renderCurrent();
+}
+
+async function openTask(type, id, directStoreId = null) {
+  const isPayroll = type === 'payroll';
+  if (!approvalTypes.has(type) && !isPayroll) {
+    if (directStoreId !== null) rejectTaskDeepLink(type);
+    return;
+  }
+  const direct = directStoreId !== null;
+  const storeId = String(directStoreId || '');
+  if (direct && (!storeId.trim() || !storeIsAuthorized(storeId))) {
+    rejectTaskDeepLink(type);
+    return;
+  }
+  const task = direct
+    ? { task_type: type, task_id: id, store_id: storeId }
+    : state.tasks.find((item) => item.task_type === type && item.task_id === id);
+  if (!task) {
+    rejectTaskDeepLink(type);
+    return;
+  }
+  if (isPayroll) {
+    state.activeNav = 'payroll';
+    return openPayrollItem({
+      store_id: task.store_id,
+      payroll_id: task.task_id
+    });
+  }
+  const generation = state.requestGeneration + 1;
+  state.requestGeneration = generation;
+  state.mutationBusy = false;
+  state.authorityStale = false;
+  state.renewRetry = null;
+  const key = type + ':' + id;
+  try {
+    const detail = await api('/api/manage/stores/'
+      + encodeURIComponent(task.store_id) + '/approvals/'
+      + encodeURIComponent(type) + '/' + encodeURIComponent(id));
+    if (generation !== state.requestGeneration || !state.session) return;
+    if (
+      !detail.task
+      || String(detail.task.task_type) !== type
+      || String(detail.task.task_id) !== id
+      || (direct && (
+        String(detail.task.store_id) !== String(task.store_id)
+        || !detail.store
+        || String(detail.store.store_id) !== String(task.store_id)
+      ))
+    ) {
+      rejectTaskDeepLink(type);
+      return;
+    }
+    state.currentTask = detail;
+    state.decisionMode = '';
+    state.takeoverMode = '';
+    state.message = '';
+    renderTaskDetail();
+  } catch (error) {
+    if (generation !== state.requestGeneration || !state.session) return;
+    state.message = error.status === 403 || error.status === 404
+      ? '任务不存在或无权查看'
+      : '暂时无法加载任务';
+    renderCurrent();
+  }
+}
+
+async function mutateClaim(action) {
+  if (
+    !state.currentTask
+    || !state.online
+    || state.mutationBusy
+    || state.authorityStale
+  ) return;
+  const task = state.currentTask.task;
+  if (task.status !== 'pending') return;
+  const generation = state.requestGeneration;
+  const key = currentTaskKey();
+  state.mutationBusy = true;
+  renderTaskDetail();
+  try {
+    const result = await api('/api/manage/tasks/'
+      + encodeURIComponent(task.task_type) + '/'
+      + encodeURIComponent(task.task_id) + '/' + action, { method: 'POST' });
+    if (!requestIsCurrent(generation, key)) return null;
+    task.claim = result.claim;
+    state.renewRetry = null;
+    state.message = action === 'release'
+      ? '任务已释放'
+      : action === 'renew' ? '领取状态已续期' : '任务已领取';
+    return result.claim;
+  } catch (error) {
+    if (!requestIsCurrent(generation, key)) return null;
+    if (error.status === 409) {
+      try {
+        await refreshCurrentTask('任务状态已更新', generation, key);
+      } catch {
+        if (requestIsCurrent(generation, key)) markAuthorityStale();
+      }
+      return null;
+    }
+    if (action === 'renew') recordRenewFailure(key, task.claim);
+    state.message = '操作失败，请稍后重试';
+    return null;
+  } finally {
+    if (requestIsCurrent(generation, key)) {
+      state.mutationBusy = false;
+      renderTaskDetail();
+    }
+  }
+}
+
+function claimCurrentTask() {
+  return mutateClaim('claim');
+}
+
+function renewCurrentClaim() {
+  if (!state.currentTask || state.currentTask.task.status !== 'pending') return;
+  return mutateClaim('renew');
+}
+
+function releaseCurrentTask() {
+  return mutateClaim('release');
+}
+
+async function takeoverCurrentTask() {
+  if (
+    !state.currentTask
+    || !state.online
+    || state.mutationBusy
+    || state.authorityStale
+    || !claimOwnedByOther(state.currentTask.task.claim)
+  ) return;
+  const reasonField = document.getElementById('takeover-reason');
+  const reason = reasonField ? reasonField.value.trim() : '';
+  if (!reason) {
+    const error = document.getElementById('takeover-error');
+    if (error) error.textContent = '请填写接管原因';
+    return;
+  }
+  const task = state.currentTask.task;
+  const generation = state.requestGeneration;
+  const key = currentTaskKey();
+  state.mutationBusy = true;
+  renderTaskDetail();
+  try {
+    let committed = false;
+    try {
+      await api('/api/manage/tasks/'
+        + encodeURIComponent(task.task_type) + '/'
+        + encodeURIComponent(task.task_id) + '/takeover', {
+        method: 'POST', body: JSON.stringify({ reason })
+      });
+      committed = true;
+    } catch (error) {
+      if (requestIsCurrent(generation, key)) {
+        if (error.status === 403 || error.status === 409) {
+          const message = error.status === 403
+            ? '当前账号无权接管，已刷新最新任务状态'
+            : '接管冲突，已刷新最新任务状态';
+          await refreshTaskAuthority(message, generation, key);
+        } else {
+          state.message = '接管失败，请稍后重试';
+        }
+      }
+    }
+    if (!committed || !requestIsCurrent(generation, key)) return;
+    state.takeoverMode = '';
+    await refreshTaskAuthority(
+      '任务已接管',
+      generation,
+      key,
+      '任务已接管，但最新状态加载失败，当前任务已锁定，请返回待办刷新'
+    );
+  } finally {
+    if (requestIsCurrent(generation, key)) {
+      state.mutationBusy = false;
+      renderTaskDetail();
+    }
+  }
+}
+
+async function retryApprovalNotification() {
+  if (
+    !state.currentTask
+    || !state.online
+    || state.mutationBusy
+    || state.authorityStale
+    || !approvalNotificationRetryable()
+  ) return;
+  const task = state.currentTask.task;
+  const generation = state.requestGeneration;
+  const key = currentTaskKey();
+  state.mutationBusy = true;
+  renderTaskDetail();
+  try {
+    let result = null;
+    try {
+      result = await api('/api/manage/stores/'
+        + encodeURIComponent(task.store_id) + '/approvals/'
+        + encodeURIComponent(task.task_type) + '/'
+        + encodeURIComponent(task.task_id) + '/notify/retry', { method: 'POST' });
+    } catch (error) {
+      if (requestIsCurrent(generation, key)) {
+        const message = error.status === 403
+          ? '当前账号无权重试通知，已刷新最新状态'
+          : error.status === 409
+            ? 'Telegram 通知重试冲突，已刷新最新状态'
+            : 'Telegram 通知发送失败，已刷新最新状态';
+        await refreshTaskAuthority(message, generation, key);
+      }
+    }
+    if (!result || !requestIsCurrent(generation, key)) return;
+    const message = result.notification && result.notification.status === 'retrying'
+      ? 'Telegram 通知正在由其他管理员重试'
+      : 'Telegram 通知已发送';
+    await refreshTaskAuthority(
+      message,
+      generation,
+      key,
+      message + '，但最新状态加载失败，当前任务已锁定，请返回待办刷新'
+    );
+  } finally {
+    if (requestIsCurrent(generation, key)) {
+      state.mutationBusy = false;
+      renderTaskDetail();
+    }
+  }
+}
+
+async function submitApproval(decision) {
+  if (
+    !state.currentTask
+    || !ownsActiveClaim(state.currentTask.task)
+    || state.mutationBusy
+    || state.authorityStale
+  ) return;
+  let reason = '';
+  if (decision === 'reject') {
+    reason = document.getElementById('reject-reason').value.trim();
+    if (!reason) {
+      document.getElementById('decision-error').textContent = '请填写拒绝原因';
+      return;
+    }
+  }
+  const task = state.currentTask.task;
+  const generation = state.requestGeneration;
+  const key = currentTaskKey();
+  state.mutationBusy = true;
+  renderTaskDetail();
+  try {
+    const result = await api('/api/manage/stores/'
+      + encodeURIComponent(task.store_id) + '/approvals/'
+      + encodeURIComponent(task.task_type) + '/'
+      + encodeURIComponent(task.task_id) + '/' + decision, {
+      method: 'POST',
+      body: decision === 'reject' ? JSON.stringify({ reason }) : undefined
+    });
+    if (!requestIsCurrent(generation, key)) return;
+    state.decisionMode = '';
+    const committedMessage = result.notification && result.notification.status === 'failed'
+      ? '审批已保存，Telegram 通知发送失败，可稍后重试'
+      : '审批已完成';
+    state.message = committedMessage;
+    try {
+      await refreshCurrentTask(committedMessage, generation, key);
+    } catch {
+      if (!requestIsCurrent(generation, key)) return;
+      state.currentTask = null;
+      state.tasks = [];
+      state.decisionMode = '';
+      state.message = '审批已保存，但最新状态加载失败，请刷新待办';
+      state.mutationBusy = false;
+      renderCurrent();
+    }
+  } catch (error) {
+    if (!requestIsCurrent(generation, key)) return;
+    if (error.status === 409) {
+      try {
+        await refreshCurrentTask('任务已由其他管理员处理', generation, key);
+      } catch {
+        if (requestIsCurrent(generation, key)) markAuthorityStale();
+      }
+      return;
+    }
+    state.message = error.message === 'rejection_reason_required'
+      ? '请填写拒绝原因'
+      : '审批失败，请稍后重试';
+  } finally {
+    if (requestIsCurrent(generation, key)) {
+      state.mutationBusy = false;
+      renderTaskDetail();
+    }
+  }
+}
+
+async function refreshCurrentTask(
+  message,
+  generation = state.requestGeneration,
+  key = currentTaskKey()
+) {
+  const task = state.currentTask.task;
+  const queryPath = taskQueryPath();
+  const listGeneration = state.taskListGeneration + 1;
+  state.taskListGeneration = listGeneration;
+  const [detail, tasks] = await Promise.all([
+    api('/api/manage/stores/'
+      + encodeURIComponent(task.store_id) + '/approvals/'
+      + encodeURIComponent(task.task_type) + '/' + encodeURIComponent(task.task_id)),
+    api(queryPath)
+  ]);
+  if (
+    !requestIsCurrent(generation, key)
+    || listGeneration !== state.taskListGeneration
+    || queryPath !== taskQueryPath()
+  ) return;
+  if (
+    !detail.task
+    || detail.task.task_type + ':' + detail.task.task_id !== key
+  ) throw new Error('invalid_task_detail');
+  state.currentTask = detail;
+  state.tasks = tasks.tasks || [];
+  state.decisionMode = '';
+  state.takeoverMode = '';
+  state.message = message;
+  renderTaskDetail();
+}
+
+async function refreshTaskAuthority(message, generation, key, staleMessage = '') {
+  try {
+    await refreshCurrentTask(message, generation, key);
+    return true;
+  } catch {
+    if (requestIsCurrent(generation, key)) {
+      if (staleMessage) markAuthorityStale(staleMessage);
+      else markAuthorityStale();
+    }
+    return false;
+  }
+}
+
+function markAuthorityStale(message = '最新状态加载失败，当前任务已锁定，请返回待办刷新') {
+  state.authorityStale = true;
+  state.mutationBusy = false;
+  state.decisionMode = '';
+  state.message = message;
+  stopClaimTimer();
+  renderTaskDetail();
+}
+
+function recordRenewFailure(key, claim) {
+  const prior = state.renewRetry && state.renewRetry.key === key
+    ? state.renewRetry.attempts : 0;
+  const attempts = prior + 1;
+  const delay = Math.min(30 * 1000 * (2 ** (attempts - 1)), 5 * 60 * 1000);
+  const expiry = new Date(claim.lease_expires_at).getTime();
+  state.renewRetry = {
+    key,
+    attempts,
+    nextAt: Math.min(Date.now() + delay, expiry)
+  };
+}
+
+function startClaimTimer() {
+  stopClaimTimer();
+  if (!state.currentTask) return;
+  const task = state.currentTask.task;
+  if (task.status !== 'pending') return;
+  const claim = task.claim;
+  if (!claimIsActive(claim) || state.authorityStale) return;
+  const remaining = new Date(claim.lease_expires_at).getTime() - Date.now();
+  const generation = state.requestGeneration;
+  const key = currentTaskKey();
+
+  if (ownsClaim(task) && state.online && !state.mutationBusy) {
+    const retry = state.renewRetry && state.renewRetry.key === key
+      ? state.renewRetry : null;
+    if (retry && retry.nextAt > Date.now()) {
+      const retryAtExpiry = retry.nextAt >= new Date(claim.lease_expires_at).getTime();
+      state.claimTimer = setTimeout(() => {
+        state.claimTimer = 0;
+        if (!requestIsCurrent(generation, key)
+          || state.currentTask.task.status !== 'pending') return;
+        if (retryAtExpiry || !claimIsActive(state.currentTask.task.claim)) {
+          renderTaskDetail();
+        } else {
+          renewCurrentClaim();
+        }
+      }, retry.nextAt - Date.now() + (retryAtExpiry ? 1 : 0));
+      return;
+    }
+    if (remaining <= 5 * 60 * 1000) {
+      renewCurrentClaim();
+      return;
+    }
+    const renewIn = Math.min(5 * 60 * 1000, Math.max(0, remaining - 30 * 1000));
+    state.claimTimer = setTimeout(() => {
+      state.claimTimer = 0;
+      if (requestIsCurrent(generation, key)
+        && state.currentTask.task.status === 'pending') renewCurrentClaim();
+    }, renewIn);
+    return;
+  }
+
+  state.claimTimer = setTimeout(() => {
+    state.claimTimer = 0;
+    if (requestIsCurrent(generation, key)
+      && state.currentTask.task.status === 'pending') renderTaskDetail();
+  }, Math.max(0, remaining) + 1);
+}
+
+function stopClaimTimer() {
+  if (state.claimTimer) clearTimeout(state.claimTimer);
+  state.claimTimer = 0;
+}
+
+async function openReturnPath() {
+  const path = String(location.pathname || '');
+  if (!path.startsWith('/manage/')) return;
+  const match = path.match(
+    /^\/manage\/(tasks|approvals)\/([^/]+)\/([^/]+)$/
+  );
+  if (!match) return;
+  let type;
+  let id;
+  try {
+    type = decodeURIComponent(match[2]);
+    id = decodeURIComponent(match[3]);
+  } catch {
+    return;
+  }
+  if (match[1] === 'approvals') {
+    await openTask(type, id);
+    return;
+  }
+  const storeValues = new URLSearchParams(String(location.search || ''))
+    .getAll('store');
+  if (storeValues.length !== 1 || !storeValues[0].trim()) {
+    rejectTaskDeepLink(type);
+    return;
+  }
+  await openTask(type, id, storeValues[0]);
+}
+
+async function refreshSessionAndStores(generation) {
+  const adminId = String(state.session && state.session.telegram_id || '');
+  const [session, storesResult] = await Promise.all([
+    api('/api/manage/session'),
+    api('/api/manage/stores')
+  ]);
+  if (
+    !state.session
+    || generation !== state.requestGeneration
+    || String(session.telegram_id || '') !== adminId
+  ) throw new Error('stale_manage_session');
+  state.session = session;
+  state.csrfToken = session.csrf_token || '';
+  state.stores = storesResult.stores || [];
+  if (state.storeId && !storeIsAuthorized(String(state.storeId))) state.storeId = '';
+}
+
+async function refreshTaskAfterReconnect() {
+  if (!state.currentTask) return;
+  const expected = currentDirectPageIdentity();
+  const generation = state.requestGeneration + 1;
+  state.requestGeneration = generation;
+  const key = currentTaskKey();
+  state.authorityStale = true;
+  state.mutationBusy = false;
+  state.message = '已恢复网络，正在刷新最新状态';
+  stopClaimTimer();
+  renderTaskDetail();
+  try {
+    await refreshSessionAndStores(generation);
+    if (!directPageIsCurrent(expected) || !storeIsAuthorized(expected.storeId)) {
+      throw new Error('task_access_changed');
+    }
+    await refreshCurrentTask('最新任务状态已刷新', generation, key);
+    if (
+      !directPageIsCurrent(expected)
+      || !state.currentTask.store
+      || String(state.currentTask.store.store_id) !== expected.storeId
+    ) throw new Error('invalid_task_detail');
+    state.authorityStale = false;
+    state.message = '最新任务状态已刷新';
+    renderTaskDetail();
+  } catch {
+    if (!state.session || generation !== state.requestGeneration) return;
+    state.authorityStale = true;
+    state.mutationBusy = false;
+    state.message = '任务状态刷新失败，当前详情保持只读，请稍后重试';
+    stopClaimTimer();
+    renderTaskDetail();
+  }
+}
+
+async function refreshListAfterReconnect() {
+  const generation = state.requestGeneration + 1;
+  state.requestGeneration = generation;
+  const nav = state.activeNav;
+  state.authorityStale = true;
+  state.message = '已恢复网络，正在刷新最新状态';
+  stopClaimTimer();
+  renderCurrent();
+  try {
+    await refreshSessionAndStores(generation);
+    if (nav !== state.activeNav || generation !== state.requestGeneration) return;
+    if (nav === 'payroll') await loadPayroll({ render: false, generation });
+    else if (nav === 'tasks' || nav === 'approvals') {
+      await loadTasks({ render: false, generation });
+    }
+    if (!state.session || nav !== state.activeNav || generation !== state.requestGeneration) return;
+    state.authorityStale = false;
+    state.message = '最新状态已刷新';
+    renderCurrent();
+  } catch {
+    if (!state.session || nav !== state.activeNav || generation !== state.requestGeneration) return;
+    state.authorityStale = true;
+    state.message = '状态刷新失败，当前页面保持只读，请稍后重试';
+    renderCurrent();
+  }
+}
+
+async function refreshPayrollAfterReconnect(successMessage = '最新工资状态已刷新') {
+  if (!state.currentPayroll) return;
+  const payroll = state.currentPayroll.payroll;
+  const key = payrollKey();
+  const priorMode = state.payrollMode;
+  const priorAttemptId = draftAttemptId();
+  const generation = state.requestGeneration + 1;
+  state.requestGeneration = generation;
+  clearProofUploadState();
+  state.takeoverMode = '';
+  state.authorityStale = true;
+  state.paymentBusy = true;
+  state.message = '已恢复网络，正在刷新最新工资状态';
+  stopClaimTimer();
+  renderPayrollDetail();
+  try {
+    await refreshSessionAndStores(generation);
+    if (!payrollRequestIsCurrent(generation, key) || !storeIsAuthorized(key.storeId)) {
+      throw new Error('payroll_access_changed');
+    }
+    const [detail, tasks, payrollList] = await Promise.all([
+      api(payrollPath(payroll.store_id, payroll.payroll_id)),
+      api('/api/manage/tasks?store_id=' + encodeURIComponent(payroll.store_id) + '&type=payroll'),
+      api('/api/manage/stores/' + encodeURIComponent(payroll.store_id) + '/payroll')
+    ]);
+    if (!payrollRequestIsCurrent(generation, key)) return;
+    if (!detail.payroll || !payrollIdentityMatches(detail, key)) {
+      throw new Error('invalid_payroll_detail');
+    }
+    const listItem = (payrollList.payroll || []).find((item) => item.payroll_id === payroll.payroll_id);
+    const taskRows = tasks.tasks || [];
+    if (taskRows.some((item) => (
+      item.task_type !== 'payroll' || item.store_id !== payroll.store_id
+    ))) {
+      throw new Error('inconsistent_payroll_task_scope');
+    }
+    const taskItem = taskRows.find((item) => (
+      item.task_type === 'payroll' && item.task_id === payroll.payroll_id
+    ));
+    const editable = payrollCanStart(detail.payroll);
+    if (
+      !listItem
+      || listItem.store_id !== detail.payroll.store_id
+      || listItem.status !== detail.payroll.status
+      || claimSignature(listItem.claim) !== claimSignature(detail.payroll.claim)
+    ) {
+      throw new Error('inconsistent_payroll_authority');
+    }
+    if (editable && !taskItem) throw new Error('missing_editable_payroll_task');
+    if (taskItem && (
+      taskItem.store_id !== detail.payroll.store_id
+      || taskItem.status !== detail.payroll.status
+      || claimSignature(taskItem.claim) !== claimSignature(detail.payroll.claim)
+    )) {
+      throw new Error('inconsistent_payroll_authority');
+    }
+    adoptPayrollDossier(detail);
+    state.tasks = state.tasks.filter((task) => !(
+      task.task_type === 'payroll' && task.store_id === payroll.store_id
+    )).concat(taskRows).sort(compareManageTasks);
+    state.payroll = state.payroll.filter((item) => item.store_id !== payroll.store_id)
+      .concat(payrollList.payroll || []);
+    const sameEditableAttempt = Boolean(
+      priorMode === 'payment'
+      && priorAttemptId
+      && draftAttemptId() === priorAttemptId
+      && payrollCanStart(state.currentPayroll.payroll)
+      && ownsActiveClaim(state.currentPayroll.payroll)
+    );
+    state.payrollMode = sameEditableAttempt ? 'payment' : 'dossier';
+    state.authorityStale = false;
+    state.paymentBusy = false;
+    state.message = successMessage;
+    renderPayrollDetail();
+  } catch {
+    if (!payrollRequestIsCurrent(generation, key)) return;
+    state.authorityStale = true;
+    state.paymentBusy = false;
+    state.message = '工资状态刷新失败，当前档案保持只读，请稍后重试';
+    stopClaimTimer();
+    renderPayrollDetail();
+  }
+}
+
+function claimSignature(claim) {
+  if (!claim) return '';
+  return [
+    String(claim.claimed_by || ''),
+    String(claim.claimed_at || ''),
+    String(claim.lease_expires_at || ''),
+    claimIsActive(claim) ? 'active' : 'expired'
+  ].join('|');
+}
+
+async function boot() {
+  resetAuthenticatedState();
+  try {
+    await api('/api/admin/me');
+  } catch {
+    resetAuthenticatedState();
+    loginView();
+    return;
+  }
+  try {
+    state.session = await api('/api/manage/session');
+    state.csrfToken = state.session.csrf_token || '';
+    const stores = await api('/api/manage/stores');
+    state.stores = stores.stores || [];
+    const directTaskPath = /^\/manage\/tasks\/[^/]+\/[^/]+$/
+      .test(String(location.pathname || ''));
+    if (directTaskPath) {
+      await openReturnPath();
+      const directGeneration = state.requestGeneration;
+      const directSession = state.session;
+      const directPage = currentDirectPageIdentity();
+      try {
+        await loadTasks({ render: false });
+      } catch {
+        if (state.session !== directSession
+          || state.requestGeneration !== directGeneration
+          || !directPageIsCurrent(directPage)) return;
+        state.message = '待办列表暂时无法加载，当前任务仍可查看';
+        const message = document.getElementById('app-message');
+        if (message) message.textContent = state.message;
+      }
+    } else {
+      await loadTasks();
+      await openReturnPath();
+    }
+  } catch {
+    resetAuthenticatedState();
+    loginView();
+  }
+}
+
+window.addEventListener('online', async () => {
+  state.online = true;
+  if (!state.session) {
+    loginView();
+    return;
+  }
+  if (state.currentPayroll) await refreshPayrollAfterReconnect();
+  else if (state.currentTask) await refreshTaskAfterReconnect();
+  else await refreshListAfterReconnect();
+});
+window.addEventListener('offline', () => {
+  state.online = false;
+  state.authorityStale = true;
+  stopClaimTimer();
+  if (state.session) renderCurrent();
+  else loginView();
+});
+
+if ('serviceWorker' in navigator) {
+  navigator.serviceWorker.register('/manage/sw.js');
+}
+
+boot();
+`;

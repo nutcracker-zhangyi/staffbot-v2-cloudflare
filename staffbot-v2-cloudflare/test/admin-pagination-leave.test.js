@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { DatabaseSync } from 'node:sqlite';
 
+import { createD1 } from './helpers/d1.js';
 import worker, {
   ABSENCE_HISTORY_COLUMNS,
   ABSENCE_PENDING_COLUMNS,
@@ -15,7 +16,7 @@ import worker, {
   attendanceAdminActions,
   attendanceFineDecision,
   absenceApprovalKeyboard,
-  absenceScanDates,
+  absenceScanDates as facadeAbsenceScanDates,
   approveLeaveRequest,
   approveAbsenceFineRequest,
   cancelAbsenceForApprovedLeave,
@@ -33,16 +34,27 @@ import worker, {
   leaveRuleParams,
   normalizeAbsenceFineSetting,
   normalizeEmployeeAbsenceCheck,
-  processAbsenceFines,
+  processAbsenceFines as facadeProcessAbsenceFines,
   resetAdminSortPages,
-  deliverAbsenceNotification,
+  deliverAbsenceNotification as facadeDeliverAbsenceNotification,
   rejectAbsenceFineRequest,
   sumAttendanceEmployeeStats,
   validateLeaveDate,
   visibleAdminStores
 } from '../src/index.js';
+import {
+  absenceScanDates,
+  deliverAbsenceNotification,
+  processAbsenceFines
+} from '../src/absence.js';
 
-const source = readFileSync(new URL('../src/index.js', import.meta.url), 'utf8');
+const source = readFileSync(new URL('../src/admin-page.js', import.meta.url), 'utf8');
+const adminApiSource = readFileSync(new URL('../src/admin-api.js', import.meta.url), 'utf8');
+const routerSource = readFileSync(new URL('../src/router.js', import.meta.url), 'utf8');
+const absenceSource = readFileSync(new URL('../src/absence.js', import.meta.url), 'utf8');
+const approvalsSource = readFileSync(new URL('../src/approvals.js', import.meta.url), 'utf8');
+const moneySource = readFileSync(new URL('../src/money.js', import.meta.url), 'utf8');
+const telegramSource = readFileSync(new URL('../src/telegram.js', import.meta.url), 'utf8');
 const wrangler = readFileSync(new URL('../wrangler.toml', import.meta.url), 'utf8');
 const absenceOutboxMigration = readFileSync(new URL('../db/migrations/017_absence_notification_outbox.sql', import.meta.url), 'utf8');
 
@@ -104,6 +116,7 @@ function absenceAdminApiEnv(database, hooks = {}) {
     );
   `);
   return {
+    ENVIRONMENT: 'production',
     BOT_TOKEN: 'test-token',
     WEBHOOK_SECRET: 'test-secret',
     ADMIN_IDS: 'ADMIN1',
@@ -209,51 +222,7 @@ async function getAdminAbsence(env, query = '') {
 }
 
 function d1TestDatabase(database, afterFirst, hooks = {}) {
-  function prepare(sql) {
-    let params = [];
-    return {
-      _sql: sql,
-      bind(...values) {
-        params = values;
-        return this;
-      },
-      async first() {
-        if (hooks.beforeFirst) await hooks.beforeFirst(sql, params);
-        const row = database.prepare(sql).get(...params) || null;
-        if (afterFirst) await afterFirst(sql, row);
-        return row;
-      },
-      async all() {
-        return { results: database.prepare(sql).all(...params) };
-      },
-      async run() {
-        if (hooks.beforeRun) await hooks.beforeRun(sql, params);
-        return this._run();
-      },
-      _run() {
-        const result = database.prepare(sql).run(...params);
-        return { success: true, meta: { changes: Number(result.changes) } };
-      }
-    };
-  }
-  return {
-    prepare,
-    async batch(statements) {
-      database.exec('BEGIN IMMEDIATE');
-      try {
-        const results = [];
-        for (const statement of statements) {
-          if (hooks.beforeBatchStatement) await hooks.beforeBatchStatement(statement._sql);
-          results.push(statement._run());
-        }
-        database.exec('COMMIT');
-        return results;
-      } catch (error) {
-        database.exec('ROLLBACK');
-        throw error;
-      }
-    }
-  };
+  return createD1(database, { ...hooks, afterFirst });
 }
 
 function memberAbsenceTestDatabase() {
@@ -270,6 +239,7 @@ function memberAbsenceTestDatabase() {
       store_id TEXT NOT NULL, telegram_id TEXT NOT NULL, display_name TEXT, role TEXT, status TEXT,
       commission_rate REAL, cycle_start TEXT, joined_at TEXT, updated_at TEXT,
       absence_check_enabled INTEGER NOT NULL DEFAULT 1, absence_check_enabled_at TEXT,
+      payroll_start_date TEXT, payroll_automation_started_at TEXT,
       PRIMARY KEY (store_id, telegram_id)
     );
     CREATE TABLE absence_fine_requests (
@@ -294,8 +264,8 @@ function memberAbsenceTestDatabase() {
 
     INSERT INTO admin_sessions VALUES ('session-1', 'ADMIN', '2099-01-01T00:00:00.000Z', '2026-07-15T00:00:00.000Z');
     INSERT INTO users VALUES ('U1', 'Alice', 'alice', 'employee', 'active', '2026-07-01T00:00:00.000Z', '2026-07-01T00:00:00.000Z', '2026-07-01T00:00:00.000Z');
-    INSERT INTO store_members VALUES ('S1', 'U1', 'Alice', 'employee', 'active', 0.6, '2026-07-01T00:00:00.000Z', '2026-07-01T00:00:00.000Z', '2026-07-01T00:00:00.000Z', 1, '2026-07-01T00:00:00.000Z');
-    INSERT INTO store_members VALUES ('S2', 'U1', 'Alice', 'employee', 'active', 0.6, '2026-07-01T00:00:00.000Z', '2026-07-01T00:00:00.000Z', '2026-07-01T00:00:00.000Z', 1, '2026-07-01T00:00:00.000Z');
+    INSERT INTO store_members VALUES ('S1', 'U1', 'Alice', 'employee', 'active', 0.6, '2026-07-01T00:00:00.000Z', '2026-07-01T00:00:00.000Z', '2026-07-01T00:00:00.000Z', 1, '2026-07-01T00:00:00.000Z', NULL, NULL);
+    INSERT INTO store_members VALUES ('S2', 'U1', 'Alice', 'employee', 'active', 0.6, '2026-07-01T00:00:00.000Z', '2026-07-01T00:00:00.000Z', '2026-07-01T00:00:00.000Z', 1, '2026-07-01T00:00:00.000Z', NULL, NULL);
 
     INSERT INTO absence_fine_requests VALUES ('PENDING-S1-U1', 'S1', 'U1', 'pending', NULL, NULL, NULL);
     INSERT INTO absence_fine_requests VALUES ('APPROVED-S1-U1', 'S1', 'U1', 'approved', NULL, '2026-07-14T00:00:00.000Z', 'ADMIN');
@@ -317,7 +287,8 @@ function attendanceStatsTestDatabase() {
     CREATE TABLE users (telegram_id TEXT PRIMARY KEY, name TEXT, username TEXT);
     CREATE TABLE store_members (
       store_id TEXT, telegram_id TEXT, display_name TEXT, status TEXT, joined_at TEXT,
-      absence_check_enabled INTEGER NOT NULL DEFAULT 1, absence_check_enabled_at TEXT
+      absence_check_enabled INTEGER NOT NULL DEFAULT 1, absence_check_enabled_at TEXT,
+      payroll_start_date TEXT
     );
     CREATE TABLE attendance_records (
       record_id TEXT PRIMARY KEY, store_id TEXT, telegram_id TEXT,
@@ -338,11 +309,11 @@ function attendanceStatsTestDatabase() {
     INSERT INTO stores VALUES ('TOKYO', 'Tokyo Club', 'Asia/Tokyo', '¥');
     INSERT INTO users VALUES ('U1', 'Telegram Alice', 'alice');
     INSERT INTO users VALUES ('U2', 'Bob', 'bob');
-    INSERT INTO store_members VALUES ('TOKYO', 'U1', 'Alice', 'active', '2026-07-09T16:00:00.000Z', 1, '2026-07-09T16:00:00.000Z');
-    INSERT INTO store_members VALUES ('TOKYO', 'U2', '', 'active', '2026-07-14T02:00:00.000Z', 1, '2026-07-14T02:00:00.000Z');
-    INSERT INTO store_members VALUES ('TOKYO', 'U3', 'Disabled', 'disabled', '2026-07-01T00:00:00.000Z', 1, '2026-07-01T00:00:00.000Z');
-    INSERT INTO store_members VALUES ('TOKYO', 'U4', 'Exempt', 'active', '2026-07-09T00:00:00.000Z', 0, NULL);
-    INSERT INTO store_members VALUES ('TOKYO', 'U5', 'Re-enabled', 'active', '2026-07-09T00:00:00.000Z', 1, '2026-07-12T15:00:00.000Z');
+    INSERT INTO store_members VALUES ('TOKYO', 'U1', 'Alice', 'active', '2026-07-09T16:00:00.000Z', 1, '2026-07-09T16:00:00.000Z', '2026-07-10');
+    INSERT INTO store_members VALUES ('TOKYO', 'U2', '', 'active', '2026-07-14T02:00:00.000Z', 1, '2026-07-14T02:00:00.000Z', '2026-07-14');
+    INSERT INTO store_members VALUES ('TOKYO', 'U3', 'Disabled', 'disabled', '2026-07-01T00:00:00.000Z', 1, '2026-07-01T00:00:00.000Z', '2026-07-01');
+    INSERT INTO store_members VALUES ('TOKYO', 'U4', 'Exempt', 'active', '2026-07-09T00:00:00.000Z', 0, NULL, '2026-07-09');
+    INSERT INTO store_members VALUES ('TOKYO', 'U5', 'Re-enabled', 'active', '2026-07-09T00:00:00.000Z', 1, '2026-07-12T15:00:00.000Z', '2026-07-09');
 
     INSERT INTO attendance_records VALUES ('IN-10', 'TOKYO', 'U1', '2026-07-10', 'checkin', 1);
     INSERT INTO attendance_records VALUES ('IN-11', 'TOKYO', 'U1', '2026-07-11', 'checkin', 0);
@@ -416,7 +387,7 @@ function absenceCronTestDatabase() {
     CREATE TABLE store_members (
       store_id TEXT, telegram_id TEXT, display_name TEXT, role TEXT, status TEXT,
       joined_at TEXT, absence_check_enabled INTEGER NOT NULL DEFAULT 1,
-      absence_check_enabled_at TEXT,
+      absence_check_enabled_at TEXT, payroll_start_date TEXT,
       PRIMARY KEY (store_id, telegram_id)
     );
     CREATE TABLE attendance_records (
@@ -448,11 +419,13 @@ function absenceCronTestDatabase() {
     );
     INSERT INTO store_members VALUES (
       'STORE1', 'U1', 'Alice', 'employee', 'active',
-      '2026-07-01T00:00:00.000Z', 1, '2026-07-01T00:00:00.000Z'
+      '2026-07-01T00:00:00.000Z', 1, '2026-07-01T00:00:00.000Z',
+      '2026-07-01'
     );
     INSERT INTO store_members VALUES (
       'STORE1', 'A1', 'Admin', 'admin', 'active',
-      '2026-07-01T00:00:00.000Z', 1, '2026-07-01T00:00:00.000Z'
+      '2026-07-01T00:00:00.000Z', 1, '2026-07-01T00:00:00.000Z',
+      NULL
     );
   `);
   return database;
@@ -514,8 +487,8 @@ test('groups aggregate attendance fines by currency instead of adding incompatib
 });
 
 test('attendance API returns summary and employee statistics', () => {
-  assert.match(source, /employee_stats/);
-  assert.match(source, /summary: sumAttendanceEmployeeStats/);
+  assert.match(adminApiSource, /employee_stats/);
+  assert.match(adminApiSource, /summary: sumAttendanceEmployeeStats/);
 });
 
 test('attendance page renders five metrics and a multi-employee drill-down table', () => {
@@ -687,6 +660,21 @@ test('starts absence statistics for a re-enabled employee on the store-local ena
   });
 });
 
+test('does not count absence statistics before the employee first work date', async () => {
+  const database = attendanceStatsTestDatabase();
+  database.prepare(`
+    UPDATE store_members
+    SET payroll_start_date = '2026-07-15'
+    WHERE store_id = 'TOKYO' AND telegram_id = 'U1'
+  `).run();
+
+  const rows = await attendanceEmployeeStats({ DB: d1TestDatabase(database) }, {
+    storeIds: ['TOKYO'], employeeId: 'U1', monthDateStart: '2026-07-09', monthDateEnd: '2026-07-21'
+  }, new Date('2026-07-15T03:00:00.000Z'));
+
+  assert.equal(rows[0].absence_days, 0);
+});
+
 test('hides disabled stores from admin store choices', () => {
   assert.deepEqual(visibleAdminStores([
     { store_id: 'A', status: 'active' },
@@ -720,9 +708,9 @@ test('scopes admin filter controls to the active tab', () => {
   assert.doesNotMatch(source, /type="month"/);
 });
 
-test('syncs visible filter inputs before admin tab changes', () => {
+test('syncs visible shared filters before non-Dashboard tab changes', () => {
   assert.match(source, /function syncFilterInputs\(/);
-  assert.match(source, /document\.querySelectorAll\('nav button'\)\.forEach\(\(b\) => b\.onclick = \(\) => \{ syncFilterInputs\(\); currentTab = b\.dataset\.tab; loadTab\(\); \}\);/);
+  assert.match(source, /document\.querySelectorAll\('nav button'\)\.forEach\(\(b\) => b\.onclick = \(\) => \{[\s\S]*if \(currentTab !== 'dashboard'\) syncFilterInputs\(\);[\s\S]*currentTab = b\.dataset\.tab;[\s\S]*loadTab\(\);[\s\S]*\}\);/);
 });
 
 test('builds admin sort SQL only from allowed fields', () => {
@@ -753,10 +741,10 @@ test('maps every visible sortable absence column to server ordering', () => {
 });
 
 test('absence pagination uses request id as the stable default and custom-sort tiebreaker', () => {
-  assert.match(source, /ORDER BY r\.business_date DESC, r\.created_at DESC, r\.request_id DESC/);
-  assert.match(source, /ORDER BY COALESCE\(r\.decided_at, r\.created_at\) DESC, r\.request_id DESC/);
-  assert.match(source, /baseParams, `ORDER BY r\.business_date DESC, r\.created_at DESC, r\.request_id DESC`, absenceSort, `r\.request_id DESC`/);
-  assert.match(source, /baseParams, `ORDER BY COALESCE\(r\.decided_at, r\.created_at\) DESC, r\.request_id DESC`, absenceSort, `r\.request_id DESC`/);
+  assert.match(adminApiSource, /ORDER BY r\.business_date DESC, r\.created_at DESC, r\.request_id DESC/);
+  assert.match(adminApiSource, /ORDER BY COALESCE\(r\.decided_at, r\.created_at\) DESC, r\.request_id DESC/);
+  assert.match(adminApiSource, /baseParams, `ORDER BY r\.business_date DESC, r\.created_at DESC, r\.request_id DESC`, absenceSort, `r\.request_id DESC`/);
+  assert.match(adminApiSource, /baseParams, `ORDER BY COALESCE\(r\.decided_at, r\.created_at\) DESC, r\.request_id DESC`, absenceSort, `r\.request_id DESC`/);
 });
 
 test('resets only the sorted absence pager while preserving existing tab behavior', () => {
@@ -914,8 +902,8 @@ test('admin store form exposes absence fine controls', () => {
 test('member form exposes daily absence checking', () => {
   assert.match(source, /memberAbsenceCheck/);
   assert.equal((source.match(/absence_check_enabled:'[^']+'/g) || []).length, 4);
-  assert.equal((source.match(/m\.commission_rate,\s*m\.absence_check_enabled,/g) || []).length, 2);
-  assert.match(source, /\['store_id','telegram_id','display_name','username','role','status','commission_rate','absence_check_enabled','cycle_start','joined_at','action'\]/);
+  assert.equal((adminApiSource.match(/m\.commission_rate,\s*m\.absence_check_enabled,/g) || []).length, 2);
+  assert.match(source, /\['store_id','telegram_id','display_name','username','role','status','commission_rate','absence_check_enabled','payroll_start_date','payroll_automation_started_at','cycle_start','joined_at','action'\]/);
   assert.match(source, /absence_check_enabled:\s*member\.absence_check_enabled === 0 \? L\('disable'\) : L\('enable'\)/);
   assert.match(source, /absence_check_enabled:\s*\$\('memberAbsenceCheck'\)\.value === 'true'/);
   assert.match(source, /absence_check_enabled:\s*member\.absence_check_enabled !== 0/);
@@ -983,6 +971,7 @@ test('normalizes employee absence check updates without resetting an enabled tim
 test('rejects invalid explicit absence check values without changing member work', async () => {
   const database = memberAbsenceTestDatabase();
   const env = {
+    ENVIRONMENT: 'production',
     BOT_TOKEN: 'test-token', WEBHOOK_SECRET: 'test-secret', ADMIN_IDS: 'ADMIN',
     DB: d1TestDatabase(database)
   };
@@ -1012,6 +1001,7 @@ test('rejects invalid explicit absence check values without changing member work
 test('disabling absence checks cancels only matching pending work', async () => {
   const database = memberAbsenceTestDatabase();
   const env = {
+    ENVIRONMENT: 'production',
     BOT_TOKEN: 'test-token',
     WEBHOOK_SECRET: 'test-secret',
     ADMIN_IDS: 'ADMIN',
@@ -1069,6 +1059,7 @@ test('disabling absence checks cancels only matching pending work', async () => 
 test('rolls back the employee switch and cancellations when its audit insert fails', async () => {
   const database = memberAbsenceTestDatabase();
   const env = {
+    ENVIRONMENT: 'production',
     BOT_TOKEN: 'test-token', WEBHOOK_SECRET: 'test-secret', ADMIN_IDS: 'ADMIN',
     DB: d1TestDatabase(database, null, {
       beforeBatchStatement(sql) {
@@ -1104,6 +1095,7 @@ test('rolls back the employee switch and cancellations when its audit insert fai
 test('new member defaults to enabled employee absence check when switch is omitted', async () => {
   const database = memberAbsenceTestDatabase();
   const env = {
+    ENVIRONMENT: 'production',
     BOT_TOKEN: 'test-token',
     WEBHOOK_SECRET: 'test-secret',
     ADMIN_IDS: 'ADMIN',
@@ -1143,11 +1135,20 @@ test('returns every unprocessed enabled date through the completed date', () => 
     absence_fine_enabled_at: '2026-07-12T03:00:00.000Z',
     absence_last_checked_date: '2026-07-12'
   };
-  assert.deepEqual(absenceScanDates(store, new Date('2026-07-15T03:10:00.000Z')), [
+  const now = new Date('2026-07-15T03:10:00.000Z');
+  const expectedDates = [
     '2026-07-13',
     '2026-07-14'
-  ]);
-  assert.deepEqual(absenceScanDates({ ...store, absence_fine_enabled_at: null }, new Date('2026-07-15T03:10:00.000Z')), []);
+  ];
+  assert.deepEqual(absenceScanDates(store, now), expectedDates);
+  assert.deepEqual(facadeAbsenceScanDates(store, now), expectedDates);
+  assert.deepEqual(absenceScanDates({ ...store, absence_fine_enabled_at: null }, now), []);
+});
+
+test('keeps absence processing interfaces available through the worker facade', () => {
+  assert.equal(facadeAbsenceScanDates, absenceScanDates);
+  assert.equal(facadeDeliverAbsenceNotification, deliverAbsenceNotification);
+  assert.equal(facadeProcessAbsenceFines, processAbsenceFines);
 });
 
 test('keeps absence approval callbacks below Telegram limit', () => {
@@ -1161,15 +1162,15 @@ test('keeps absence approval callbacks below Telegram limit', () => {
 });
 
 test('routes compact absence approval callbacks through store authorization', () => {
-  assert.match(source, /parts\[0\] === 'abs'/);
-  assert.match(source, /approveAbsenceFineRequest/);
-  assert.match(source, /rejectAbsenceFineRequest/);
-  assert.match(source, /cancelAbsenceForApprovedLeave/);
+  assert.match(telegramSource, /parts\[0\] === 'abs'/);
+  assert.match(telegramSource, /approveAbsenceFineRequest/);
+  assert.match(telegramSource, /rejectAbsenceFineRequest/);
+  assert.match(approvalsSource, /cancelAbsenceForApprovedLeave/);
 });
 
 test('absence fines use the existing editable fine record path', () => {
-  assert.match(source, /found\.type !== 'fine'/);
-  assert.match(source, /source: 'attendance_absence'/);
+  assert.match(approvalsSource, /found\.type !== 'fine'/);
+  assert.match(moneySource, /source: 'attendance_absence'/);
 });
 
 test('approves an absence fine exactly once across replayed requests', async () => {
@@ -1306,6 +1307,7 @@ test('requires absence rejection reason before changing a pending request', asyn
 test('admin absence query separates pending and history while preserving summary across pagination', async () => {
   const database = absenceAdminQueryDatabase();
   const env = {
+    ENVIRONMENT: 'production',
     BOT_TOKEN: 'test-token', WEBHOOK_SECRET: 'test-secret', ADMIN_IDS: 'ADMIN1',
     DB: d1TestDatabase(database)
   };
@@ -1336,6 +1338,7 @@ test('admin absence query separates pending and history while preserving summary
 test('admin absence runtime applies delivery and history-only sort expressions', async () => {
   const database = absenceAdminQueryDatabase();
   const env = {
+    ENVIRONMENT: 'production',
     BOT_TOKEN: 'test-token', WEBHOOK_SECRET: 'test-secret', ADMIN_IDS: 'ADMIN1',
     DB: d1TestDatabase(database)
   };
@@ -1356,6 +1359,7 @@ test('admin absence runtime applies delivery and history-only sort expressions',
 test('absence notification summary distinguishes sent, not_queued, and retrying', async () => {
   const database = absenceAdminQueryDatabase();
   const env = {
+    ENVIRONMENT: 'production',
     BOT_TOKEN: 'test-token', WEBHOOK_SECRET: 'test-secret', ADMIN_IDS: 'ADMIN1',
     DB: d1TestDatabase(database)
   };
@@ -1382,6 +1386,7 @@ test('absence notification summary distinguishes sent, not_queued, and retrying'
 test('admin absence rows expose their own store timezone for date rendering', async () => {
   const database = absenceAdminQueryDatabase();
   const env = {
+    ENVIRONMENT: 'production',
     BOT_TOKEN: 'test-token', WEBHOOK_SECRET: 'test-secret', ADMIN_IDS: 'ADMIN1',
     DB: d1TestDatabase(database)
   };
@@ -1395,6 +1400,7 @@ test('admin absence rows expose their own store timezone for date rendering', as
 test('absence totals by currency use actual approved fine records', async () => {
   const database = absenceAdminQueryDatabase();
   const env = {
+    ENVIRONMENT: 'production',
     BOT_TOKEN: 'test-token', WEBHOOK_SECRET: 'test-secret', ADMIN_IDS: 'ADMIN1',
     DB: d1TestDatabase(database)
   };
@@ -1577,7 +1583,7 @@ test('reconciles an already-approved leave with its uncancelled absence', async 
 test('keeps failed Telegram absence notifications pending and retries them', async () => {
   const database = notificationTestDatabase();
   database.prepare(`INSERT INTO absence_fine_notifications (request_id, admin_id) VALUES ('ABS-1', 'A1')`).run();
-  const env = { BOT_TOKEN: 'test', DB: d1TestDatabase(database) };
+  const env = { ENVIRONMENT: 'production', BOT_TOKEN: 'test', MANAGE_BASE_URL: 'https://manage.example.test', DB: d1TestDatabase(database) };
   const originalFetch = globalThis.fetch;
   const results = [{ ok: false, description: 'blocked' }, { ok: true, result: { message_id: 1 } }];
   globalThis.fetch = async () => new Response(JSON.stringify(results.shift()), {
@@ -1601,7 +1607,7 @@ test('tracks partial multi-admin notification success independently', async () =
     INSERT INTO absence_fine_notifications (request_id, admin_id) VALUES ('ABS-1', 'A1');
     INSERT INTO absence_fine_notifications (request_id, admin_id) VALUES ('ABS-1', 'A2');
   `);
-  const env = { BOT_TOKEN: 'test', DB: d1TestDatabase(database) };
+  const env = { ENVIRONMENT: 'production', BOT_TOKEN: 'test', MANAGE_BASE_URL: 'https://manage.example.test', DB: d1TestDatabase(database) };
   const originalFetch = globalThis.fetch;
   globalThis.fetch = async (_url, options) => {
     const adminId = JSON.parse(options.body).chat_id;
@@ -1626,7 +1632,7 @@ test('tracks partial multi-admin notification success independently', async () =
 test('atomically claims an absence notification across overlapping Cron runs', async () => {
   const database = notificationTestDatabase();
   database.prepare(`INSERT INTO absence_fine_notifications (request_id, admin_id) VALUES ('ABS-1', 'A1')`).run();
-  const env = { BOT_TOKEN: 'test', DB: d1TestDatabase(database) };
+  const env = { ENVIRONMENT: 'production', BOT_TOKEN: 'test', MANAGE_BASE_URL: 'https://manage.example.test', DB: d1TestDatabase(database) };
   const originalFetch = globalThis.fetch;
   let sends = 0;
   globalThis.fetch = async () => {
@@ -1651,6 +1657,7 @@ test('does not send when the employee is disabled after claim and before final f
   database.prepare(`INSERT INTO absence_fine_notifications (request_id, admin_id) VALUES ('ABS-1', 'A1')`).run();
   let adminReads = 0;
   const env = {
+    ENVIRONMENT: 'production',
     BOT_TOKEN: 'test', ADMIN_IDS: '',
     DB: d1TestDatabase(database, async (sql) => {
       if (!/role IN \('admin', 'owner'\)/.test(sql)) return;
@@ -1687,7 +1694,7 @@ test('cancels a queued absence notification when admin access was revoked', asyn
   const database = notificationTestDatabase();
   database.prepare(`INSERT INTO absence_fine_notifications (request_id, admin_id) VALUES ('ABS-1', 'A1')`).run();
   database.prepare(`UPDATE store_members SET status = 'disabled' WHERE telegram_id = 'A1'`).run();
-  const env = { BOT_TOKEN: 'test', ADMIN_IDS: '', DB: d1TestDatabase(database) };
+  const env = { ENVIRONMENT: 'production', BOT_TOKEN: 'test', MANAGE_BASE_URL: 'https://manage.example.test', ADMIN_IDS: '', DB: d1TestDatabase(database) };
   const originalFetch = globalThis.fetch;
   let sends = 0;
   globalThis.fetch = async () => { sends += 1; return new Response(JSON.stringify({ ok: true })); };
@@ -1706,7 +1713,7 @@ test('cancels a queued notification when its absence request was already decided
   const database = notificationTestDatabase();
   database.prepare(`INSERT INTO absence_fine_notifications (request_id, admin_id) VALUES ('ABS-1', 'A1')`).run();
   database.prepare(`UPDATE absence_fine_requests SET status = 'approved' WHERE request_id = 'ABS-1'`).run();
-  const env = { BOT_TOKEN: 'test', ADMIN_IDS: '', DB: d1TestDatabase(database) };
+  const env = { ENVIRONMENT: 'production', BOT_TOKEN: 'test', MANAGE_BASE_URL: 'https://manage.example.test', ADMIN_IDS: '', DB: d1TestDatabase(database) };
   const originalFetch = globalThis.fetch;
   let sends = 0;
   globalThis.fetch = async () => { sends += 1; return new Response(JSON.stringify({ ok: true })); };
@@ -1727,7 +1734,7 @@ test('does not steal a fresh sending notification lease', async () => {
     INSERT INTO absence_fine_notifications (request_id, admin_id, status, claimed_at)
     VALUES ('ABS-1', 'A1', 'sending', '2026-07-15T03:05:00.000Z')
   `).run();
-  const env = { BOT_TOKEN: 'test', ADMIN_IDS: '', DB: d1TestDatabase(database) };
+  const env = { ENVIRONMENT: 'production', BOT_TOKEN: 'test', MANAGE_BASE_URL: 'https://manage.example.test', ADMIN_IDS: '', DB: d1TestDatabase(database) };
   const originalFetch = globalThis.fetch;
   let sends = 0;
   globalThis.fetch = async () => { sends += 1; return new Response(JSON.stringify({ ok: true })); };
@@ -1750,7 +1757,7 @@ test('recovers a sending notification lease older than fifteen minutes', async (
     INSERT INTO absence_fine_notifications (request_id, admin_id, status, claimed_at)
     VALUES ('ABS-1', 'A1', 'sending', '2026-07-15T02:54:59.000Z')
   `).run();
-  const env = { BOT_TOKEN: 'test', ADMIN_IDS: '', DB: d1TestDatabase(database) };
+  const env = { ENVIRONMENT: 'production', BOT_TOKEN: 'test', MANAGE_BASE_URL: 'https://manage.example.test', ADMIN_IDS: '', DB: d1TestDatabase(database) };
   const originalFetch = globalThis.fetch;
   let sends = 0;
   globalThis.fetch = async () => { sends += 1; return new Response(JSON.stringify({ ok: true }), { headers: { 'content-type': 'application/json' } }); };
@@ -1771,6 +1778,7 @@ test('rechecks employee eligibility when inserting an absence after candidate di
   const database = absenceCronTestDatabase();
   let disabled = false;
   const env = {
+    ENVIRONMENT: 'production',
     BOT_TOKEN: 'test', ADMIN_IDS: '',
     DB: d1TestDatabase(database, null, {
       beforeRun(sql) {
@@ -1790,6 +1798,33 @@ test('rechecks employee eligibility when inserting an absence after candidate di
   assert.equal(database.prepare(`SELECT COUNT(*) AS total FROM absence_fine_requests`).get().total, 0);
 });
 
+test('does not create an absence before the employee first work date', async () => {
+  const database = absenceCronTestDatabase();
+  database.prepare(`
+    UPDATE store_members
+    SET payroll_start_date = '2026-07-15'
+    WHERE store_id = 'STORE1' AND telegram_id = 'U1'
+  `).run();
+  const env = {
+    ENVIRONMENT: 'production',
+    BOT_TOKEN: 'test',
+    ADMIN_IDS: '',
+    DB: d1TestDatabase(database)
+  };
+
+  await processAbsenceFines(
+    env,
+    new Date('2026-07-15T03:10:00.000Z')
+  );
+
+  assert.equal(
+    database.prepare(`
+      SELECT COUNT(*) AS total FROM absence_fine_requests
+    `).get().total,
+    0
+  );
+});
+
 test('rechecks request and employee state when inserting a notification from a stale snapshot', async () => {
   const database = absenceCronTestDatabase();
   database.exec(`
@@ -1800,6 +1835,7 @@ test('rechecks request and employee state when inserting a notification from a s
   `);
   let disabled = false;
   const env = {
+    ENVIRONMENT: 'production',
     BOT_TOKEN: 'test', ADMIN_IDS: '',
     DB: d1TestDatabase(database, null, {
       beforeRun(sql) {
@@ -1833,7 +1869,9 @@ test('discovers each absence once while excluding an exempt employee and a not-y
   const notifications = [];
   const outbox = [];
   const env = {
+    ENVIRONMENT: 'production',
     BOT_TOKEN: 'test-token',
+    MANAGE_BASE_URL: 'https://manage.example.test',
     ADMIN_IDS: '',
     DB: {
       prepare(sql) {
@@ -1854,10 +1892,10 @@ test('discovers each absence once while excluding an exempt employee and a not-y
             if (/FROM stores/.test(sql)) return { results: [store] };
             if (/FROM store_members m/.test(sql)) {
               const members = [
-                { telegram_id: '10', joined_at: '2026-07-01T00:00:00.000Z', display_name: 'Alice', absence_check_enabled: 1, absence_check_enabled_at: '2026-07-01T00:00:00.000Z' },
-                { telegram_id: '11', joined_at: '2026-07-15T00:00:00.000Z', display_name: 'Bob', absence_check_enabled: 1, absence_check_enabled_at: '2026-07-15T00:00:00.000Z' },
-                { telegram_id: '12', joined_at: '2026-07-01T00:00:00.000Z', display_name: 'Exempt', absence_check_enabled: 0, absence_check_enabled_at: null },
-                { telegram_id: '13', joined_at: '2026-07-01T00:00:00.000Z', display_name: 'Re-enabled', absence_check_enabled: 1, absence_check_enabled_at: '2026-07-14T15:00:00.000Z' }
+                { telegram_id: '10', joined_at: '2026-07-01T00:00:00.000Z', payroll_start_date: '2026-07-01', display_name: 'Alice', absence_check_enabled: 1, absence_check_enabled_at: '2026-07-01T00:00:00.000Z' },
+                { telegram_id: '11', joined_at: '2026-07-15T00:00:00.000Z', payroll_start_date: '2026-07-15', display_name: 'Bob', absence_check_enabled: 1, absence_check_enabled_at: '2026-07-15T00:00:00.000Z' },
+                { telegram_id: '12', joined_at: '2026-07-01T00:00:00.000Z', payroll_start_date: '2026-07-01', display_name: 'Exempt', absence_check_enabled: 0, absence_check_enabled_at: null },
+                { telegram_id: '13', joined_at: '2026-07-01T00:00:00.000Z', payroll_start_date: '2026-07-01', display_name: 'Re-enabled', absence_check_enabled: 1, absence_check_enabled_at: '2026-07-14T15:00:00.000Z' }
               ];
               return { results: /m\.absence_check_enabled = 1/.test(sql)
                 ? members.filter((member) => member.absence_check_enabled === 1)
@@ -1939,14 +1977,24 @@ test('discovers each absence once while excluding an exempt employee and a not-y
   assert.match(notifications[0].text, /Alice/);
   assert.match(notifications[0].text, /2026-07-14/);
   assert.match(notifications[0].text, /₫1,500,000/);
-  assert.deepEqual(notifications[0].reply_markup.inline_keyboard, absenceApprovalKeyboard(requests[0].request_id));
+  assert.deepEqual(notifications[0].reply_markup.inline_keyboard, [[{
+    text: '去处理',
+    url: `https://manage.example.test/manage/tasks/absence/${requests[0].request_id}?store=TOKYO`
+  }]]);
   assert.deepEqual(outbox.map((row) => row.status), ['sent']);
-  assert.match(source, /m\.role = 'employee'/);
+  assert.match(absenceSource, /m\.role = 'employee'/);
 });
 
 test('registers the absence scan as an hourly Worker Cron', () => {
-  assert.match(source, /async scheduled\(controller, env, ctx\)/);
-  assert.match(source, /ctx\.waitUntil\(processAbsenceFines\(env, new Date\(controller\.scheduledTime\)\)\)/);
+  assert.match(routerSource, /async scheduled\(controller, env, ctx\)/);
+  assert.match(
+    routerSource,
+    /ctx\.waitUntil\(processScheduledWork\(\s*env,\s*new Date\(controller\.scheduledTime\)\s*\)\)/
+  );
+  assert.match(
+    routerSource,
+    /const absenceResult = await processAbsenceFines\(env, now\)/
+  );
   assert.match(wrangler, /\[triggers\]\s+crons = \["10 \* \* \* \*"\]/);
 });
 
