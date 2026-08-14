@@ -25,7 +25,11 @@ export function createD1(database, hooks = {}) {
         const result = database.prepare(sql).run(...params);
         return {
           success: true,
-          meta: { changes: Number(result.changes) }
+          meta: {
+            changes: hooks.reportedChanges === undefined
+              ? Number(result.changes)
+              : Number(hooks.reportedChanges)
+          }
         };
       }
     };

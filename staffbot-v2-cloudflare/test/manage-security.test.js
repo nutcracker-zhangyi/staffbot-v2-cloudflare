@@ -29,7 +29,8 @@ async function executeServiceWorker({
     'staffbot-manage-shell-v1',
     'unrelated-app-cache'
   ],
-  installError = null
+  installError = null,
+  networkError = null
 } = {}) {
   const listeners = new Map();
   const calls = {
@@ -78,6 +79,7 @@ async function executeServiceWorker({
   };
   const networkFetch = async (request) => {
     calls.network.push({ method: request.method, url: request.url });
+    if (networkError) throw networkError;
     return new Response(`network:${request.method}:${request.url}`);
   };
   const response = await manageAsset('/manage/sw.js', bindings);
@@ -235,7 +237,7 @@ test('manage launch URL is routable inside the default service-worker scope', as
   assert.equal(manifest.start_url, defaultScope);
 });
 
-test('manage service worker is cache-first only for exact same-origin shell GET requests', async () => {
+test('manage service worker is network-first for exact same-origin shell GET requests', async () => {
   const cached = new Response('cached-shell');
   const serviceWorker = await executeServiceWorker({ cachedResponse: cached });
 
@@ -243,9 +245,22 @@ test('manage service worker is cache-first only for exact same-origin shell GET 
     'fetch',
     new Request('https://staffbot.test/manage/app.js')
   );
-  assert.equal(await shell.response.text(), 'cached-shell');
-  assert.deepEqual(serviceWorker.calls.cacheMatch, ['https://staffbot.test/manage/app.js']);
-  assert.deepEqual(serviceWorker.calls.network, []);
+  assert.equal(
+    await shell.response.text(),
+    'network:GET:https://staffbot.test/manage/app.js'
+  );
+  assert.deepEqual(serviceWorker.calls.cacheMatch, []);
+
+  const offline = await executeServiceWorker({
+    cachedResponse: new Response('cached-shell'),
+    networkError: new TypeError('offline')
+  });
+  const offlineShell = await offline.dispatch(
+    'fetch',
+    new Request('https://staffbot.test/manage/app.js')
+  );
+  assert.equal(await offlineShell.response.text(), 'cached-shell');
+  assert.deepEqual(offline.calls.cacheMatch, ['https://staffbot.test/manage/app.js']);
 
   for (const request of [
     new Request('https://staffbot.test/api/manage/tasks?store_id=STORE-1'),
@@ -257,10 +272,11 @@ test('manage service worker is cache-first only for exact same-origin shell GET 
     const result = await serviceWorker.dispatch('fetch', request);
     assert.match(await result.response.text(), /^network:/);
   }
-  assert.equal(serviceWorker.calls.cacheMatch.length, 1);
+  assert.equal(serviceWorker.calls.cacheMatch.length, 0);
   assert.deepEqual(
     serviceWorker.calls.network.map(({ method, url }) => [method, url]),
     [
+      ['GET', 'https://staffbot.test/manage/app.js'],
       ['GET', 'https://staffbot.test/api/manage/tasks?store_id=STORE-1'],
       ['GET', 'https://staffbot.test/api/manage/stores/STORE-1/payroll/proofs/PROOF-1'],
       ['GET', 'https://staffbot.test/manage/app.js?stale=1'],

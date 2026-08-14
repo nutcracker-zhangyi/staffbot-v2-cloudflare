@@ -202,6 +202,7 @@ export async function loadPayrollDossier(env, adminId, storeId, payrollId) {
       amount_snapshot_micros: Number(payroll.amount_snapshot_micros),
       currency: String(payroll.currency),
       status: String(payroll.status),
+      confirmed_at: payroll.confirmed_at ? String(payroll.confirmed_at) : null,
       payment_profile: {
         accepts_bank: Number(payroll.accepts_bank) === 1,
         accepts_usdt: Number(payroll.accepts_usdt) === 1,

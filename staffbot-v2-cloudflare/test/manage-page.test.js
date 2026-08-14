@@ -1342,6 +1342,7 @@ function payrollFixture({
   uploadGate = null,
   uploadGates = new Map(),
   submitFailures = 0,
+  submitConflict = '',
   splitConflict = false,
   storeName = 'Tokyo Club',
   initialTasks = [],
@@ -1391,9 +1392,9 @@ function payrollFixture({
           }
           if (path === '/api/manage/stores') {
             return json({ stores: [
-              { store_id: 'STORE-1', name: storeName, currency: '$' },
+              { store_id: 'STORE-1', name: storeName, currency: '$', timezone: 'Asia/Tokyo' },
               ...(initialTasks.some((item) => item.store_id === 'STORE-2')
-                ? [{ store_id: 'STORE-2', name: 'Osaka Club', currency: '$' }]
+                ? [{ store_id: 'STORE-2', name: 'Osaka Club', currency: '$', timezone: 'Asia/Tokyo' }]
                 : [])
             ] });
           }
@@ -1503,6 +1504,7 @@ function payrollFixture({
               remainingSubmitFailures -= 1;
               throw new TypeError('network_failed');
             }
+            if (submitConflict) return json({ error: submitConflict }, 409);
             const draft = dossier.attempts.find((attempt) => attempt.attempt_id === submitMatch[1]);
             return json({ ok: true, attempt: { ...draft, status: 'submitted' } });
           }
@@ -1538,7 +1540,7 @@ test('payroll opens a dossier with facts and immutable attempt history before ed
   assert.match(browser.document.app.textContent, /Alice/);
   assert.match(browser.document.app.textContent, /工资周期/);
   assert.match(browser.document.app.textContent, /版本 1/);
-  assert.match(browser.document.app.textContent, /submit_payroll_payment/);
+  assert.match(browser.document.app.textContent, /提交付款并通知员工/);
   assert.equal(browser.document.getElementById('bank-amount'), null);
   assert.equal(browser.document.getElementById('delete-proof-PROOF-OLD'), null);
 });
@@ -1762,6 +1764,62 @@ test('a completed payroll deep link opens its dossier without a pending task or 
   assert.equal(app.requests.some((request) => request.method === 'POST'), false);
 });
 
+test('a confirmed payroll shows a completed Chinese summary in store time', async () => {
+  const completed = payrollDossier();
+  completed.payroll.status = 'confirmed';
+  completed.payroll.confirmed_at = '2026-07-29T02:00:00.000Z';
+  completed.payroll.claim = null;
+  const app = payrollFixture({ initialDossier: completed });
+  const browser = await app.browser();
+
+  await browser.clickButton('工资');
+  const listText = browser.document.app.textContent;
+  assert.match(listText, /员工已确认 · 已完成/);
+  assert.doesNotMatch(listText, /confirmed|未领取/);
+
+  await browser.clickButton('查看工资档案');
+  const detailText = browser.document.app.textContent;
+  assert.match(detailText, /工资已完成/);
+  assert.match(detailText, /工资 IDPAYROLL-1/);
+  assert.match(detailText, /确认账号EMP-1/);
+  assert.match(detailText, /确认时间2026-07-29 11:00（店铺时区）/);
+  assert.doesNotMatch(detailText, /当前未领取/);
+});
+
+test('completed payroll traceability is Chinese and keeps every proof', async () => {
+  const completed = payrollDossier();
+  completed.payroll.status = 'confirmed';
+  completed.payroll.confirmed_at = '2026-07-29T02:00:00.000Z';
+  completed.payroll.claim = null;
+  completed.attempts[0].status = 'employee_confirmed';
+  completed.attempts[0].employee_response = 'confirmed';
+  completed.attempts[0].employee_responded_at = '2026-07-29T02:00:00.000Z';
+  completed.attempts[0].proofs.push({
+    proof_id: 'PROOF-USDT', method: 'usdt', mime_type: 'image/png',
+    uploaded_at: '2026-07-16T03:56:00.000Z',
+    url: '/api/manage/stores/STORE-1/payroll/proofs/PROOF-USDT'
+  });
+  completed.history.push({
+    id: 2,
+    admin_id: 'EMP-1',
+    action: 'confirm_payroll_receipt',
+    details: { attempt_id: 'ATTEMPT-OLD', version: 1 },
+    created_at: '2026-07-29T02:00:00.000Z'
+  });
+  const app = payrollFixture({ initialDossier: completed });
+  const browser = await app.browser();
+
+  await browser.clickButton('工资');
+  await browser.clickButton('查看工资档案');
+  const detailText = browser.document.app.textContent;
+  assert.match(detailText, /员工已确认/);
+  assert.match(detailText, /员工反馈：已确认收到工资 · 2026-07-29 11:00/);
+  assert.match(detailText, /员工确认收到工资/);
+  assert.match(detailText, /银行卡 · 2026-07-16 12:55/);
+  assert.match(detailText, /USDT · 2026-07-16 12:56/);
+  assert.doesNotMatch(detailText, /employee_confirmed|confirm_payroll_receipt/);
+});
+
 test('a confirmed payroll never renews a residual owned claim', async () => {
   const completed = payrollDossier();
   completed.payroll.status = 'confirmed';
@@ -1960,6 +2018,28 @@ test('dynamic payment validation keeps native and aria disabled states in sync',
   assert.equal(submit.getAttribute('aria-disabled'), 'true');
 });
 
+test('starting an already-owned payroll renews its claim before editing', async () => {
+  const app = payrollFixture({
+    initialDossier: payrollDossier({
+      claim: {
+        claimed_by: 'ADMIN-1',
+        claimed_at: '2026-07-29T02:00:00.000Z',
+        lease_expires_at: '2026-07-29T02:15:00.000Z',
+        active: true
+      }
+    })
+  });
+  const browser = await app.browser();
+  await browser.clickButton('工资');
+  await browser.clickButton('查看工资档案');
+  await browser.clickButton('领取并开始付款');
+
+  assert.equal(
+    app.requests.filter((request) => request.path.endsWith('/payroll/PAYROLL-1/claim')).length,
+    1
+  );
+});
+
 test('payroll rejects negative, excessive-precision, and float-like amount input', async () => {
   const app = payrollFixture();
   const browser = await app.browser();
@@ -2089,9 +2169,25 @@ test('a payroll mutation conflict refreshes safely into dossier-only mode', asyn
   await browser.input('bank-amount', '100');
   await browser.call('savePaymentDraft');
 
-  assert.match(browser.document.app.textContent, /工资状态已更新/);
+  assert.match(browser.document.app.textContent, /付款任务认领已过期/);
   assert.equal(browser.document.getElementById('bank-amount'), null);
   assert.match(browser.document.app.textContent, /版本 1/);
+});
+
+test('payroll submit exposes the server conflict reason after refreshing', async () => {
+  const app = payrollFixture({ submitConflict: 'task_claim_required' });
+  const browser = await app.browser();
+  await browser.clickButton('工资');
+  await browser.clickButton('查看工资档案');
+  await browser.clickButton('领取并开始付款');
+  await browser.input('bank-amount', '100');
+  await browser.call('savePaymentDraft');
+  const proof = new File([new Uint8Array([1])], 'proof.jpg', { type: 'image/jpeg' });
+  await browser.changeFiles('bank-camera', [proof]);
+  await browser.clickButton('提交付款并通知员工');
+
+  assert.match(browser.document.app.textContent, /付款任务认领已过期/);
+  assert.equal(browser.document.getElementById('bank-amount'), null);
 });
 
 test('a late proof upload cannot overwrite payroll state after navigation', async () => {

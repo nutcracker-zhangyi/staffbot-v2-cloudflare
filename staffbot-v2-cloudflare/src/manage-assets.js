@@ -150,9 +150,9 @@ self.addEventListener('fetch', (event) => {
     return;
   }
   event.respondWith(
-    caches.open(CACHE_NAME)
-      .then((cache) => cache.match(request))
-      .then((cached) => cached || fetch(request))
+    fetch(request).catch(() => (
+      caches.open(CACHE_NAME).then((cache) => cache.match(request))
+    ))
   );
 });
 `;

@@ -129,6 +129,33 @@ test('claims an unclaimed task for exactly fifteen minutes', async () => {
   });
 });
 
+test('a payroll payment claim does not expire', async () => {
+  const { env } = setup();
+  const payrollTask = {
+    task_type: 'payroll',
+    task_id: 'PAYROLL-1',
+    store_id: 'STORE-1'
+  };
+
+  const claim = await claimTask(
+    env,
+    'ADMIN-1',
+    payrollTask,
+    at('2026-07-29T00:00:00Z')
+  );
+
+  assert.equal(claim.lease_expires_at, '9999-12-31T23:59:59.999Z');
+  assert.equal(
+    (await requireActiveTaskClaim(
+      env,
+      'ADMIN-1',
+      payrollTask,
+      at('2099-01-01T00:00:00Z')
+    )).claimed_by,
+    'ADMIN-1'
+  );
+});
+
 test('the same admin renews a claim without resetting its claimed time', async () => {
   const { env } = setup();
   await claimTask(env, 'ADMIN-1', task, at('2026-07-29T00:00:00Z'));

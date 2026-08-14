@@ -266,6 +266,32 @@ test('delivery uses stored Telegram file IDs, uploads private R2 bytes, and chec
   }
 });
 
+test('delivery verifies stored state when D1 reports zero changes', async () => {
+  const fixtureValue = fixture();
+  fixtureValue.env.DB = createD1(fixtureValue.database, { reportedChanges: 0 });
+  const telegram = installTelegram();
+  try {
+    const delivered = await deliverPaymentAttempt(
+      fixtureValue.env,
+      'ADMIN-1',
+      'ATTEMPT-1',
+      new Date('2026-07-16T04:00:00.000Z')
+    );
+    assert.equal(delivered.status, 'sent');
+    assert.deepEqual(
+      telegram.calls.map((call) => call.method),
+      ['sendPhoto', 'sendPhoto', 'sendMessage']
+    );
+    assert.equal(fixtureValue.database.prepare(`
+      SELECT payment_sent_at FROM payroll_disbursements
+      WHERE payroll_id = 'PAYROLL-1'
+    `).get().payment_sent_at, '2026-07-16T04:00:00.000Z');
+  } finally {
+    telegram.restore();
+    fixtureValue.database.close();
+  }
+});
+
 test('summary failure preserves proof checkpoints and retry sends only the summary', async () => {
   const fixtureValue = fixture();
   const firstTelegram = installTelegram({ failSummary: true });
@@ -351,7 +377,7 @@ test('submit commits payment before a failed Telegram notification and exposes a
   }
 });
 
-test('submit requires a bounded idempotency key and retry is current/store scoped', async () => {
+test('submit requires a bounded idempotency key while its durable owner needs no task claim', async () => {
   const fixtureValue = fixture({ attemptStatus: 'draft', claim: true });
   const telegram = installTelegram();
   try {
@@ -377,12 +403,12 @@ test('submit requires a bounded idempotency key and retry is current/store scope
       DELETE FROM admin_task_claims
       WHERE task_type = 'payroll' AND task_id = 'PAYROLL-1';
     `);
-    const lostClaim = await manageRequest(
+    const durableOwner = await manageRequest(
       fixtureValue.env,
       '/api/manage/stores/STORE-1/payroll/PAYROLL-1/attempts/ATTEMPT-1/submit',
       { idempotencyKey: 'lost-claim-key' }
     );
-    assert.equal(lostClaim.status, 409);
+    assert.equal(durableOwner.status, 200);
 
     const crossStoreRetry = await manageRequest(
       fixtureValue.env,

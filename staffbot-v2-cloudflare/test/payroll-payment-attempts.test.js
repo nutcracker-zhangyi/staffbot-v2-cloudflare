@@ -386,7 +386,7 @@ test('legacy adoption and draft creation do not write after the claim is taken o
   }
 });
 
-test('draft splits use exact integer micros, accepted methods, and an active claim', async () => {
+test('draft splits use exact integer micros, accepted methods, and the durable owner', async () => {
   const { database, env } = fixture({ acceptsUsdt: 0 });
   try {
     claim(database);
@@ -424,15 +424,57 @@ test('draft splits use exact integer micros, accepted methods, and an active cla
       current_payment_attempt_id: draft.attempt_id
     });
 
+    database.prepare(`DELETE FROM admin_task_claims`).run();
+    const withoutClaim = await saveAttemptSplit(env, 'ADMIN-1', draft.attempt_id, {
+      bank_micros: 60_000_000,
+      usdt_micros: 0,
+      cash_micros: 40_000_000
+    }, new Date('2026-07-29T04:02:00Z'));
+    assert.equal(withoutClaim.bank_micros, 60_000_000);
+
     database.prepare(`
-      UPDATE admin_task_claims SET claimed_by = 'ADMIN-2'
-      WHERE task_type = 'payroll' AND task_id = 'PAYROLL-1'
+      UPDATE payroll_disbursements SET current_admin_id = 'ADMIN-2'
+      WHERE payroll_id = 'PAYROLL-1'
     `).run();
     await assert.rejects(saveAttemptSplit(env, 'ADMIN-1', draft.attempt_id, {
       bank_micros: 60_000_000,
       usdt_micros: 0,
       cash_micros: 40_000_000
-    }, new Date('2026-07-29T04:02:00Z')), /task_claim_required/);
+    }, new Date('2026-07-29T04:03:00Z')), /payment attempt owner conflict/);
+  } finally {
+    database.close();
+  }
+});
+
+test('draft split success is verified from stored state instead of D1 change metadata', async () => {
+  const { database, env } = fixture();
+  try {
+    claim(database);
+    const draft = await createOrResumeDraftAttempt(
+      env, 'ADMIN-1', 'PAYROLL-1', new Date('2026-07-29T04:00:00Z')
+    );
+    const databaseBinding = env.DB;
+    env.DB = {
+      prepare: databaseBinding.prepare,
+      async batch(statements) {
+        const results = await databaseBinding.batch(statements);
+        return results.map((result) => ({
+          ...result,
+          meta: { ...result.meta, changes: 0 }
+        }));
+      }
+    };
+
+    const saved = await saveAttemptSplit(env, 'ADMIN-1', draft.attempt_id, {
+      bank_micros: 70_000_000,
+      usdt_micros: 0,
+      cash_micros: 30_000_000
+    }, new Date('2026-07-29T04:01:00Z'));
+
+    assert.deepEqual(
+      [saved.bank_micros, saved.usdt_micros, saved.cash_micros],
+      [70_000_000, 0, 30_000_000]
+    );
   } finally {
     database.close();
   }
@@ -491,6 +533,46 @@ test('submission is idempotent and abandonment closes only a claimed draft', asy
     assert.equal(database.prepare(`
       SELECT status FROM payroll_payment_attempts WHERE attempt_id = ?
     `).get(next.attempt_id).status, 'abandoned');
+  } finally {
+    database.close();
+  }
+});
+
+test('the durable payroll owner can submit after the task claim is gone', async () => {
+  const { database, env } = fixture();
+  try {
+    claim(database);
+    const draft = await createOrResumeDraftAttempt(
+      env, 'ADMIN-1', 'PAYROLL-1', new Date('2026-07-29T04:00:00Z')
+    );
+    await saveAttemptSplit(env, 'ADMIN-1', draft.attempt_id, {
+      bank_micros: 100_000_000,
+      usdt_micros: 0,
+      cash_micros: 0
+    }, new Date('2026-07-29T04:01:00Z'));
+    database.prepare(`
+      INSERT INTO payroll_payment_proofs (
+        proof_id, payroll_id, attempt_id, method, object_key,
+        mime_type, size_bytes, sort_order, uploaded_by, uploaded_at
+      ) VALUES (
+        'DURABLE-OWNER-PROOF', 'PAYROLL-1', ?, 'bank', 'durable-owner-proof',
+        'image/jpeg', 100, 1, 'ADMIN-1', '2026-07-29T04:02:00.000Z'
+      )
+    `).run(draft.attempt_id);
+    database.prepare(`
+      DELETE FROM admin_task_claims
+      WHERE task_type = 'payroll' AND task_id = 'PAYROLL-1'
+    `).run();
+
+    const submitted = await submitPaymentAttempt(
+      env, 'ADMIN-1', draft.attempt_id, 'durable-owner-key',
+      new Date('2026-07-29T04:03:00Z')
+    );
+
+    assert.equal(submitted.status, 'submitted');
+    assert.equal(database.prepare(`
+      SELECT status FROM payroll_disbursements WHERE payroll_id = 'PAYROLL-1'
+    `).get().status, 'awaiting_employee_confirmation');
   } finally {
     database.close();
   }
@@ -638,7 +720,7 @@ test('submit final SQL rejects a proof deletion without partially freezing payme
   }
 });
 
-test('submit final SQL rejects a claim takeover without partial writes', async () => {
+test('submit final SQL rejects a durable owner change without partial writes', async () => {
   const { database, env } = fixture();
   try {
     claim(database);
@@ -661,8 +743,8 @@ test('submit final SQL rejects a claim takeover without partial writes', async (
         if (taken || !sql.includes("SET status = 'submitted'")) return;
         taken = true;
         database.prepare(`
-          UPDATE admin_task_claims SET claimed_by = 'ADMIN-2'
-          WHERE task_type = 'payroll' AND task_id = 'PAYROLL-1'
+          UPDATE payroll_disbursements SET current_admin_id = 'ADMIN-2'
+          WHERE payroll_id = 'PAYROLL-1'
         `).run();
       }
     });

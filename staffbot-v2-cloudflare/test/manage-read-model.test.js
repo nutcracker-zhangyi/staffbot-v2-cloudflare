@@ -4,6 +4,7 @@ import { readFileSync } from 'node:fs';
 import { DatabaseSync } from 'node:sqlite';
 
 import {
+  loadPayrollDossier,
   listManageStores,
   listManageTasks,
   manageTaskDetail
@@ -144,6 +145,25 @@ test('lists only authorized pending tasks in exact urgency order', async () => {
       active: true
     }
   });
+});
+
+test('payroll dossier exposes the employee id and confirmation time', async () => {
+  const fixture = setup();
+  fixture.database.prepare(`
+    UPDATE payroll_disbursements
+    SET status = 'confirmed', confirmed_at = ?
+    WHERE payroll_id = 'PAYROLL-1'
+  `).run('2026-07-29T02:00:00.000Z');
+
+  const dossier = await loadPayrollDossier(
+    fixture.env,
+    'ADMIN-1',
+    'STORE-1',
+    'PAYROLL-1'
+  );
+
+  assert.equal(dossier.payroll.employee_id, 'EMP-1');
+  assert.equal(dossier.payroll.confirmed_at, '2026-07-29T02:00:00.000Z');
 });
 
 test('prioritizes disputed payroll and uses oldest time then stable task id', async () => {

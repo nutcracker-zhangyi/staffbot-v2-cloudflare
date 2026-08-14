@@ -47,6 +47,62 @@ const statusLabels = {
   awaiting_admin_payment: '等待付款'
 };
 
+function payrollStatusLabel(status, context = 'list') {
+  if (status === 'confirmed') {
+    return context === 'detail' ? '工资已完成' : '员工已确认';
+  }
+  return statusLabels[status] || status;
+}
+
+function payrollClaimLabel(payroll) {
+  if (payroll.status === 'confirmed') return '已完成';
+  return claimIsActive(payroll.claim)
+    ? '处理人：' + payroll.claim.claimed_by
+    : '未领取';
+}
+
+const paymentAttemptStatusLabels = {
+  draft: '付款草稿',
+  submitted: '等待员工确认',
+  employee_confirmed: '员工已确认',
+  employee_disputed: '员工反馈付款问题',
+  abandoned: '已作废'
+};
+
+const employeeResponseLabels = {
+  confirmed: '已确认收到工资',
+  disputed: '付款有问题'
+};
+
+const payrollHistoryActionLabels = {
+  prepare_admin_pwa_acceptance_payroll: '准备移动端工资测试',
+  create_payroll_payment_attempt: '创建付款版本',
+  resume_payroll_payment_attempt: '恢复付款版本',
+  transfer_payroll_payment_attempt: '转交付款负责人',
+  save_payroll_payment_attempt_split: '保存付款拆分',
+  upload_payroll_draft_proof: '上传付款回执',
+  delete_payroll_draft_proof: '删除付款回执',
+  submit_payroll_payment: '提交付款并通知员工',
+  submit_payroll_payment_attempt: '提交付款并通知员工',
+  payroll_notification_delivery_claimed: '开始发送员工通知',
+  payroll_notification_delivery_renewed: '继续发送员工通知',
+  payroll_notification_failed: '员工通知发送失败',
+  payroll_notification_sent: '员工通知发送成功',
+  confirm_payroll_receipt: '员工确认收到工资'
+};
+
+function paymentAttemptStatusLabel(status) {
+  return paymentAttemptStatusLabels[status] || status;
+}
+
+function employeeResponseLabel(response) {
+  return employeeResponseLabels[response] || response;
+}
+
+function historyActionLabel(action) {
+  return payrollHistoryActionLabels[action] || action || '处理';
+}
+
 function escapeHtml(value) {
   return String(value == null ? '' : value)
     .replaceAll('&', '&amp;')
@@ -342,18 +398,16 @@ function renderPayrollList() {
   stopClaimTimer();
   const cards = state.payroll.length ? state.payroll.map((item, index) => {
     const store = state.stores.find((entry) => entry.store_id === item.store_id);
-    const handler = claimIsActive(item.claim)
-      ? '处理人：' + escapeHtml(item.claim.claimed_by)
-      : '未领取';
+    const handler = payrollClaimLabel(item);
     return '<article class="task-card"><div class="task-card-top">'
       + '<span class="type-badge">工资付款</span><span class="meta">版本 '
       + escapeHtml(item.current_attempt ? item.current_attempt.version : '—') + '</span></div>'
       + '<h3>' + escapeHtml(item.employee_name) + '</h3>'
       + '<p>' + escapeHtml(store ? store.name : item.store_id) + ' · '
       + formatMoney(item.amount_snapshot_micros, item.currency) + '</p>'
-      + '<p class="meta">' + escapeHtml(statusLabels[item.status] || item.status)
-      + ' · ' + handler + '</p>'
-      + '<p class="meta">截止：' + escapeHtml(formatDateTime(item.cutoff_at)) + '</p>'
+      + '<p class="meta">' + escapeHtml(payrollStatusLabel(item.status))
+      + ' · ' + escapeHtml(handler) + '</p>'
+      + '<p class="meta">截止：' + escapeHtml(formatPayrollDateTime(item.cutoff_at, item.store_id)) + '</p>'
       + '<button id="open-payroll-' + index + '" class="secondary" type="button">查看工资档案</button>'
       + '</article>';
   }).join('') : '<div class="empty-state"><h3>暂无工资记录</h3><p>工资记录会显示在这里。</p></div>';
@@ -468,6 +522,7 @@ function renderPayrollDetail() {
   const payroll = detail.payroll;
   const store = state.stores.find((item) => item.store_id === payroll.store_id);
   const payment = state.payrollMode === 'payment' ? paymentForm(detail) : '';
+  const completed = payroll.status === 'confirmed';
   const handler = claimIsActive(payroll.claim)
     ? '当前处理人：' + escapeHtml(payroll.claim.claimed_by)
     : '当前未领取';
@@ -484,14 +539,21 @@ function renderPayrollDetail() {
   shell('<button id="back-to-payroll" class="text-button" type="button">← 返回工资</button>'
     + '<article class="detail-card payroll-dossier"><div class="task-card-top">'
     + '<span class="type-badge">工资档案</span><span>'
-    + escapeHtml(statusLabels[payroll.status] || payroll.status) + '</span></div>'
+    + escapeHtml(payrollStatusLabel(payroll.status, 'detail')) + '</span></div>'
     + '<h2>' + escapeHtml(payroll.employee_name) + '</h2>'
     + '<p class="meta">店铺：' + escapeHtml(store ? store.name : payroll.store_id) + '</p>'
-    + '<p id="claim-status" class="claim-status">' + handler + '</p>'
+    + (completed ? '' : '<p id="claim-status" class="claim-status">' + handler + '</p>')
     + '<section><h3>固定工资事实</h3><dl class="facts">'
     + '<div><dt>工资总额</dt><dd>' + formatMoney(payroll.amount_snapshot_micros, payroll.currency) + '</dd></div>'
-    + '<div><dt>工资周期</dt><dd>' + escapeHtml(formatDateTime(payroll.period_start))
-    + ' — ' + escapeHtml(formatDateTime(payroll.cutoff_at)) + '</dd></div>'
+    + '<div><dt>工资周期</dt><dd>' + escapeHtml(formatPayrollDateTime(payroll.period_start, payroll.store_id))
+    + ' — ' + escapeHtml(formatPayrollDateTime(payroll.cutoff_at, payroll.store_id)) + '</dd></div>'
+    + '<div><dt>工资 ID</dt><dd>' + escapeHtml(payroll.payroll_id) + '</dd></div>'
+    + (completed
+      ? '<div><dt>确认账号</dt><dd>' + escapeHtml(payroll.employee_id || '—') + '</dd></div>'
+        + '<div><dt>确认时间</dt><dd>'
+        + escapeHtml(formatPayrollDateTime(payroll.confirmed_at, payroll.store_id))
+        + '（店铺时区）</dd></div>'
+      : '')
     + '<div><dt>银行卡</dt><dd>' + escapeHtml(payroll.payment_profile.bank || '未提供') + '</dd></div>'
     + '<div><dt>USDT</dt><dd>' + escapeHtml(payroll.payment_profile.usdt || '未提供') + '</dd></div>'
     + '</dl>' + (payroll.payment_profile.has_usdt_qr
@@ -499,8 +561,8 @@ function renderPayrollDetail() {
         + escapeHtml(payroll.payment_profile.usdt_qr_url)
         + '" alt="员工 USDT 收款二维码" loading="lazy"><figcaption>USDT 收款二维码</figcaption></figure>'
       : '') + '</section>'
-    + payrollAttemptsSection(detail.attempts)
-    + historySection(detail.history)
+    + payrollAttemptsSection(detail.attempts, payroll.store_id)
+    + historySection(detail.history, payroll.store_id)
     + payrollAction
     + takeoverPanel('payroll', state.paymentBusy)
     + payment + '</article>');
@@ -545,21 +607,22 @@ function claimOwnedByOther(claim) {
   return claimIsActive(claim) && claim.claimed_by !== state.session.telegram_id;
 }
 
-function payrollAttemptsSection(attempts) {
+function payrollAttemptsSection(attempts, storeId) {
   const rows = Array.isArray(attempts) ? attempts : [];
   if (!rows.length) return '<section><h3>付款版本</h3><p class="empty-copy">暂无付款版本</p></section>';
   return '<section><h3>全部付款版本</h3><div class="attempt-history">'
     + rows.map((attempt) => '<article class="attempt-card"><div class="task-card-top"><strong>版本 '
-      + escapeHtml(attempt.version) + '</strong><span>' + escapeHtml(attempt.status) + '</span></div>'
+      + escapeHtml(attempt.version) + '</strong><span>'
+      + escapeHtml(paymentAttemptStatusLabel(attempt.status)) + '</span></div>'
       + '<p>银行卡 ' + formatMoney(attempt.bank_micros, state.currentPayroll.payroll.currency)
       + ' · USDT ' + formatMoney(attempt.usdt_micros, state.currentPayroll.payroll.currency)
       + ' · 现金 ' + formatMoney(attempt.cash_micros, state.currentPayroll.payroll.currency) + '</p>'
       + (attempt.submitted_at
         ? '<p class="meta">提交：' + escapeHtml(attempt.submitted_by || '—') + ' · '
-          + escapeHtml(formatDateTime(attempt.submitted_at)) + '</p>' : '')
+          + escapeHtml(formatPayrollDateTime(attempt.submitted_at, storeId)) + '</p>' : '')
       + (attempt.employee_response
-        ? '<p class="meta">员工反馈：' + escapeHtml(attempt.employee_response) + ' · '
-          + escapeHtml(formatDateTime(attempt.employee_responded_at)) + '</p>' : '')
+        ? '<p class="meta">员工反馈：' + escapeHtml(employeeResponseLabel(attempt.employee_response)) + ' · '
+          + escapeHtml(formatPayrollDateTime(attempt.employee_responded_at, storeId)) + '</p>' : '')
       + (payrollNotificationRetryable(attempt.attempt_id)
         ? '<button id="retry-payroll-notification-' + escapeHtml(attempt.attempt_id)
           + '" class="secondary" type="button"'
@@ -569,7 +632,7 @@ function payrollAttemptsSection(attempts) {
         '<figure class="proof-card"><img src="' + escapeHtml(proof.url || privateProofUrl(proof.proof_id))
           + '" alt="' + escapeHtml(paymentMethodLabel(proof.method)) + '付款回执" loading="lazy">'
           + '<figcaption>' + escapeHtml(paymentMethodLabel(proof.method)) + ' · '
-          + escapeHtml(formatDateTime(proof.uploaded_at)) + '</figcaption>'
+          + escapeHtml(formatPayrollDateTime(proof.uploaded_at, storeId)) + '</figcaption>'
           + (attempt.status === 'draft' && state.payrollMode === 'payment' && proof.superseded_at == null
             ? '<button id="delete-proof-' + escapeHtml(proof.proof_id)
               + '" class="danger" type="button"' + disabled(!canMutatePayment())
@@ -891,12 +954,10 @@ async function startPayrollPayment() {
   state.paymentBusy = true;
   renderPayrollDetail();
   try {
-    if (!ownsActiveClaim(payroll)) {
-      const claimed = await api('/api/manage/tasks/payroll/'
-        + encodeURIComponent(payroll.payroll_id) + '/claim', { method: 'POST' });
-      if (!payrollRequestIsCurrent(generation, key)) return;
-      payroll.claim = claimed.claim;
-    }
+    const claimed = await api('/api/manage/tasks/payroll/'
+      + encodeURIComponent(payroll.payroll_id) + '/claim', { method: 'POST' });
+    if (!payrollRequestIsCurrent(generation, key)) return;
+    payroll.claim = claimed.claim;
     const result = await api(payrollPath(payroll.store_id, payroll.payroll_id)
       + '/attempts/draft', { method: 'POST' });
     if (!payrollRequestIsCurrent(generation, key)) return;
@@ -1079,19 +1140,19 @@ async function deleteDraftProof(proofId) {
 async function submitPayrollPayment() {
   if (!canSubmitPayment()) return;
   const saved = await savePaymentDraft();
-  if (!saved || !state.currentPayroll || !canSubmitPayment()) return;
+  if (!saved || !state.currentPayroll) return;
   const generation = state.requestGeneration;
   const key = payrollKey();
   const payroll = state.currentPayroll.payroll;
   const draft = currentDraft();
-  state.paymentBusy = true;
   if (state.submitAttemptId !== draft.attempt_id) {
     state.submitKey = '';
     state.submitAttemptId = draft.attempt_id;
   }
   state.submitKey = state.submitKey || payroll.payroll_id + ':' + draft.attempt_id + ':' + Date.now();
-  renderPayrollDetail();
   try {
+    state.paymentBusy = true;
+    renderPayrollDetail();
     await api(payrollPath(payroll.store_id, payroll.payroll_id)
       + '/attempts/' + encodeURIComponent(draft.attempt_id) + '/submit', {
       method: 'POST', headers: { 'Idempotency-Key': state.submitKey }
@@ -1124,11 +1185,23 @@ async function refreshPayrollDossier(message, generation = state.requestGenerati
   state.message = message;
 }
 
+function payrollMutationMessage(error, fallback) {
+  const code = String(error && error.result && error.result.error || error && error.message || '');
+  if (code === 'task_claim_required') return '付款任务认领已过期，请重新领取后再提交';
+  if (code === 'payment attempt owner conflict') return '付款任务负责人已变化，请重新领取后再提交';
+  if (code === 'payment attempt conflict') return '付款草稿状态冲突，请重新领取后再提交';
+  if (code === 'payroll_proofs_incomplete') return '付款回执不完整，请补齐后再提交';
+  if (code) return '付款操作失败（' + code + '），已刷新最新工资档案';
+  return fallback;
+}
+
 async function payrollFailureRefresh(error, generation, key, { retryAttemptId = '' } = {}) {
   const submitResultUnknown = Boolean(retryAttemptId && (!error.status || error.status >= 500));
   try {
     await refreshPayrollDossier(
-      error.status === 409 ? '工资状态已更新，当前页面已切换为只读' : '网络操作失败，已刷新最新工资档案',
+      error.status === 409
+        ? payrollMutationMessage(error, '工资状态已更新，当前页面已切换为只读')
+        : '网络操作失败，已刷新最新工资档案',
       generation,
       key
     );
@@ -1228,6 +1301,29 @@ function formatMoney(micros, currency) {
 
 function formatDateTime(value) {
   return String(value || '').replace('T', ' ').slice(0, 16);
+}
+
+function formatPayrollDateTime(value, storeId) {
+  const store = state.stores.find((item) => item.store_id === storeId);
+  const timezone = store && store.timezone;
+  const date = new Date(value);
+  if (!timezone || Number.isNaN(date.getTime())) return formatDateTime(value);
+  try {
+    const parts = new Intl.DateTimeFormat('en-US', {
+      timeZone: timezone,
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit',
+      hourCycle: 'h23'
+    }).formatToParts(date);
+    const values = Object.fromEntries(parts.map((part) => [part.type, part.value]));
+    return values.year + '-' + values.month + '-' + values.day
+      + ' ' + values.hour + ':' + values.minute;
+  } catch {
+    return formatDateTime(value);
+  }
 }
 
 function ownsActiveClaim(task) {
@@ -1455,15 +1551,17 @@ function attachmentSection(attachments) {
     + '</p></section>';
 }
 
-function historySection(history) {
+function historySection(history, payrollStoreId = '') {
   const rows = Array.isArray(history) ? history : [];
   if (!rows.length) {
     return '<section><h3>处理时间线</h3><p class="empty-copy">暂无处理记录</p></section>';
   }
   return '<section><h3>处理时间线</h3><ol class="timeline">'
-    + rows.map((item) => '<li><strong>' + escapeHtml(item.action || '处理') + '</strong>'
+    + rows.map((item) => '<li><strong>' + escapeHtml(historyActionLabel(item.action)) + '</strong>'
       + '<span>' + escapeHtml(item.admin_id || '—') + ' · '
-      + escapeHtml(formatDateTime(item.created_at)) + '</span>'
+      + escapeHtml(payrollStoreId
+        ? formatPayrollDateTime(item.created_at, payrollStoreId)
+        : formatDateTime(item.created_at)) + '</span>'
       + (item.details && item.details.reason
         ? '<span>原因：' + escapeHtml(item.details.reason) + '</span>' : '')
       + '</li>').join('')

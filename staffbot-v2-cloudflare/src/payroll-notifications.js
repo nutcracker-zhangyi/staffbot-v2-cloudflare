@@ -502,7 +502,7 @@ async function claimPaymentDelivery(env, adminId, payroll, now) {
   const token = crypto.randomUUID();
   const tokenHash = await deliveryLeaseTokenHash(token);
   const expiresAt = deliveryLeaseExpiry(now);
-  const result = await env.DB.prepare(`
+  await env.DB.prepare(`
     INSERT INTO admin_audit_logs (
       store_id, admin_id, action, target_id, details_json, created_at
     )
@@ -563,7 +563,22 @@ async function claimPaymentDelivery(env, adminId, payroll, now) {
     payroll.payroll_id,
     payroll.attempt_id
   ).run();
-  return Number(result && result.meta && result.meta.changes) === 1
+  const stored = await env.DB.prepare(`
+    SELECT json_extract(details_json, '$.expires_at') AS expires_at
+    FROM admin_audit_logs
+    WHERE store_id = ? AND target_id = ?
+      AND action = 'payroll_notification_delivery_claimed'
+      AND json_extract(details_json, '$.attempt_id') = ?
+      AND json_extract(details_json, '$.lease_token_hash') = ?
+    ORDER BY id DESC
+    LIMIT 1
+  `).bind(
+    payroll.store_id,
+    payroll.payroll_id,
+    payroll.attempt_id,
+    tokenHash
+  ).first();
+  return stored && stored.expires_at === expiresAt
     ? { token_hash: tokenHash, expires_at: expiresAt }
     : null;
 }
@@ -594,7 +609,7 @@ async function renewPaymentDelivery(env, adminId, payroll, lease, now) {
   if (remaining > PAYMENT_DELIVERY_RENEW_WINDOW_MS) return;
   const expiresAt = deliveryLeaseExpiry(now);
   const guard = activeDeliveryLeaseSql();
-  const result = await env.DB.prepare(`
+  await env.DB.prepare(`
     INSERT INTO admin_audit_logs (
       store_id, admin_id, action, target_id, details_json, created_at
     )
@@ -624,7 +639,22 @@ async function renewPaymentDelivery(env, adminId, payroll, lease, now) {
     ...activeDeliveryLeaseBinds(payroll, lease, now),
     payroll.attempt_id
   ).run();
-  if (Number(result && result.meta && result.meta.changes) !== 1) {
+  const stored = await env.DB.prepare(`
+    SELECT json_extract(details_json, '$.expires_at') AS expires_at
+    FROM admin_audit_logs
+    WHERE store_id = ? AND target_id = ?
+      AND action = 'payroll_notification_delivery_renewed'
+      AND json_extract(details_json, '$.attempt_id') = ?
+      AND json_extract(details_json, '$.lease_token_hash') = ?
+    ORDER BY id DESC
+    LIMIT 1
+  `).bind(
+    payroll.store_id,
+    payroll.payroll_id,
+    payroll.attempt_id,
+    lease.token_hash
+  ).first();
+  if (!stored || stored.expires_at !== expiresAt) {
     throw deliveryLeaseLost();
   }
   lease.expires_at = expiresAt;
@@ -785,7 +815,7 @@ async function recordPaymentDeliveryFailure(
     proof_id: safeProofId
   });
   const guard = activeDeliveryLeaseSql();
-  const results = await env.DB.batch([
+  await env.DB.batch([
     env.DB.prepare(`
       UPDATE payroll_disbursements
       SET employee_notification_error = ?, updated_at = ?
@@ -853,8 +883,35 @@ async function recordPaymentDeliveryFailure(
       lease.token_hash
     )
   ]);
-  return Number(results[0] && results[0].meta.changes) === 1
-    && Number(results[1] && results[1].meta.changes) === 1;
+  const stored = await env.DB.prepare(`
+    SELECT
+      employee_notification_error,
+      updated_at,
+      EXISTS (
+        SELECT 1 FROM admin_audit_logs
+        WHERE store_id = ? AND target_id = ?
+          AND action = 'payroll_notification_failed'
+          AND json_extract(details_json, '$.attempt_id') = ?
+          AND json_extract(details_json, '$.lease_token_hash') = ?
+          AND json_extract(details_json, '$.code') = ?
+          AND json_extract(details_json, '$.proof_id') IS ?
+      ) AS failure_audited
+    FROM payroll_disbursements
+    WHERE payroll_id = ? AND current_payment_attempt_id = ?
+  `).bind(
+    payroll.store_id,
+    payroll.payroll_id,
+    payroll.attempt_id,
+    lease.token_hash,
+    safeCode,
+    safeProofId,
+    payroll.payroll_id,
+    payroll.attempt_id
+  ).first();
+  return Boolean(stored
+    && stored.employee_notification_error === safeError
+    && stored.updated_at === nowIso
+    && Number(stored.failure_audited) === 1);
 }
 
 export async function paymentAttemptDeliveryResult(env, adminId, attemptId) {
@@ -1018,7 +1075,7 @@ export async function deliverPaymentAttempt(
       }
       const checkpointAt = clock();
       const guard = activeDeliveryLeaseSql();
-      const checkpoint = await env.DB.prepare(`
+      await env.DB.prepare(`
         UPDATE payroll_payment_proofs
         SET telegram_file_id = ?, telegram_delivered_at = ?
         WHERE proof_id = ? AND attempt_id = ?
@@ -1041,7 +1098,20 @@ export async function deliverPaymentAttempt(
         payroll.attempt_id,
         ...activeDeliveryLeaseBinds(payroll, lease, checkpointAt)
       ).run();
-      if (Number(checkpoint && checkpoint.meta && checkpoint.meta.changes) !== 1) {
+      await requirePaymentDeliveryLease(
+        env,
+        payroll,
+        lease,
+        checkpointAt
+      );
+      const storedProof = await env.DB.prepare(`
+        SELECT telegram_file_id, telegram_delivered_at
+        FROM payroll_payment_proofs
+        WHERE proof_id = ? AND attempt_id = ?
+      `).bind(proof.proof_id, payroll.attempt_id).first();
+      if (!storedProof
+        || String(storedProof.telegram_file_id || '') !== String(fileId || '')
+        || storedProof.telegram_delivered_at !== checkpointAt.toISOString()) {
         throw deliveryLeaseLost();
       }
     }
@@ -1077,7 +1147,7 @@ export async function deliverPaymentAttempt(
     const sentAt = clock();
     const sentAtIso = sentAt.toISOString();
     const guard = activeDeliveryLeaseSql();
-    const results = await env.DB.batch([
+    await env.DB.batch([
       env.DB.prepare(`
         UPDATE payroll_disbursements
         SET payment_sent_at = ?, employee_notification_error = NULL,
@@ -1132,8 +1202,27 @@ export async function deliverPaymentAttempt(
         sentAtIso
       )
     ]);
-    if (Number(results[0] && results[0].meta.changes) !== 1
-      || Number(results[1] && results[1].meta.changes) !== 1) {
+    const stored = await env.DB.prepare(`
+      SELECT
+        d.payment_sent_at,
+        EXISTS (
+          SELECT 1 FROM admin_audit_logs
+          WHERE store_id = d.store_id AND target_id = d.payroll_id
+            AND action = 'payroll_notification_sent'
+            AND json_extract(details_json, '$.attempt_id') = ?
+            AND json_extract(details_json, '$.lease_token_hash') = ?
+        ) AS sent_audited
+      FROM payroll_disbursements d
+      WHERE d.payroll_id = ? AND d.current_payment_attempt_id = ?
+    `).bind(
+      payroll.attempt_id,
+      lease.token_hash,
+      payroll.payroll_id,
+      payroll.attempt_id
+    ).first();
+    if (!stored
+      || stored.payment_sent_at !== sentAtIso
+      || Number(stored.sent_audited) !== 1) {
       throw deliveryLeaseLost();
     }
     return { status: 'sent', attempt_id: payroll.attempt_id };

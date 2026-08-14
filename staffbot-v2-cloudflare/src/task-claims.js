@@ -3,11 +3,13 @@ import { isStoreAdmin, isStoreOwner } from './stores.js';
 
 const CLAIM_LEASE_MS = 15 * 60 * 1000;
 
-function claimTimes(now) {
+function claimTimes(now, task) {
   const claimedAt = new Date(now).toISOString();
   return {
     claimedAt,
-    leaseExpiresAt: new Date(new Date(now).getTime() + CLAIM_LEASE_MS).toISOString()
+    leaseExpiresAt: task && task.task_type === 'payroll'
+      ? '9999-12-31T23:59:59.999Z'
+      : new Date(new Date(now).getTime() + CLAIM_LEASE_MS).toISOString()
   };
 }
 
@@ -23,7 +25,7 @@ export async function claimTask(env, actorId, task, now) {
   if (!await isStoreAdmin(env, actor, task.store_id)) {
     throw new Error('forbidden');
   }
-  const { claimedAt, leaseExpiresAt } = claimTimes(now);
+  const { claimedAt, leaseExpiresAt } = claimTimes(now, task);
   await env.DB.prepare(`
     INSERT INTO admin_task_claims (
       task_type, task_id, store_id, claimed_by,
@@ -110,7 +112,7 @@ export async function forceTakeoverTask(env, actorId, task, reason, now) {
     throw new Error('forbidden');
   }
 
-  const { claimedAt, leaseExpiresAt } = claimTimes(now);
+  const { claimedAt, leaseExpiresAt } = claimTimes(now, task);
   await env.DB.batch([
     env.DB.prepare(`
       INSERT INTO admin_audit_logs (

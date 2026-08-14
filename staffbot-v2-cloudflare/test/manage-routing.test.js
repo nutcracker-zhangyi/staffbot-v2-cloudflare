@@ -13,7 +13,10 @@ function context() {
   return { waitUntil() {} };
 }
 
-const env = { ENVIRONMENT: 'staging' };
+const env = {
+  ENVIRONMENT: 'staging',
+  CF_VERSION_METADATA: { id: 'version-one' }
+};
 
 function manageApiFixture() {
   const database = new DatabaseSync(':memory:');
@@ -115,9 +118,9 @@ test('manage document uses external assets and strict manage headers', async () 
     'geolocation=(), microphone=(), camera=(self)'
   );
   assert.match(document, /<link rel="manifest" href="\/manage\/manifest\.webmanifest">/);
-  assert.match(document, /<link rel="stylesheet" href="\/manage\/styles\.css">/);
+  assert.match(document, /<link rel="stylesheet" href="\/manage\/styles\.css\?v=version-one">/);
   assert.match(document, /<main id="app" aria-live="polite"><\/main>/);
-  assert.match(document, /<script src="\/manage\/app\.js" defer><\/script>/);
+  assert.match(document, /<script src="\/manage\/app\.js\?v=version-one" defer><\/script>/);
   assert.doesNotMatch(document, /<style[ >]/);
   assert.doesNotMatch(document, /<script(?! src=)[ >]/);
 });

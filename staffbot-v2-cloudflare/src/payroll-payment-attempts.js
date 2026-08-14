@@ -78,7 +78,7 @@ async function adoptLegacyAttempt(
         AND c.lease_expires_at > ?
     )
   `;
-  await env.DB.batch([
+  const results = await env.DB.batch([
     env.DB.prepare(`
       INSERT INTO payroll_payment_attempts (
         attempt_id, payroll_id, version, status,
@@ -616,26 +616,20 @@ export async function saveAttemptSplit(
     throw new Error('payment attempt owner conflict');
   }
   const checkedAt = new Date(now);
-  await requireActiveTaskClaim(env, adminId, taskFor(context), checkedAt);
   if (context.status !== 'draft') throw new Error('payment attempt conflict');
   const split = validatePaymentSplit(context, input);
   const nowIso = checkedAt.toISOString();
-  const results = await env.DB.batch([
+  await env.DB.batch([
     env.DB.prepare(`
       UPDATE payroll_payment_attempts
       SET bank_micros = ?, usdt_micros = ?, cash_micros = ?, updated_at = ?
       WHERE attempt_id = ? AND payroll_id = ? AND status = 'draft'
         AND EXISTS (
           SELECT 1 FROM payroll_disbursements d
-          JOIN admin_task_claims c
-            ON c.task_type = 'payroll'
-           AND c.task_id = d.payroll_id
-           AND c.store_id = d.store_id
           WHERE d.payroll_id = payroll_payment_attempts.payroll_id
             AND d.status IN ('awaiting_admin_payment', 'disputed')
             AND d.current_payment_attempt_id = payroll_payment_attempts.attempt_id
             AND d.current_admin_id = ?
-            AND c.claimed_by = ? AND c.lease_expires_at > ?
         )
     `).bind(
       split.bank_micros,
@@ -644,9 +638,7 @@ export async function saveAttemptSplit(
       nowIso,
       context.attempt_id,
       context.payroll_id,
-      String(adminId),
-      String(adminId),
-      nowIso
+      String(adminId)
     ),
     env.DB.prepare(`
       UPDATE payroll_disbursements
@@ -671,14 +663,9 @@ export async function saveAttemptSplit(
         AND current_admin_id = ?
         AND EXISTS (
           SELECT 1 FROM payroll_payment_attempts a
-          JOIN admin_task_claims c
-            ON c.task_type = 'payroll'
-           AND c.task_id = payroll_disbursements.payroll_id
-           AND c.store_id = payroll_disbursements.store_id
           WHERE a.attempt_id = ?
             AND a.payroll_id = payroll_disbursements.payroll_id
             AND a.status = 'draft'
-            AND c.claimed_by = ? AND c.lease_expires_at > ?
         )
     `).bind(
       context.attempt_id,
@@ -690,9 +677,7 @@ export async function saveAttemptSplit(
       context.payroll_id,
       context.attempt_id,
       String(adminId),
-      context.attempt_id,
-      String(adminId),
-      nowIso
+      context.attempt_id
     ),
     env.DB.prepare(`
       INSERT INTO admin_audit_logs (
@@ -716,9 +701,33 @@ export async function saveAttemptSplit(
       nowIso
     )
   ]);
-  if (Number(results[0] && results[0].meta.changes) !== 1
-    || Number(results[1] && results[1].meta.changes) !== 1) {
-    throw new Error('task_claim_required');
+  const stored = await env.DB.prepare(`
+    SELECT
+      a.status AS attempt_status,
+      a.bank_micros AS attempt_bank_micros,
+      a.usdt_micros AS attempt_usdt_micros,
+      a.cash_micros AS attempt_cash_micros,
+      d.status AS payroll_status,
+      d.current_payment_attempt_id,
+      d.current_admin_id,
+      d.bank_micros AS payroll_bank_micros,
+      d.usdt_micros AS payroll_usdt_micros,
+      d.cash_micros AS payroll_cash_micros
+    FROM payroll_payment_attempts a
+    JOIN payroll_disbursements d ON d.payroll_id = a.payroll_id
+    WHERE a.attempt_id = ? AND a.payroll_id = ?
+  `).bind(context.attempt_id, context.payroll_id).first();
+  const splitMatches = stored && ['bank', 'usdt', 'cash'].every((method) => (
+    Number(stored[`attempt_${method}_micros`])
+      === Number(stored[`payroll_${method}_micros`])
+  ));
+  if (!stored
+    || stored.attempt_status !== 'draft'
+    || stored.payroll_status !== 'awaiting_admin_payment'
+    || String(stored.current_payment_attempt_id || '') !== String(context.attempt_id)
+    || String(stored.current_admin_id || '') !== String(adminId)
+    || !splitMatches) {
+    throw new Error('payment attempt owner conflict');
   }
   return env.DB.prepare(`
     SELECT * FROM payroll_payment_attempts WHERE attempt_id = ?
@@ -767,7 +776,6 @@ export async function submitPaymentAttempt(
     throw new Error('payment attempt owner conflict');
   }
   const checkedAt = new Date(now);
-  await requireActiveTaskClaim(env, adminId, taskFor(context), checkedAt);
   validatePaymentSplit(context, context);
 
   const proofRows = await env.DB.prepare(`
@@ -797,15 +805,10 @@ export async function submitPaymentAttempt(
       WHERE attempt_id = ? AND payroll_id = ? AND status = 'draft'
         AND EXISTS (
           SELECT 1 FROM payroll_disbursements d
-          JOIN admin_task_claims c
-            ON c.task_type = 'payroll'
-           AND c.task_id = d.payroll_id
-           AND c.store_id = d.store_id
           WHERE d.payroll_id = payroll_payment_attempts.payroll_id
             AND d.current_payment_attempt_id = payroll_payment_attempts.attempt_id
             AND d.status = 'awaiting_admin_payment'
             AND d.current_admin_id = ?
-            AND c.claimed_by = ? AND c.lease_expires_at > ?
             AND payroll_payment_attempts.bank_micros
               + payroll_payment_attempts.usdt_micros
               + payroll_payment_attempts.cash_micros
@@ -850,8 +853,7 @@ export async function submitPaymentAttempt(
     `).bind(
       String(adminId), nowIso, hash, nowIso,
       context.attempt_id, context.payroll_id,
-      String(adminId),
-      String(adminId), nowIso
+      String(adminId)
     ),
     env.DB.prepare(`
       UPDATE payroll_disbursements
